@@ -1,0 +1,941 @@
+Create a high-fidelity desktop web dashboard UI in Figma.
+
+Do NOT create a mobile app.
+Do NOT create phone screens.
+Do NOT create iPhone frames.
+Do NOT create mobile-first layouts.
+Do NOT show bottom navigation.
+Do NOT create a narrow single-column mobile app.
+Do NOT create a tablet mockup.
+Do NOT design this as a phone UI.
+
+This must be a desktop-first SaaS web dashboard designed for a 1440px-wide browser window.
+
+Product name:
+NAP Clinic Automation Dashboard
+
+Platform:
+Desktop web application for healthcare clinics using a Juvonno-connected AI receptionist.
+
+Primary layout:
+
+* Full-width web dashboard
+* 1440px desktop frame
+* Fixed left sidebar navigation, approximately 260px wide
+* Top navigation/header bar
+* Main content area
+* KPI cards in a 4-column grid
+* Charts in 2-column desktop layout
+* Data-heavy tables with multiple columns
+* Slide-over panels for call details
+* Settings pages with tabs or left-side settings menu
+* No mobile bottom tabs
+* No phone mockup
+* No narrow app-style layout
+
+Design style:
+
+* Modern B2B SaaS web dashboard
+* Premium healthcare operations platform
+* Clean white/light background
+* Soft blue, teal, green, and neutral accents
+* Rounded cards
+* Subtle shadows
+* Clear typography
+* Professional and clinic-friendly
+* Desktop-first spacing
+* Data-heavy but clean
+* Similar quality to Retell AI, Stripe Dashboard, HubSpot, Weave, NexHealth, Jane App, or a modern healthcare CRM dashboard
+
+Use realistic sample clinic:
+Recoup Health
+
+Use sample services:
+
+* Chiropractic
+* Physiotherapy
+* Massage Therapy
+* Pelvic Physiotherapy
+* Stretch Therapy
+
+Use sample providers:
+
+* Dr. Jasjit Khaira
+* Sharisse Dukhu
+* Ariel Zohar
+* Priya Kaushal
+* Kulwinder Chohan
+* Sabreen Sanghera
+
+Important product logic:
+
+* Booking, patient lookup, and availability checking are fully automated through Juvonno.
+* Cancellation and rescheduling are request-based and require staff notification.
+* Clinics can edit safe settings such as FAQs, clinic hours, greetings, SMS templates, transfer numbers, and notification recipients.
+* NAP admins control Juvonno API credentials, provider mappings, service mappings, Retell agent settings, booking logic, and webhooks.
+* This is not a conversation builder.
+* This is an AI receptionist control center, call analytics dashboard, and clinic operations portal.
+
+Global layout:
+
+Left sidebar navigation:
+
+1. Overview
+2. AI Receptionist
+3. Call Logs
+4. Transcripts
+5. Recordings
+6. Analytics
+7. Trends
+8. Staff Action Queue
+9. Sentiment Insights
+10. Settings
+11. Billing & Usage
+12. Integration Health
+
+Top navigation bar:
+
+* Clinic selector dropdown
+* Date range selector
+* Global search bar
+* Notifications icon
+* Help icon
+* User profile menu
+* Clinic status badge: Active
+
+Create the following desktop web dashboard screens as separate Figma frames.
+
+Frame 1: Overview Dashboard
+
+Create a desktop dashboard overview page.
+
+Layout:
+
+* Left sidebar
+* Top navigation bar
+* Main content area
+* 4-column KPI card grid
+* 2-column chart section
+* Recent calls table
+* Staff action panel on the right
+* AI receptionist health card
+
+KPI cards:
+
+* Total Calls Handled
+* Bookings Created
+* Missed Calls Recovered
+* Transfers to Staff
+* Appointment Lookups
+* Availability Checks
+* Cancellation Requests
+* Reschedule Requests
+* Average Sentiment Score
+* Estimated Revenue Booked
+* Estimated Admin Hours Saved
+* AI Success Rate
+
+Charts:
+
+* Calls over time line chart
+* Bookings by day bar chart
+* Call outcomes donut chart
+* Sentiment breakdown chart
+
+Call outcome categories:
+
+* Booked
+* Transferred
+* FAQ answered
+* Staff action needed
+* Failed
+
+Sentiment categories:
+
+* Positive
+* Neutral
+* Negative
+* Frustrated
+* Urgent
+
+AI receptionist health card:
+
+* Agent status: Active
+* Last call handled
+* Last successful booking
+* Function success rate
+* Active phone number
+* Connected clinic: Recoup Health
+
+Frame 2: AI Receptionist
+
+Create a dedicated AI Receptionist control screen.
+
+This should feel like the main product screen of the dashboard.
+
+Layout:
+
+* Agent profile card on the left
+* Performance metrics on the right
+* Capabilities grid below
+* Conversation flow preview
+* Test scenario panel
+* Live activity feed
+
+Agent profile card:
+
+* Agent name: Grace
+* Status: Active
+* Assigned clinic: Recoup Health
+* Connected phone number
+* Voice selected
+* Language: English
+* Current mode: Live
+* Last updated
+* Buttons:
+
+  * Test Agent
+  * View Call Logs
+  * Pause Agent
+  * Request Change
+
+Performance cards:
+
+* Calls answered today
+* Bookings created today
+* Average call duration
+* Transfer rate
+* Failed call rate
+* Average sentiment
+* Revenue booked today
+* Staff tasks created
+
+Capabilities grid:
+
+* Answer inbound calls: Active
+* Book appointments: Active
+* Check availability: Active
+* Lookup appointments: Active
+* New patient intake: Active
+* Existing patient recognition: Active
+* Cancellation request intake: Staff notification required
+* Reschedule request intake: Staff notification required
+* FAQ answering: Active
+* Text follow-ups: Active
+* Human transfer: Active
+* Urgent escalation: Active
+* Payment reminders: Coming soon
+* Intake form reminders: Coming soon
+* Review requests: Coming soon
+
+Conversation flow preview:
+Create a non-editable visual flow diagram with connected cards:
+
+1. Greeting
+2. Identify caller intent
+3. Collect patient details
+4. Verify patient
+5. Choose action
+6. Run Juvonno function
+7. Confirm result
+8. Send SMS if needed
+9. Log call
+
+Add a note:
+“Advanced booking logic, Juvonno mappings, and function settings are managed by NAP admins to protect clinic workflow accuracy.”
+
+Test scenario panel:
+Create scenario cards for:
+
+* New patient booking
+* Existing patient booking
+* Check availability
+* Appointment lookup
+* Cancellation request
+* Reschedule request
+* FAQ question
+* Transfer request
+
+Each scenario card should show:
+
+* Scenario name
+* Expected behavior
+* Last test result
+* Button: Run Test
+
+Live activity feed examples:
+
+* Booked chiropractic appointment for Aaryan Anjan
+* Checked availability for massage therapy
+* Sent reschedule request to staff
+* Transferred billing question to front desk
+* Logged negative sentiment call for review
+
+Frame 3: Call Logs
+
+Create a desktop table-heavy call logs page.
+
+Layout:
+
+* Sidebar
+* Top navigation
+* Filter bar
+* Large data table
+* Right-side quick insight panel
+
+Table columns:
+
+* Date/time
+* Caller name
+* Phone number
+* Call type
+* Service requested
+* Provider requested
+* Outcome
+* Sentiment
+* Duration
+* Staff action needed
+* Recording
+* Transcript
+
+Filters:
+
+* Date range
+* Call outcome
+* Sentiment
+* Service
+* Provider
+* Staff action needed
+* Failed calls only
+* Negative sentiment only
+* New vs existing patient
+
+Sentiment badge styles:
+
+* Positive: green badge
+* Neutral: gray badge
+* Negative: orange badge
+* Frustrated: red badge
+* Urgent: dark red badge
+
+Call outcome badges:
+
+* Booked
+* Transferred
+* FAQ answered
+* Staff action needed
+* Failed
+
+Frame 4: Call Detail View
+
+Create a desktop call detail page or desktop slide-over panel.
+
+Do not make this a phone screen.
+
+Include:
+
+* Call summary card
+* Patient name
+* Phone number
+* Call date/time
+* Call duration
+* Call outcome
+* Call recording player
+* Full transcript
+* AI-generated summary
+* Intent detected
+* Patient sentiment
+* Sentiment reason
+* Emotion tags
+* Function calls used
+* Appointment details
+* Staff action needed
+* Internal notes section
+* Action buttons
+
+Emotion tags:
+
+* Calm
+* Confused
+* Frustrated
+* Angry
+* Happy
+* Urgent
+
+Function calls used:
+
+* Lookup patient
+* Check availability
+* Book appointment
+* Send notification
+* Transfer call
+
+Appointment details:
+
+* Service
+* Provider
+* Date/time
+* Branch/location
+
+Buttons:
+
+* Mark as reviewed
+* Create staff task
+* Flag issue
+* Send follow-up text
+
+Frame 5: Transcripts
+
+Create a desktop transcript library.
+
+Layout:
+
+* Search bar
+* Filter row
+* Transcript table/list on left
+* Transcript preview panel on right
+
+Features:
+
+* Search by patient name, phone number, keyword, service, outcome, or sentiment
+* Speaker-separated transcript view
+* AI summary
+* Sensitive information masking toggle
+* Sentiment highlights inside transcript
+* Tags for call intent
+* Download/export button
+* Filter for calls that need review
+
+Frame 6: Recordings
+
+Create a desktop call recordings page.
+
+Layout:
+
+* Recording table
+* Audio player panel
+* Filter bar
+* Recording detail card
+
+Features:
+
+* Audio player
+* Recording table
+* Filter by date, caller, outcome, sentiment, and service
+* Recording duration
+* Download button
+* Delete button for admin users
+* Consent status
+* Retention status
+* Access permission indicator
+* Recording search
+* Flag recording for review
+
+Frame 7: Analytics
+
+Create a desktop analytics dashboard.
+
+Metrics to show:
+
+* Calls by day
+* Calls by hour
+* Bookings by day
+* Top requested services
+* Top requested providers
+* New vs existing patient calls
+* Transfer reasons
+* Failed booking reasons
+* Average call duration
+* Average sentiment score
+* Revenue estimate from AI bookings
+* Admin time saved estimate
+* Staff action volume
+* AI function success rate
+
+Charts:
+
+* Calls over time line chart
+* Sentiment score over time line chart
+* Top services requested bar chart
+* Transfer reasons bar chart
+* Call outcomes donut chart
+* Calls by day/hour heatmap
+* Failed booking reasons table
+* AI success rate over time chart
+
+Frame 8: Trends
+
+Create a desktop insights page that turns dashboard data into plain-English business insights.
+
+Use insight cards with icons and short explanations.
+
+Insight cards:
+
+* Peak call times
+* Most requested service
+* Most requested provider
+* Most common transfer reason
+* Top failed booking reason
+* Sentiment trend this week
+* Negative sentiment themes
+* Missed revenue opportunities
+* After-hours call demand
+* Common patient questions
+* Staff workload trend
+
+Example insight text:
+“Most calls this week happened between 10 AM and 1 PM.”
+“Massage therapy requests increased 18% compared to last week.”
+“Negative sentiment was mostly linked to billing questions and reschedule requests.”
+“12 patients asked for Saturday availability but no matching times were available.”
+“AI handled 73% of calls without staff intervention.”
+
+Frame 9: Staff Action Queue
+
+Create a desktop task management page.
+
+Layout:
+
+* Kanban/table toggle
+* Filter bar
+* Task board columns
+* Assignment dropdowns
+* Priority badges
+* Status badges
+
+Task types:
+
+* Cancellation request
+* Reschedule request
+* Failed booking
+* Patient callback request
+* Billing question
+* Complaint
+* Transfer failed
+* Urgent issue
+* Duplicate patient match
+* API error
+* Negative sentiment review
+
+Task card fields:
+
+* Patient name
+* Phone number
+* Request type
+* Related call
+* AI summary
+* Sentiment
+* Priority
+* Due time
+* Assigned staff member
+* Status
+
+Status options:
+
+* New
+* In progress
+* Completed
+* Dismissed
+
+Priority rules:
+
+* Urgent medical concern: High
+* Angry/frustrated patient: High
+* Failed booking: Medium
+* Cancellation request: Medium
+* Reschedule request: Medium
+* General callback: Low
+
+Frame 10: Sentiment Insights
+
+Create a desktop sentiment analytics page.
+
+Top cards:
+
+* Average Sentiment Score
+* Positive Calls
+* Neutral Calls
+* Negative Calls
+* Frustrated/Urgent Calls
+* Sentiment Change vs Last Week
+
+Charts:
+
+* Sentiment over time
+* Sentiment by service
+* Sentiment by call type
+* Sentiment by outcome
+* Negative sentiment reasons
+* Staff escalation by sentiment
+
+Create a table called “Calls Needing Review.”
+
+Table columns:
+
+* Date/time
+* Patient
+* Phone
+* Sentiment
+* Reason
+* Outcome
+* Recording
+* Transcript
+* Staff action
+
+Sentiment labels:
+
+* Positive
+* Neutral
+* Negative
+* Frustrated
+* Urgent
+
+Sentiment reasons:
+
+* Could not find availability
+* Billing concern
+* Wanted human staff
+* Appointment confusion
+* Policy issue
+* Long call duration
+* Failed booking
+* Complaint
+* Medical concern
+* Transfer failed
+
+Frame 11: Settings
+
+Create a desktop settings page.
+
+Do not make this look like a mobile settings screen.
+
+Layout:
+
+* Sidebar
+* Top navigation
+* Settings tab menu or left settings sub-navigation
+* Main settings form area
+* Save changes button
+* Request change button for locked technical settings
+
+Settings sections:
+
+1. Clinic Profile
+2. Clinic Hours
+3. Services
+4. Practitioners
+5. Booking Rules
+6. Transfer & Escalation
+7. Cancellation/Reschedule Requests
+8. FAQs / Knowledge Base
+9. SMS Follow-Ups
+10. Voice & AI Personality
+11. Notifications
+12. Privacy & Compliance
+13. User Roles
+14. Juvonno Integration
+15. Billing Settings
+
+Clinic Profile:
+
+* Clinic name
+* Phone number
+* SMS number
+* Email
+* Website
+* Address
+* Timezone
+* Main contact person
+* Emergency/admin contact
+
+Clinic Hours:
+
+* Hours by day
+* Closed days
+* Lunch breaks
+* Holiday closures
+* Special hours
+* After-hours behavior
+
+Services:
+
+* Service name
+* Public display name
+* Appointment durations
+* New patient duration
+* Existing patient duration
+* Available days
+* Eligible providers
+* Requires deposit
+* Requires intake form
+* Can be booked by AI
+* Can check availability
+
+Practitioners:
+
+* Provider name
+* Role
+* Services offered
+* Public-facing name
+* Booking priority
+* Provider availability status
+* View-only Juvonno mapping section for clinic users
+
+Booking Rules:
+
+* Allow new patient bookings
+* Allow existing patient bookings
+* Require DOB
+* Require phone verification
+* Require SMS OTP
+* Allow same-day bookings
+* Minimum booking notice
+* Maximum booking window
+* Allow provider preference
+* If no availability, offer next 3 slots
+* If API fails, transfer or take message
+
+Transfer & Escalation:
+
+* Main transfer number
+* Backup transfer number
+* Transfer hours
+* Transfer for billing questions
+* Transfer for medical concerns
+* Transfer for angry/frustrated patients
+* Transfer if AI fails twice
+* Transfer if practitioner requested
+* Transfer failure behavior
+
+Cancellation/Reschedule Requests:
+
+* Allow cancellation requests
+* Allow reschedule requests
+* Require reason
+* Check availability before reschedule request
+* Staff notification method
+* Urgent cancellation window
+* Late cancellation policy message
+* Patient-facing confirmation message
+
+FAQs / Knowledge Base:
+
+* Clinic description
+* Services offered
+* Parking information
+* Insurance information
+* Pricing information
+* First visit instructions
+* What to bring
+* Cancellation policy
+* Accepted payments
+* Accessibility info
+* Languages spoken
+* Custom FAQ editor
+
+SMS Follow-Ups:
+
+* SMS enabled
+* Missed call text
+* Booking confirmation text
+* Cancellation request text
+* Reschedule request text
+* Staff action needed text
+* Payment reminder text placeholder
+* Intake reminder text placeholder
+* Review request text placeholder
+* Reply handling
+* Opt-out message
+
+Voice & AI Personality:
+
+* Voice
+* Speaking style
+* Greeting
+* Language
+* Conversation speed
+* Patient name usage
+* End-call message
+* After-hours greeting
+* Recording consent message
+
+Notifications:
+
+* New booking created
+* Cancellation request
+* Reschedule request
+* Booking failure
+* API failure
+* Negative sentiment call
+* Complaint
+* Voicemail/message left
+* Missed transfer
+* Daily summary
+* Weekly report
+
+Privacy & Compliance:
+
+* Recording enabled
+* Recording retention
+* Transcript retention
+* Sensitive information masking
+* Download permissions
+* Audit logs
+* User access logs
+* Consent script
+* Medical advice guardrail
+
+User Roles:
+
+* Owner
+* Manager
+* Front desk
+* Practitioner
+* Billing admin
+* NAP admin
+
+Role permissions:
+
+* View recordings
+* Download recordings
+* View transcripts
+* Edit FAQs
+* Edit SMS templates
+* Edit clinic hours
+* View billing analytics
+* Manage users
+* Manage integration settings
+
+Juvonno Integration:
+Show integration health only to clinic users:
+
+* Juvonno connected
+* Last sync
+* Booking API status
+* Lookup API status
+* Availability API status
+* Errors today
+
+For NAP admin view, show technical fields:
+
+* API key
+* API base URL
+* Branch code
+* Clinic/company ID
+* Provider mappings
+* Service mappings
+* Appointment type IDs
+* Webhook paths
+* Retell agent ID
+* Twilio number
+* Sandbox/live mode
+* Error handling rules
+
+Billing Settings:
+
+* Plan type
+* Monthly included minutes
+* Minutes used
+* Overage rate
+* Overage estimate
+* SMS sent
+* Calls handled
+* Estimated revenue booked
+* Estimated admin hours saved
+* Billing cycle date
+
+Frame 12: Billing & Usage
+
+Create a desktop billing usage dashboard.
+
+Cards:
+
+* Current plan
+* Minutes used
+* Included minutes
+* Overage estimate
+* SMS sent
+* Calls handled
+* Estimated invoice
+* Estimated value generated
+* Revenue booked by AI
+* Admin hours saved
+
+Charts:
+
+* Usage over time
+* Calls by billing cycle
+* SMS usage
+* Revenue booked estimate
+* Overage trend
+
+Frame 13: Integration Health
+
+Create a desktop admin system health page.
+
+Show status cards:
+
+* Retell connection status
+* Juvonno API status
+* Twilio SMS status
+* Booking function health
+* Lookup function health
+* Check availability function health
+* Webhook status
+* Last successful booking
+* Last failed API call
+* Error logs
+* Function success rate
+* Recent incidents
+
+Create a technical error log table with:
+
+* Timestamp
+* Function
+* Clinic
+* Error type
+* Status
+* Retry status
+* Notes
+* Action needed
+
+Reusable Figma components to create:
+
+* Sidebar navigation
+* Top navigation bar
+* KPI card
+* Chart card
+* Sentiment badge
+* Status badge
+* Call outcome badge
+* Data table
+* Filter bar
+* Search input
+* Dropdown
+* Toggle switch
+* Audio player card
+* Transcript card
+* Staff task card
+* Settings form field
+* Save button
+* Secondary button
+* Warning alert
+* Success alert
+* Empty state
+* Slide-over panel
+
+Visual requirements:
+
+* Make the dashboard look like a real SaaS product.
+* Make the AI Receptionist screen feel like the main product screen.
+* Make call logs and analytics feel data-rich.
+* Make failed calls, urgent calls, and negative sentiment calls easy to find.
+* Make staff action items visually prominent.
+* Use realistic healthcare clinic sample data.
+* Use desktop web app spacing, not mobile spacing.
+* Use 1440px desktop frames.
+* Use clear headings, readable tables, and proper dashboard hierarchy.
+* Keep the product premium, clean, and professional.
+
+Final instruction:
+The final Figma design must look like a desktop web SaaS dashboard shown in a browser window. It should not look like a phone app, tablet app, or mobile layout.
