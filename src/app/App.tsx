@@ -1351,12 +1351,14 @@ function RecordingsScreen() {
 
 // ── Screen: Settings ──────────────────────────────────────────────────────────
 interface Practitioner { id: string; name: string; services: string; }
+interface FAQ { id: string; question: string; answer: string; }
 
 function SettingsScreen() {
   const { tenantInfo, settings, saveSection } = useDashboard();
   const [activeSection, setActiveSection] = useState("Clinic Profile");
   const [saving, setSaving] = useState(false);
   const [practitioners, setPractitioners] = useState<Practitioner[]>([]);
+  const [faqs, setFaqs] = useState<FAQ[]>([]);
 
   const sections = [
     "Clinic Profile", "Clinic Hours", "Practitioners",
@@ -1368,10 +1370,11 @@ function SettingsScreen() {
   const sh = (settings.clinic_hours ?? {}) as Record<string, string>;
   const settingsKey = JSON.stringify(settings);
 
-  // Sync practitioners from saved settings when settings load
   useEffect(() => {
-    const saved = (settings.practitioners as { list?: Practitioner[] })?.list;
-    if (saved && saved.length > 0) setPractitioners(saved);
+    const savedP = (settings.practitioners as { list?: Practitioner[] })?.list;
+    if (savedP && savedP.length > 0) setPractitioners(savedP);
+    const savedF = (settings.faqs as { list?: FAQ[] })?.list;
+    if (savedF && savedF.length > 0) setFaqs(savedF);
   }, [settings]);
 
   async function handleSave(section: string, e: React.FormEvent<HTMLFormElement>) {
@@ -1402,6 +1405,12 @@ function SettingsScreen() {
 
   function updatePractitioner(id: string, field: keyof Practitioner, value: string) {
     setPractitioners(prev => prev.map(p => p.id === id ? { ...p, [field]: value } : p));
+  }
+
+  async function handleSaveFaqs() {
+    setSaving(true);
+    await saveSection('faqs', { list: faqs });
+    setSaving(false);
   }
 
   const SaveBtn = ({ label = "Save Changes" }: { label?: string }) => (
@@ -1568,20 +1577,183 @@ function SettingsScreen() {
           </div>
         )}
 
-        {!["Clinic Profile", "Clinic Hours", "Practitioners"].includes(activeSection) && (
-          <form onSubmit={e => handleSave(activeSection.toLowerCase().replace(/[^a-z0-9]+/g, '_'), e)} className="space-y-5">
+        {activeSection === "Booking Rules" && (() => {
+          const sb = (settings.booking_rules ?? {}) as Record<string, string>;
+          return (
+            <form key={settingsKey} onSubmit={e => handleSave('booking_rules', e)} className="space-y-5">
+              <div className="flex items-center justify-between">
+                <h2 className="text-base font-semibold text-foreground">Booking Rules</h2>
+                <SaveBtn />
+              </div>
+              <Card className="p-5 space-y-4">
+                <div className="grid grid-cols-2 gap-4">
+                  {([
+                    ["Default Appointment Duration", "default_duration", ["30 min", "15 min", "45 min", "60 min", "90 min"]],
+                    ["New Patient Duration", "new_patient_duration", ["60 min", "30 min", "45 min", "90 min"]],
+                    ["Minimum Advance Notice", "min_notice", ["None", "1 hour", "2 hours", "4 hours", "24 hours", "48 hours"]],
+                    ["Booking Window", "booking_window", ["1 month", "1 week", "2 weeks", "3 months", "6 months"]],
+                    ["Max Bookings per Day", "max_per_day", ["No limit", "5", "10", "15", "20", "25", "30"]],
+                    ["Appointment Spacing", "spacing", ["None", "5 min", "10 min", "15 min"]],
+                  ] as [string, string, string[]][]).map(([label, name, opts]) => (
+                    <div key={name} className="space-y-1.5">
+                      <label className="text-xs font-medium text-foreground">{label}</label>
+                      <select name={name} defaultValue={sb[name] ?? opts[0]} className="w-full bg-input-background border border-border rounded-md px-3 py-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring">
+                        {opts.map(o => <option key={o}>{o}</option>)}
+                      </select>
+                    </div>
+                  ))}
+                </div>
+                <div className="flex flex-col gap-3 pt-1">
+                  {[
+                    ["allow_same_day", "Allow same-day bookings"],
+                    ["require_reason", "Require a reason when booking"],
+                    ["new_patients_only_morning", "Accept new patients in morning slots only"],
+                  ].map(([name, label]) => (
+                    <label key={name} className="flex items-center gap-2.5 text-xs text-foreground cursor-pointer">
+                      <input type="checkbox" name={name} defaultChecked={sb[name] === 'true'} className="rounded" />
+                      {label}
+                    </label>
+                  ))}
+                </div>
+                <div className="space-y-1.5 pt-1">
+                  <label className="text-xs font-medium text-foreground">Additional Instructions for AI</label>
+                  <textarea name="additional_instructions" rows={3} defaultValue={sb.additional_instructions ?? ""} placeholder="e.g. Never book two new patients back-to-back. Always offer the earliest available slot first." className="w-full bg-input-background border border-border rounded-md px-3 py-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring resize-none" />
+                </div>
+              </Card>
+            </form>
+          );
+        })()}
+
+        {activeSection === "Transfer & Escalation" && (() => {
+          const st = (settings.transfer_escalation ?? {}) as Record<string, string>;
+          return (
+            <form key={settingsKey} onSubmit={e => handleSave('transfer_escalation', e)} className="space-y-5">
+              <div className="flex items-center justify-between">
+                <h2 className="text-base font-semibold text-foreground">Transfer & Escalation</h2>
+                <SaveBtn />
+              </div>
+              <Card className="p-5 space-y-4">
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-medium text-foreground">Transfer Phone Number</label>
+                    <input name="transfer_number" type="tel" defaultValue={st.transfer_number ?? ""} placeholder="+1 (604) 555-0100" className="w-full bg-input-background border border-border rounded-md px-3 py-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring" />
+                    <p className="text-[10px] text-muted-foreground">The number the AI transfers to when escalation is needed.</p>
+                  </div>
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-medium text-foreground">After-Hours Transfer Number</label>
+                    <input name="after_hours_number" type="tel" defaultValue={st.after_hours_number ?? ""} placeholder="+1 (604) 555-0199" className="w-full bg-input-background border border-border rounded-md px-3 py-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring" />
+                    <p className="text-[10px] text-muted-foreground">Optional — leave blank to use the same number.</p>
+                  </div>
+                </div>
+                <div className="space-y-1.5">
+                  <label className="text-xs font-medium text-foreground">Escalation Triggers</label>
+                  <textarea name="escalation_triggers" rows={3} defaultValue={st.escalation_triggers ?? ""} placeholder={"Caller asks to speak to a human\nCaller mentions an emergency or urgent situation\nCaller is upset or frustrated\nCaller has a complaint"} className="w-full bg-input-background border border-border rounded-md px-3 py-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring resize-none" />
+                  <p className="text-[10px] text-muted-foreground">One condition per line. The AI will transfer the call when any of these occur.</p>
+                </div>
+                <div className="space-y-1.5">
+                  <label className="text-xs font-medium text-foreground">Hold / Transfer Message</label>
+                  <textarea name="hold_message" rows={2} defaultValue={st.hold_message ?? ""} placeholder="Please hold while I transfer you to a member of our team." className="w-full bg-input-background border border-border rounded-md px-3 py-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring resize-none" />
+                </div>
+                <div className="flex flex-col gap-3 pt-1">
+                  {[
+                    ["transfer_on_human_request", "Always transfer when caller asks for a human"],
+                    ["transfer_on_no_availability", "Transfer if no appointment slots are available"],
+                  ].map(([name, label]) => (
+                    <label key={name} className="flex items-center gap-2.5 text-xs text-foreground cursor-pointer">
+                      <input type="checkbox" name={name} defaultChecked={st[name] === 'true'} className="rounded" />
+                      {label}
+                    </label>
+                  ))}
+                </div>
+              </Card>
+            </form>
+          );
+        })()}
+
+        {activeSection === "FAQs / Knowledge Base" && (
+          <div className="space-y-5">
             <div className="flex items-center justify-between">
-              <h2 className="text-base font-semibold text-foreground">{activeSection}</h2>
-              <SaveBtn />
+              <h2 className="text-base font-semibold text-foreground">FAQs / Knowledge Base</h2>
+              <div className="flex items-center gap-2">
+                <button type="button" onClick={() => setFaqs(prev => [...prev, { id: crypto.randomUUID(), question: "", answer: "" }])} className="flex items-center gap-1.5 bg-muted border border-border text-xs font-medium px-3 py-2 rounded-md hover:bg-accent transition-colors">
+                  <Plus size={12} /> Add FAQ
+                </button>
+                <button type="button" onClick={handleSaveFaqs} disabled={saving} className="bg-primary text-primary-foreground text-xs font-medium px-4 py-2 rounded-md hover:opacity-90 disabled:opacity-50">
+                  {saving ? "Saving…" : "Save Changes"}
+                </button>
+              </div>
             </div>
-            <Card className="p-8 flex flex-col items-center justify-center gap-3 text-center">
-              <Settings size={28} className="text-muted-foreground/30" />
-              <p className="text-sm font-medium text-foreground">{activeSection}</p>
-              <p className="text-xs text-muted-foreground max-w-xs">This settings section is ready to be configured. Click a field to begin editing your {activeSection.toLowerCase()} settings.</p>
-              <button type="submit" className="mt-2 bg-primary text-primary-foreground text-xs font-medium px-4 py-2 rounded-md hover:opacity-90">Configure {activeSection}</button>
-            </Card>
-          </form>
+            <p className="text-xs text-muted-foreground -mt-2">Add questions and answers the AI receptionist should know. It will use these to respond to callers.</p>
+            {faqs.length === 0 ? (
+              <Card className="p-10 flex flex-col items-center justify-center gap-3 text-center">
+                <HelpCircle size={28} className="text-muted-foreground/30" />
+                <p className="text-sm font-medium text-foreground">No FAQs added yet</p>
+                <p className="text-xs text-muted-foreground">Add common questions callers ask and the answers the AI should give.</p>
+                <button type="button" onClick={() => setFaqs([{ id: crypto.randomUUID(), question: "", answer: "" }])} className="mt-1 flex items-center gap-1.5 bg-primary text-primary-foreground text-xs font-medium px-4 py-2 rounded-md hover:opacity-90">
+                  <Plus size={12} /> Add FAQ
+                </button>
+              </Card>
+            ) : (
+              <div className="space-y-3">
+                {faqs.map((faq, i) => (
+                  <Card key={faq.id} className="p-4 space-y-3">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">FAQ #{i + 1}</span>
+                      <button type="button" onClick={() => setFaqs(prev => prev.filter(f => f.id !== faq.id))} className="text-muted-foreground hover:text-destructive transition-colors">
+                        <X size={13} />
+                      </button>
+                    </div>
+                    <div className="space-y-1.5">
+                      <label className="text-xs font-medium text-foreground">Question</label>
+                      <input value={faq.question} onChange={e => setFaqs(prev => prev.map(f => f.id === faq.id ? { ...f, question: e.target.value } : f))} placeholder="What are your clinic hours?" className="w-full bg-input-background border border-border rounded-md px-3 py-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring" />
+                    </div>
+                    <div className="space-y-1.5">
+                      <label className="text-xs font-medium text-foreground">Answer</label>
+                      <textarea value={faq.answer} onChange={e => setFaqs(prev => prev.map(f => f.id === faq.id ? { ...f, answer: e.target.value } : f))} rows={2} placeholder="We're open Monday to Friday, 8am to 6pm, and Saturday 8am to 2pm." className="w-full bg-input-background border border-border rounded-md px-3 py-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring resize-none" />
+                    </div>
+                  </Card>
+                ))}
+              </div>
+            )}
+          </div>
         )}
+
+        {activeSection === "SMS Follow-Ups" && (() => {
+          const ss = (settings.sms_follow_ups ?? {}) as Record<string, string>;
+          const templates = [
+            ["appointment_confirmed", "Appointment Confirmed", "Hi {patient_name}, your appointment at {clinic_name} is confirmed for {date} at {time}. Reply STOP to opt out."],
+            ["reminder_24hr", "Reminder — 24 Hours Before", "Hi {patient_name}, just a reminder of your appointment tomorrow at {time} with {clinic_name}. Reply STOP to opt out."],
+            ["reminder_2hr", "Reminder — 2 Hours Before", "Hi {patient_name}, your appointment is in 2 hours at {time}. See you soon! Reply STOP to opt out."],
+            ["cancelled", "Appointment Cancelled", "Hi {patient_name}, your appointment on {date} at {clinic_name} has been cancelled. Call us to rebook. Reply STOP to opt out."],
+            ["rescheduled", "Appointment Rescheduled", "Hi {patient_name}, your appointment has been rescheduled to {date} at {time}. Reply STOP to opt out."],
+            ["no_show", "No-Show Follow-Up", "Hi {patient_name}, we missed you today. Please call us to rebook your appointment at {clinic_name}. Reply STOP to opt out."],
+          ] as [string, string, string][];
+          return (
+            <form key={settingsKey} onSubmit={e => handleSave('sms_follow_ups', e)} className="space-y-5">
+              <div className="flex items-center justify-between">
+                <h2 className="text-base font-semibold text-foreground">SMS Follow-Ups</h2>
+                <SaveBtn />
+              </div>
+              <p className="text-xs text-muted-foreground -mt-2">Customize the SMS sent for each event. Use <span className="font-mono bg-muted px-1 rounded">{"{patient_name}"}</span>, <span className="font-mono bg-muted px-1 rounded">{"{date}"}</span>, <span className="font-mono bg-muted px-1 rounded">{"{time}"}</span>, <span className="font-mono bg-muted px-1 rounded">{"{clinic_name}"}</span> as placeholders.</p>
+              <div className="space-y-3">
+                {templates.map(([key, label, fallback]) => (
+                  <Card key={key} className="p-4 space-y-3">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2.5">
+                        <label className="flex items-center gap-2 cursor-pointer">
+                          <input type="checkbox" name={`${key}_enabled`} defaultChecked={ss[`${key}_enabled`] !== 'false'} className="rounded" />
+                          <span className="text-xs font-semibold text-foreground">{label}</span>
+                        </label>
+                      </div>
+                      <span className="text-[10px] text-muted-foreground">{(ss[`${key}_message`] ?? fallback).length} chars</span>
+                    </div>
+                    <textarea name={`${key}_message`} rows={2} defaultValue={ss[`${key}_message`] ?? fallback} className="w-full bg-input-background border border-border rounded-md px-3 py-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring resize-none" />
+                  </Card>
+                ))}
+              </div>
+            </form>
+          );
+        })()}
       </div>
     </div>
   );
