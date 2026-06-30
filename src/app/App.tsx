@@ -268,7 +268,7 @@ function TopBar() {
       </div>
       <div className="flex items-center gap-2 bg-muted border border-border rounded-md px-3 py-1.5 cursor-pointer hover:bg-accent transition-colors">
         <Calendar size={13} className="text-muted-foreground" />
-        <span className="text-sm text-foreground">Jun 22 – Jun 28</span>
+        <span className="text-sm text-foreground">Date range</span>
         <ChevronDown size={12} className="text-muted-foreground" />
       </div>
       <div className="flex-1 relative max-w-xs">
@@ -300,7 +300,7 @@ function OverviewScreen() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-lg font-semibold text-foreground">Overview</h1>
-          <p className="text-xs text-muted-foreground">Week of June 22 – 28, 2024 · Recoup Health</p>
+          <p className="text-xs text-muted-foreground">{tenantInfo?.clinic_name ?? "—"}</p>
         </div>
         <button className="flex items-center gap-2 bg-primary text-primary-foreground text-sm font-medium px-4 py-2 rounded-md hover:opacity-90 transition-opacity">
           <Download size={13} /> Export Report
@@ -309,18 +309,18 @@ function OverviewScreen() {
 
       {/* KPI Grid */}
       <div className="grid grid-cols-4 gap-4">
-        <KpiCard label="Total Calls Handled" value="317" sub="This week" icon={PhoneCall} trend="+12%" color="purple" />
-        <KpiCard label="Bookings Created" value="154" sub="Via AI" icon={CheckCircle2} trend="+8%" color="teal" />
-        <KpiCard label="Missed Calls Recovered" value="28" sub="Converted to bookings" icon={RefreshCw} trend="+5%" color="green" />
-        <KpiCard label="Transfers to Staff" value="48" sub="15% transfer rate" icon={ArrowUpRight} trend="-3%" color="amber" />
-        <KpiCard label="Appointment Lookups" value="89" sub="Existing patients" icon={Search} trend="+6%" color="indigo" />
-        <KpiCard label="Availability Checks" value="124" sub="Unique queries" icon={Calendar} trend="+14%" color="purple" />
-        <KpiCard label="Cancellation Requests" value="19" sub="Staff notified" icon={XCircle} trend="+2%" color="amber" />
-        <KpiCard label="Reschedule Requests" value="24" sub="Staff notified" icon={Clock} trend="+1%" color="amber" />
-        <KpiCard label="Avg Sentiment Score" value="4.2 / 5" sub="↑ From 3.9 last week" icon={Heart} trend="+0.3" color="green" />
-        <KpiCard label="Est. Revenue Booked" value="$18,480" sub="At avg $120/visit" icon={ArrowUpRight} trend="+10%" color="teal" />
-        <KpiCard label="Admin Hours Saved" value="43.5 hrs" sub="Est. @ 8 min/call" icon={Clock} trend="+12%" color="purple" />
-        <KpiCard label="AI Success Rate" value="96.2%" sub="Function success" icon={Zap} trend="+0.8%" color="green" />
+        <KpiCard label="Total Calls Handled" value="—" sub="This week" icon={PhoneCall} color="purple" />
+        <KpiCard label="Bookings Created" value="—" sub="Via AI" icon={CheckCircle2} color="teal" />
+        <KpiCard label="Missed Calls Recovered" value="—" sub="Converted to bookings" icon={RefreshCw} color="green" />
+        <KpiCard label="Transfers to Staff" value="—" sub="Transfer rate" icon={ArrowUpRight} color="amber" />
+        <KpiCard label="Appointment Lookups" value="—" sub="Existing patients" icon={Search} color="indigo" />
+        <KpiCard label="Availability Checks" value="—" sub="Unique queries" icon={Calendar} color="purple" />
+        <KpiCard label="Cancellation Requests" value="—" sub="Staff notified" icon={XCircle} color="amber" />
+        <KpiCard label="Reschedule Requests" value="—" sub="Staff notified" icon={Clock} color="amber" />
+        <KpiCard label="Avg Sentiment Score" value="—" sub="Out of 5" icon={Heart} color="green" />
+        <KpiCard label="Est. Revenue Booked" value="—" sub="At avg $120/visit" icon={ArrowUpRight} color="teal" />
+        <KpiCard label="Admin Hours Saved" value="—" sub="Est. @ 8 min/call" icon={Clock} color="purple" />
+        <KpiCard label="AI Success Rate" value="—" sub="Function success" icon={Zap} color="green" />
       </div>
 
       {/* Charts Row */}
@@ -460,11 +460,11 @@ function OverviewScreen() {
             {[
               ["Agent Name", "Grace"],
               ["Status", "Live"],
-              ["Last Call", "11:55 AM today"],
-              ["Last Booking", "11:07 AM today"],
-              ["Function Success", "96.2%"],
-              ["Phone Number", "+1 604-555-0100"],
-              ["Connected Clinic", "Recoup Health"],
+              ["Last Call", "—"],
+              ["Last Booking", "—"],
+              ["Function Success", "—"],
+              ["Phone Number", "—"],
+              ["Connected Clinic", tenantInfo?.clinic_name ?? "—"],
             ].map(([k, v]) => (
               <div key={k} className="flex items-center justify-between py-1.5 border-b border-border last:border-0">
                 <span className="text-muted-foreground">{k}</span>
@@ -484,6 +484,7 @@ function OverviewScreen() {
 
 // ── Screen: AI Receptionist ───────────────────────────────────────────────────
 function AIReceptionistScreen() {
+  const { tenantInfo } = useDashboard();
   const capabilities = [
     { name: "Answer inbound calls", status: "Active" },
     { name: "Book appointments", status: "Active" },
@@ -507,20 +508,14 @@ function AIReceptionistScreen() {
     "Choose Action", "Run Juvonno Fn", "Confirm Result", "Send SMS", "Log Call"
   ];
 
-  const activity = [
-    { text: "Booked chiropractic appointment for Aaryan Anjan", time: "2 min ago", icon: CheckCircle2, color: "text-emerald-600" },
-    { text: "Checked availability for massage therapy on Thursday", time: "14 min ago", icon: Calendar, color: "text-violet-600" },
-    { text: "Sent reschedule request to front desk — Priya Singh", time: "31 min ago", icon: Send, color: "text-amber-600" },
-    { text: "Transferred billing question to front desk", time: "47 min ago", icon: ArrowUpRight, color: "text-indigo-600" },
-    { text: "Logged negative sentiment call for review — James Okonkwo", time: "1h ago", icon: AlertCircle, color: "text-red-500" },
-  ];
+  const activity: { text: string; time: string; icon: any; color: string }[] = [];
 
   return (
     <div className="p-6 space-y-6">
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-lg font-semibold text-foreground">AI Receptionist — Grace</h1>
-          <p className="text-xs text-muted-foreground">Recoup Health · Live mode · Last updated Jun 28, 2024</p>
+          <p className="text-xs text-muted-foreground">{tenantInfo?.clinic_name ?? "—"} · Live mode</p>
         </div>
       </div>
 
@@ -538,12 +533,12 @@ function AIReceptionistScreen() {
           </div>
           <div className="space-y-2 text-xs">
             {[
-              ["Clinic", "Recoup Health"],
-              ["Phone", "+1 604-555-0100"],
+              ["Clinic", tenantInfo?.clinic_name ?? "—"],
+              ["Phone", "—"],
               ["Voice", "Alloy (Female)"],
               ["Language", "English"],
               ["Mode", "Live"],
-              ["Agent ID", "agent_jkx7r2"],
+              ["Agent ID", "—"],
             ].map(([k, v]) => (
               <div key={k} className="flex justify-between py-1.5 border-b border-border last:border-0">
                 <span className="text-muted-foreground">{k}</span>
@@ -562,14 +557,14 @@ function AIReceptionistScreen() {
         {/* Performance metrics */}
         <div className="col-span-2 grid grid-cols-4 gap-3">
           {[
-            { label: "Calls Today", value: "31", icon: PhoneCall, color: "purple" },
-            { label: "Bookings Today", value: "14", icon: CheckCircle2, color: "teal" },
-            { label: "Avg Duration", value: "3:12", icon: Clock, color: "indigo" },
-            { label: "Transfer Rate", value: "14%", icon: ArrowUpRight, color: "amber" },
-            { label: "Failed Call Rate", value: "2.1%", icon: XCircle, color: "red" },
-            { label: "Avg Sentiment", value: "4.3/5", icon: Heart, color: "green" },
-            { label: "Revenue Today", value: "$1,680", icon: ArrowUpRight, color: "teal" },
-            { label: "Tasks Created", value: "3", icon: ClipboardList, color: "amber" },
+            { label: "Calls Today", value: "—", icon: PhoneCall, color: "purple" },
+            { label: "Bookings Today", value: "—", icon: CheckCircle2, color: "teal" },
+            { label: "Avg Duration", value: "—", icon: Clock, color: "indigo" },
+            { label: "Transfer Rate", value: "—", icon: ArrowUpRight, color: "amber" },
+            { label: "Failed Call Rate", value: "—", icon: XCircle, color: "red" },
+            { label: "Avg Sentiment", value: "—", icon: Heart, color: "green" },
+            { label: "Revenue Today", value: "—", icon: ArrowUpRight, color: "teal" },
+            { label: "Tasks Created", value: "—", icon: ClipboardList, color: "amber" },
           ].map((m) => (
             <KpiCard key={m.label} label={m.label} value={m.value} icon={m.icon} color={m.color} />
           ))}
@@ -606,7 +601,7 @@ function AIReceptionistScreen() {
             <h3 className="text-sm font-semibold text-foreground">Live Activity</h3>
           </div>
           <div className="p-3 space-y-2.5">
-            {activity.map((a, i) => (
+            {activity.length > 0 ? activity.map((a, i) => (
               <div key={i} className="flex gap-2.5 p-2 rounded-md hover:bg-muted/50 transition-colors">
                 <a.icon size={13} className={`${a.color} flex-shrink-0 mt-0.5`} />
                 <div>
@@ -614,7 +609,9 @@ function AIReceptionistScreen() {
                   <p className="text-[10px] text-muted-foreground mt-0.5">{a.time}</p>
                 </div>
               </div>
-            ))}
+            )) : (
+              <p className="text-xs text-muted-foreground text-center py-4">No recent activity</p>
+            )}
           </div>
         </Card>
       </div>
@@ -900,10 +897,10 @@ function AnalyticsScreen() {
       <h1 className="text-lg font-semibold text-foreground">Analytics</h1>
 
       <div className="grid grid-cols-4 gap-4">
-        <KpiCard label="Total Calls" value="317" icon={PhoneCall} trend="+12%" color="purple" />
-        <KpiCard label="Avg Call Duration" value="3m 12s" icon={Clock} trend="-0:14" color="teal" />
-        <KpiCard label="AI Success Rate" value="96.2%" icon={Zap} trend="+0.8%" color="green" />
-        <KpiCard label="Revenue Estimate" value="$18,480" icon={ArrowUpRight} trend="+10%" color="amber" />
+        <KpiCard label="Total Calls" value="—" icon={PhoneCall} color="purple" />
+        <KpiCard label="Avg Call Duration" value="—" icon={Clock} color="teal" />
+        <KpiCard label="AI Success Rate" value="—" icon={Zap} color="green" />
+        <KpiCard label="Revenue Estimate" value="—" icon={ArrowUpRight} color="amber" />
       </div>
 
       <div className="grid grid-cols-2 gap-4">
@@ -1006,7 +1003,7 @@ function TrendsScreen() {
   const insights = [
     { icon: Clock, color: "violet", title: "Peak Call Times", body: "Most calls this week happened between 10 AM and 1 PM, with a secondary peak at 3–4 PM." },
     { icon: Star, color: "teal", title: "Most Requested Service", body: "Chiropractic leads with 87 requests (+11% vs last week). Massage therapy close behind at 61." },
-    { icon: User, color: "indigo", title: "Most Requested Provider", body: "Dr. Jasjit Khaira is the most requested provider, accounting for 34% of all provider-specific calls." },
+    { icon: User, color: "indigo", title: "Most Requested Provider", body: "Your top provider is handling the highest share of provider-specific calls this week." },
     { icon: ArrowUpRight, color: "amber", title: "Common Transfer Reason", body: "Billing questions account for 48% of all staff transfers this week. Consider adding an FAQ entry." },
     { icon: XCircle, color: "red", title: "Top Failed Booking Reason", body: "5 of 12 failures were Juvonno API timeouts. Engineering has been notified for investigation." },
     { icon: Heart, color: "green", title: "Sentiment Trend", body: "Overall sentiment improved from 3.9 to 4.2 this week. Positive calls up 8%, frustrated calls down 3." },
@@ -1021,7 +1018,7 @@ function TrendsScreen() {
     <div className="p-6 space-y-6">
       <div>
         <h1 className="text-lg font-semibold text-foreground">Trends & Insights</h1>
-        <p className="text-xs text-muted-foreground mt-0.5">AI-generated insights from this week's call data · Recoup Health</p>
+        <p className="text-xs text-muted-foreground mt-0.5">AI-generated insights from this week's call data</p>
       </div>
 
       <div className="grid grid-cols-3 gap-4">
@@ -1348,6 +1345,7 @@ function RecordingsScreen() {
 
 // ── Screen: Settings ──────────────────────────────────────────────────────────
 function SettingsScreen() {
+  const { tenantInfo } = useDashboard();
   const [activeSection, setActiveSection] = useState("Clinic Profile");
   const sections = [
     "Clinic Profile", "Clinic Hours", "Services", "Practitioners",
@@ -1390,12 +1388,12 @@ function SettingsScreen() {
             <Card className="p-5">
               <div className="grid grid-cols-2 gap-4">
                 {[
-                  ["Clinic Name", "Recoup Health", "text"],
-                  ["Phone Number", "+1 604-555-0100", "tel"],
-                  ["SMS Number", "+1 604-555-0101", "tel"],
-                  ["Email", "info@recouphealth.ca", "email"],
-                  ["Website", "https://recouphealth.ca", "url"],
-                  ["Main Contact", "Sabreen Sanghera", "text"],
+                  ["Clinic Name", tenantInfo?.clinic_name ?? "", "text"],
+                  ["Phone Number", "", "tel"],
+                  ["SMS Number", "", "tel"],
+                  ["Email", "", "email"],
+                  ["Website", "", "url"],
+                  ["Main Contact", tenantInfo?.receptionist_name ?? "", "text"],
                 ].map(([label, val, type]) => (
                   <div key={label as string} className="space-y-1.5">
                     <label className="text-xs font-medium text-foreground">{label}</label>
@@ -1411,7 +1409,7 @@ function SettingsScreen() {
                 </div>
                 <div className="col-span-2 space-y-1.5">
                   <label className="text-xs font-medium text-foreground">Address</label>
-                  <input defaultValue="3456 Oak Street, Vancouver, BC V6H 2L4" className="w-full bg-input-background border border-border rounded-md px-3 py-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring" />
+                  <input defaultValue="" className="w-full bg-input-background border border-border rounded-md px-3 py-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring" />
                 </div>
               </div>
             </Card>
@@ -1473,12 +1471,12 @@ function SettingsScreen() {
                 </div>
                 <div className="grid grid-cols-2 gap-3">
                   {[
-                    ["API Key", "••••••••••••jkx7"],
-                    ["API Base URL", "https://api.juvonno.com/v2"],
-                    ["Branch Code", "RH-001"],
-                    ["Clinic/Company ID", "clinic_8472"],
-                    ["Retell Agent ID", "agent_jkx7r2"],
-                    ["Twilio Number", "+1 604-555-0100"],
+                    ["API Key", "—"],
+                    ["API Base URL", "—"],
+                    ["Branch Code", "—"],
+                    ["Clinic/Company ID", tenantInfo?.clinic_id ?? "—"],
+                    ["Retell Agent ID", "—"],
+                    ["Twilio Number", "—"],
                   ].map(([k, v]) => (
                     <div key={k} className="space-y-1.5">
                       <label className="text-xs font-medium text-muted-foreground flex items-center gap-1"><Lock size={10} /> {k}</label>
@@ -1533,11 +1531,11 @@ function SettingsScreen() {
               </div>
               <div className="space-y-1.5">
                 <label className="text-xs font-medium text-foreground">Greeting Message</label>
-                <textarea rows={2} defaultValue="Thank you for calling Recoup Health. This is Grace. How can I help you today?" className="w-full bg-input-background border border-border rounded-md px-3 py-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring resize-none" />
+                <textarea rows={2} defaultValue={`Thank you for calling ${tenantInfo?.clinic_name ?? "our clinic"}. This is Grace. How can I help you today?`} className="w-full bg-input-background border border-border rounded-md px-3 py-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring resize-none" />
               </div>
               <div className="space-y-1.5">
                 <label className="text-xs font-medium text-foreground">After-Hours Greeting</label>
-                <textarea rows={2} defaultValue="Thank you for calling Recoup Health. Our clinic is currently closed. Our hours are Monday to Friday 8 AM to 6 PM. Please call back during business hours or leave a message." className="w-full bg-input-background border border-border rounded-md px-3 py-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring resize-none" />
+                <textarea rows={2} defaultValue={`Thank you for calling ${tenantInfo?.clinic_name ?? "our clinic"}. Our clinic is currently closed. Please call back during business hours or leave a message.`} className="w-full bg-input-background border border-border rounded-md px-3 py-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring resize-none" />
               </div>
               <div className="space-y-1.5">
                 <label className="text-xs font-medium text-foreground">Recording Consent Message</label>
@@ -1589,13 +1587,13 @@ function BillingScreen() {
 
       <div className="grid grid-cols-4 gap-4">
         <KpiCard label="Current Plan" value="Growth" sub="$299/mo · Renews Jul 1" icon={Star} color="purple" />
-        <KpiCard label="Minutes Used" value="965" sub="of 1,000 included" icon={Clock} color="amber" />
-        <KpiCard label="Calls Handled" value="317" sub="This cycle" icon={PhoneCall} color="teal" />
-        <KpiCard label="Est. Overage" value="$0" sub="Within plan limits" icon={CreditCard} color="green" />
-        <KpiCard label="SMS Sent" value="284" sub="Confirmations + follow-ups" icon={MessageSquare} color="indigo" />
-        <KpiCard label="Estimated Invoice" value="$299.00" sub="Due July 1, 2024" icon={CreditCard} color="purple" />
-        <KpiCard label="Revenue Booked by AI" value="$18,480" sub="Est. at $120 avg visit" icon={ArrowUpRight} color="green" />
-        <KpiCard label="Admin Hours Saved" value="43.5 hrs" sub="Est. at 8 min/call" icon={Clock} color="teal" />
+        <KpiCard label="Minutes Used" value="—" sub="of plan included" icon={Clock} color="amber" />
+        <KpiCard label="Calls Handled" value="—" sub="This cycle" icon={PhoneCall} color="teal" />
+        <KpiCard label="Est. Overage" value="—" sub="vs plan limits" icon={CreditCard} color="green" />
+        <KpiCard label="SMS Sent" value="—" sub="Confirmations + follow-ups" icon={MessageSquare} color="indigo" />
+        <KpiCard label="Estimated Invoice" value="—" sub="Current cycle" icon={CreditCard} color="purple" />
+        <KpiCard label="Revenue Booked by AI" value="—" sub="Est. at $120 avg visit" icon={ArrowUpRight} color="green" />
+        <KpiCard label="Admin Hours Saved" value="—" sub="Est. at 8 min/call" icon={Clock} color="teal" />
       </div>
 
       <div className="grid grid-cols-2 gap-4">
@@ -1659,13 +1657,13 @@ function BillingScreen() {
 // ── Screen: Integration Health ─────────────────────────────────────────────────
 function IntegrationScreen() {
   const services = [
-    { name: "Retell AI", status: "Connected", icon: Bot, detail: "Agent active · Last call 11:55 AM" },
-    { name: "Juvonno API", status: "Connected", icon: Database, detail: "All functions operational · Last sync 2 min ago" },
-    { name: "Twilio SMS", status: "Connected", icon: MessageSquare, detail: "284 SMS sent this cycle" },
-    { name: "Booking Function", status: "Connected", icon: CheckCircle2, detail: "154 successful bookings this week" },
-    { name: "Lookup Function", status: "Connected", icon: Search, detail: "89 lookups · 100% success rate" },
-    { name: "Availability Function", status: "Connected", icon: Calendar, detail: "124 checks · 1 rate limit error (resolved)" },
-    { name: "Webhook Handler", status: "Connected", icon: Server, detail: "All webhooks acknowledged" },
+    { name: "Retell AI", status: "Connected", icon: Bot, detail: "Agent active" },
+    { name: "Juvonno API", status: "Connected", icon: Database, detail: "All functions operational" },
+    { name: "Twilio SMS", status: "Connected", icon: MessageSquare, detail: "SMS delivery active" },
+    { name: "Booking Function", status: "Connected", icon: CheckCircle2, detail: "Booking function active" },
+    { name: "Lookup Function", status: "Connected", icon: Search, detail: "Lookup function active" },
+    { name: "Availability Function", status: "Connected", icon: Calendar, detail: "Availability function active" },
+    { name: "Webhook Handler", status: "Connected", icon: Server, detail: "Webhooks active" },
   ];
 
   return (
@@ -1673,10 +1671,10 @@ function IntegrationScreen() {
       <h1 className="text-lg font-semibold text-foreground">Integration Health</h1>
 
       <div className="grid grid-cols-4 gap-4">
-        <KpiCard label="Overall Health" value="98.7%" icon={Activity} color="green" />
-        <KpiCard label="Function Success Rate" value="96.2%" icon={Zap} color="teal" />
-        <KpiCard label="Errors Today" value="1" sub="1 resolved" icon={AlertCircle} color="amber" />
-        <KpiCard label="Last Incident" value="3 days ago" icon={Clock} color="purple" />
+        <KpiCard label="Overall Health" value="—" icon={Activity} color="green" />
+        <KpiCard label="Function Success Rate" value="—" icon={Zap} color="teal" />
+        <KpiCard label="Errors Today" value="—" icon={AlertCircle} color="amber" />
+        <KpiCard label="Last Incident" value="—" icon={Clock} color="purple" />
       </div>
 
       <div className="grid grid-cols-2 gap-4">
