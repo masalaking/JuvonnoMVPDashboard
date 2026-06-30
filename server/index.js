@@ -13,6 +13,7 @@ const PORT = process.env.API_PORT ?? 3001;
 const DASHBOARD_API_KEY = process.env.DASHBOARD_API_KEY ?? '';
 const TENANT_LINKS_FILE = process.env.TENANT_LINKS_FILE ?? join(ROOT, 'data/tenant-links.json');
 const REQUESTS_DATA_FILE = process.env.REQUESTS_DATA_FILE ?? join(ROOT, 'data/requests.json');
+const SETTINGS_FILE = process.env.SETTINGS_FILE ?? join(ROOT, 'data/settings.json');
 
 const app = express();
 app.use(express.json());
@@ -31,6 +32,14 @@ function saveRequests(requests) {
 
 function findTenant(accessToken) {
   return loadTenants().find(t => t.access_token === accessToken) ?? null;
+}
+
+function loadSettings() {
+  try { return JSON.parse(readFileSync(SETTINGS_FILE, 'utf-8')); } catch { return {}; }
+}
+
+function saveSettingsFile(data) {
+  writeFileSync(SETTINGS_FILE, JSON.stringify(data, null, 2));
 }
 
 app.get('/health', (_req, res) => res.json({ ok: true }));
@@ -94,6 +103,49 @@ app.patch('/api/link/:accessToken/queue/requests/:id', (req, res) => {
   };
   saveRequests(requests);
   res.json(requests[idx]);
+});
+
+// ── Settings endpoints ────────────────────────────────────────────────────────
+
+// Return all saved settings for this tenant
+app.get('/api/link/:accessToken/settings', (req, res) => {
+  const tenant = findTenant(req.params.accessToken);
+  if (!tenant) return res.status(404).json({ error: 'Invalid access token' });
+  const all = loadSettings();
+  res.json(all[tenant.client_id] ?? {});
+});
+
+// Save (merge) one section — body: { section: 'voice_personality', data: {...} }
+// After saving, fires a webhook to n8n so it can react (e.g. update Retell AI)
+app.put('/api/link/:accessToken/settings', async (req, res) => {
+  const tenant = findTenant(req.params.accessToken);
+  if (!tenant) return res.status(404).json({ error: 'Invalid access token' });
+  const { section, data } = req.body;
+  if (!section || !data) return res.status(400).json({ error: 'section and data are required' });
+
+  const all = loadSettings();
+  const existing = all[tenant.client_id] ?? {};
+  existing[section] = { ...(existing[section] ?? {}), ...data };
+  all[tenant.client_id] = existing;
+  saveSettingsFile(all);
+
+  // Fire-and-forget to this tenant's own n8n webhook
+  if (tenant.n8n_webhook_url) {
+    fetch(tenant.n8n_webhook_url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        event: 'settings.changed',
+        client_id: tenant.client_id,
+        clinic_name: tenant.clinic_name,
+        section,
+        changed: data,
+        all_settings: existing,
+      }),
+    }).catch(() => {});
+  }
+
+  res.json(existing);
 });
 
 // Serve built frontend

@@ -1,10 +1,11 @@
 [
   {
-    "access_token": "demo-token-abc123",
-    "client_id": "client_001",
-    "clinic_id": "clinic_001",
-    "clinic_name": "Demo Clinic",
-    "receptionist_name": "Grace",
-    "link_label": "Demo Clinic Dashboard"
+    "access_token": "a485826ba1fa4913802ba1a0de8e08e2500e65393ff62048",
+    "client_id": "juvonno",
+    "clinic_id": "juvonno",
+    "clinic_name": "Juvonno",
+    "receptionist_name": "Front Desk",
+    "link_label": "Juvonno Dashboard",
+    "n8n_webhook_url": ""
   }
 ]

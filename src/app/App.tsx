@@ -82,7 +82,10 @@ interface DashboardCtx {
   staffTasks: StaffTask[];
   callLogs: CallLog[];
   loading: boolean;
+  settings: Record<string, unknown>;
   updateTaskStatus: (id: string, status: string) => Promise<void>;
+  saveSection: (section: string, data: Record<string, string>) => Promise<void>;
+  syncRetell: () => Promise<{ ok: boolean; error?: string }>;
 }
 
 const DashboardContext = createContext<DashboardCtx>({
@@ -91,7 +94,10 @@ const DashboardContext = createContext<DashboardCtx>({
   staffTasks: [],
   callLogs: [],
   loading: false,
+  settings: {},
   updateTaskStatus: async () => {},
+  saveSection: async () => {},
+  syncRetell: async () => ({ ok: false }),
 });
 
 function useDashboard() { return useContext(DashboardContext); }
@@ -1345,8 +1351,10 @@ function RecordingsScreen() {
 
 // ── Screen: Settings ──────────────────────────────────────────────────────────
 function SettingsScreen() {
-  const { tenantInfo } = useDashboard();
+  const { tenantInfo, settings, saveSection } = useDashboard();
   const [activeSection, setActiveSection] = useState("Clinic Profile");
+  const [saving, setSaving] = useState(false);
+
   const sections = [
     "Clinic Profile", "Clinic Hours", "Services", "Practitioners",
     "Booking Rules", "Transfer & Escalation", "Cancellation/Reschedule",
@@ -1354,6 +1362,30 @@ function SettingsScreen() {
     "Notifications", "Privacy & Compliance", "User Roles",
     "Juvonno Integration", "Billing Settings",
   ];
+
+  const sp = (settings.clinic_profile ?? {}) as Record<string, string>;
+  const sv = (settings.voice_personality ?? {}) as Record<string, string>;
+  const sj = (settings.juvonno_integration ?? {}) as Record<string, string>;
+  const sh = (settings.clinic_hours ?? {}) as Record<string, string>;
+  const settingsKey = JSON.stringify(settings);
+
+  async function handleSave(section: string, e: React.FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    setSaving(true);
+    const fd = new FormData(e.currentTarget);
+    const data: Record<string, string> = {};
+    fd.forEach((v, k) => { data[k] = String(v); });
+    const boxes = e.currentTarget.querySelectorAll<HTMLInputElement>('input[type="checkbox"]');
+    boxes.forEach(box => { if (box.name && !box.checked) data[box.name] = 'false'; });
+    await saveSection(section, data);
+    setSaving(false);
+  }
+
+  const SaveBtn = ({ label = "Save Changes" }: { label?: string }) => (
+    <button type="submit" disabled={saving} className="bg-primary text-primary-foreground text-xs font-medium px-4 py-2 rounded-md hover:opacity-90 disabled:opacity-50">
+      {saving ? "Saving…" : label}
+    </button>
+  );
 
   return (
     <div className="p-6 flex gap-6">
@@ -1367,6 +1399,7 @@ function SettingsScreen() {
             {sections.map((s) => (
               <button
                 key={s}
+                type="button"
                 onClick={() => setActiveSection(s)}
                 className={`w-full text-left px-3 py-2 rounded-md text-xs transition-colors ${activeSection === s ? "bg-primary/10 text-primary font-semibold" : "text-foreground hover:bg-muted"}`}
               >
@@ -1380,70 +1413,79 @@ function SettingsScreen() {
       {/* Settings form */}
       <div className="flex-1">
         {activeSection === "Clinic Profile" && (
-          <div className="space-y-5">
+          <form key={settingsKey} onSubmit={e => handleSave('clinic_profile', e)} className="space-y-5">
             <div className="flex items-center justify-between">
               <h2 className="text-base font-semibold text-foreground">Clinic Profile</h2>
-              <button className="bg-primary text-primary-foreground text-xs font-medium px-4 py-2 rounded-md hover:opacity-90">Save Changes</button>
+              <SaveBtn />
             </div>
             <Card className="p-5">
               <div className="grid grid-cols-2 gap-4">
-                {[
-                  ["Clinic Name", tenantInfo?.clinic_name ?? "", "text"],
-                  ["Phone Number", "", "tel"],
-                  ["SMS Number", "", "tel"],
-                  ["Email", "", "email"],
-                  ["Website", "", "url"],
-                  ["Main Contact", tenantInfo?.receptionist_name ?? "", "text"],
-                ].map(([label, val, type]) => (
-                  <div key={label as string} className="space-y-1.5">
+                {([
+                  ["Clinic Name", "clinic_name", sp.clinic_name ?? tenantInfo?.clinic_name ?? "", "text"],
+                  ["Phone Number", "phone_number", sp.phone_number ?? "", "tel"],
+                  ["SMS Number", "sms_number", sp.sms_number ?? "", "tel"],
+                  ["Email", "email", sp.email ?? "", "email"],
+                  ["Website", "website", sp.website ?? "", "url"],
+                  ["Main Contact", "main_contact", sp.main_contact ?? tenantInfo?.receptionist_name ?? "", "text"],
+                ] as [string, string, string, string][]).map(([label, name, val, type]) => (
+                  <div key={name} className="space-y-1.5">
                     <label className="text-xs font-medium text-foreground">{label}</label>
-                    <input defaultValue={val as string} type={type as string} className="w-full bg-input-background border border-border rounded-md px-3 py-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring" />
+                    <input name={name} defaultValue={val} type={type} className="w-full bg-input-background border border-border rounded-md px-3 py-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring" />
                   </div>
                 ))}
                 <div className="space-y-1.5">
                   <label className="text-xs font-medium text-foreground">Timezone</label>
-                  <select className="w-full bg-input-background border border-border rounded-md px-3 py-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring">
+                  <select name="timezone" defaultValue={sp.timezone ?? "America/Vancouver (PST/PDT)"} className="w-full bg-input-background border border-border rounded-md px-3 py-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring">
                     <option>America/Vancouver (PST/PDT)</option>
                     <option>America/Toronto (EST/EDT)</option>
+                    <option>America/New_York (EST/EDT)</option>
+                    <option>America/Chicago (CST/CDT)</option>
+                    <option>America/Denver (MST/MDT)</option>
+                    <option>America/Los_Angeles (PST/PDT)</option>
                   </select>
                 </div>
                 <div className="col-span-2 space-y-1.5">
                   <label className="text-xs font-medium text-foreground">Address</label>
-                  <input defaultValue="" className="w-full bg-input-background border border-border rounded-md px-3 py-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring" />
+                  <input name="address" defaultValue={sp.address ?? ""} className="w-full bg-input-background border border-border rounded-md px-3 py-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring" />
                 </div>
               </div>
             </Card>
-          </div>
+          </form>
         )}
 
         {activeSection === "Clinic Hours" && (
-          <div className="space-y-5">
+          <form key={settingsKey} onSubmit={e => handleSave('clinic_hours', e)} className="space-y-5">
             <div className="flex items-center justify-between">
               <h2 className="text-base font-semibold text-foreground">Clinic Hours</h2>
-              <button className="bg-primary text-primary-foreground text-xs font-medium px-4 py-2 rounded-md hover:opacity-90">Save Changes</button>
+              <SaveBtn />
             </div>
             <Card className="p-5 space-y-3">
-              {["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"].map((day, i) => (
-                <div key={day} className="flex items-center gap-4">
-                  <span className="text-xs font-medium text-foreground w-24">{day}</span>
-                  <input type="checkbox" defaultChecked={i < 6} className="rounded" />
-                  <input type="time" defaultValue={i < 6 ? "08:00" : undefined} className="bg-input-background border border-border rounded px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-ring" />
-                  <span className="text-xs text-muted-foreground">to</span>
-                  <input type="time" defaultValue={i < 5 ? "18:00" : i === 5 ? "14:00" : undefined} className="bg-input-background border border-border rounded px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-ring" />
-                  {i < 5 && <span className="text-[10px] text-muted-foreground">Lunch 12:00–13:00</span>}
-                </div>
-              ))}
+              {["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"].map((day, i) => {
+                const isOpen = sh[`open_${day}`] !== undefined ? sh[`open_${day}`] === 'true' : i < 6;
+                const startDef = sh[`start_${day}`] ?? (i < 6 ? "08:00" : "");
+                const endDef = sh[`end_${day}`] ?? (i < 5 ? "18:00" : i === 5 ? "14:00" : "");
+                return (
+                  <div key={day} className="flex items-center gap-4">
+                    <span className="text-xs font-medium text-foreground w-24">{day}</span>
+                    <input type="checkbox" name={`open_${day}`} defaultChecked={isOpen} className="rounded" />
+                    <input type="time" name={`start_${day}`} defaultValue={startDef} className="bg-input-background border border-border rounded px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-ring" />
+                    <span className="text-xs text-muted-foreground">to</span>
+                    <input type="time" name={`end_${day}`} defaultValue={endDef} className="bg-input-background border border-border rounded px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-ring" />
+                    {i < 5 && <span className="text-[10px] text-muted-foreground">Lunch 12:00–13:00</span>}
+                  </div>
+                );
+              })}
             </Card>
-          </div>
+          </form>
         )}
 
         {activeSection === "Juvonno Integration" && (
-          <div className="space-y-5">
+          <form key={settingsKey} onSubmit={e => handleSave('juvonno_integration', e)} className="space-y-5">
             <div className="flex items-center justify-between">
               <h2 className="text-base font-semibold text-foreground">Juvonno Integration</h2>
               <div className="flex items-center gap-2">
                 <Badge label="Connected" variant="Connected" />
-                <button className="bg-muted border border-border text-xs font-medium px-3 py-1.5 rounded-md hover:bg-accent transition-colors">Request Change</button>
+                <SaveBtn />
               </div>
             </div>
             <Card className="p-5 space-y-3">
@@ -1456,7 +1498,7 @@ function SettingsScreen() {
                   ["Booking API", "✓ Operational"],
                   ["Lookup API", "✓ Operational"],
                   ["Availability API", "✓ Operational"],
-                  ["Errors Today", "1 (resolved)"],
+                  ["Errors Today", "0"],
                 ].map(([k, v]) => (
                   <div key={k} className="p-3 bg-muted rounded-lg flex justify-between">
                     <span className="text-muted-foreground">{k}</span>
@@ -1464,100 +1506,90 @@ function SettingsScreen() {
                   </div>
                 ))}
               </div>
-              <div className="pt-2">
-                <div className="flex items-center gap-2 mb-3">
+              <div className="pt-2 space-y-3">
+                <div className="flex items-center gap-2">
                   <Lock size={12} className="text-muted-foreground" />
-                  <p className="text-xs text-muted-foreground">Technical settings below are managed by NAP admins.</p>
+                  <p className="text-xs text-muted-foreground">Read-only fields are managed server-side. Retell fields are editable.</p>
                 </div>
                 <div className="grid grid-cols-2 gap-3">
-                  {[
-                    ["API Key", "—"],
-                    ["API Base URL", "—"],
-                    ["Branch Code", "—"],
-                    ["Clinic/Company ID", tenantInfo?.clinic_id ?? "—"],
-                    ["Retell Agent ID", "—"],
-                    ["Twilio Number", "—"],
-                  ].map(([k, v]) => (
-                    <div key={k} className="space-y-1.5">
-                      <label className="text-xs font-medium text-muted-foreground flex items-center gap-1"><Lock size={10} /> {k}</label>
-                      <input readOnly value={v as string} className="w-full bg-muted border border-border rounded-md px-3 py-2 text-xs text-muted-foreground cursor-not-allowed font-mono" />
+                  {([
+                    ["API Key", "api_key", "—", true],
+                    ["API Base URL", "api_base_url", "—", true],
+                    ["Branch Code", "branch_code", "—", true],
+                    ["Clinic/Company ID", "clinic_company_id", tenantInfo?.clinic_id ?? "—", true],
+                  ] as [string, string, string, boolean][]).map(([label, name, val, ro]) => (
+                    <div key={name} className="space-y-1.5">
+                      <label className="text-xs font-medium text-muted-foreground flex items-center gap-1"><Lock size={10} /> {label}</label>
+                      <input readOnly={ro} name={ro ? undefined : name} value={ro ? val : undefined} defaultValue={ro ? undefined : (sj[name] ?? "")} className="w-full bg-muted border border-border rounded-md px-3 py-2 text-xs text-muted-foreground cursor-not-allowed font-mono" />
                     </div>
                   ))}
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-medium text-foreground">Retell Agent ID</label>
+                    <input name="retell_agent_id" defaultValue={sj.retell_agent_id ?? ""} placeholder="agent_xxxxx" className="w-full bg-input-background border border-border rounded-md px-3 py-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring font-mono" />
+                  </div>
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-medium text-foreground">Retell API Key</label>
+                    <input name="retell_api_key" type="password" defaultValue={sj.retell_api_key ?? ""} placeholder="key_xxxxxxxx" className="w-full bg-input-background border border-border rounded-md px-3 py-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring font-mono" />
+                  </div>
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-medium text-muted-foreground flex items-center gap-1"><Lock size={10} /> Twilio Number</label>
+                    <input readOnly value="—" className="w-full bg-muted border border-border rounded-md px-3 py-2 text-xs text-muted-foreground cursor-not-allowed font-mono" />
+                  </div>
                 </div>
               </div>
             </Card>
-          </div>
+          </form>
         )}
 
         {activeSection === "Voice & AI Personality" && (
-          <div className="space-y-5">
+          <form key={settingsKey} onSubmit={e => handleSave('voice_personality', e)} className="space-y-5">
             <div className="flex items-center justify-between">
               <h2 className="text-base font-semibold text-foreground">Voice & AI Personality</h2>
-              <button className="bg-primary text-primary-foreground text-xs font-medium px-4 py-2 rounded-md hover:opacity-90">Save Changes</button>
+              <SaveBtn />
             </div>
             <Card className="p-5 space-y-4">
               <div className="grid grid-cols-2 gap-4">
-                <div className="space-y-1.5">
-                  <label className="text-xs font-medium text-foreground">Voice</label>
-                  <select className="w-full bg-input-background border border-border rounded-md px-3 py-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring">
-                    <option>Alloy (Female)</option>
-                    <option>Echo (Male)</option>
-                    <option>Nova (Female)</option>
-                  </select>
-                </div>
-                <div className="space-y-1.5">
-                  <label className="text-xs font-medium text-foreground">Speaking Style</label>
-                  <select className="w-full bg-input-background border border-border rounded-md px-3 py-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring">
-                    <option>Warm and professional</option>
-                    <option>Formal</option>
-                    <option>Casual and friendly</option>
-                  </select>
-                </div>
-                <div className="space-y-1.5">
-                  <label className="text-xs font-medium text-foreground">Language</label>
-                  <select className="w-full bg-input-background border border-border rounded-md px-3 py-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring">
-                    <option>English</option>
-                    <option>French</option>
-                  </select>
-                </div>
-                <div className="space-y-1.5">
-                  <label className="text-xs font-medium text-foreground">Conversation Speed</label>
-                  <select className="w-full bg-input-background border border-border rounded-md px-3 py-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring">
-                    <option>Normal</option>
-                    <option>Slightly slower</option>
-                    <option>Slightly faster</option>
-                  </select>
-                </div>
+                {([
+                  ["Voice", "voice", ["Alloy (Female)", "Echo (Male)", "Nova (Female)"]],
+                  ["Speaking Style", "speaking_style", ["Warm and professional", "Formal", "Casual and friendly"]],
+                  ["Language", "language", ["English", "French"]],
+                  ["Conversation Speed", "conversation_speed", ["Normal", "Slightly slower", "Slightly faster"]],
+                ] as [string, string, string[]][]).map(([label, name, opts]) => (
+                  <div key={name} className="space-y-1.5">
+                    <label className="text-xs font-medium text-foreground">{label}</label>
+                    <select name={name} defaultValue={sv[name] ?? opts[0]} className="w-full bg-input-background border border-border rounded-md px-3 py-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring">
+                      {opts.map(o => <option key={o}>{o}</option>)}
+                    </select>
+                  </div>
+                ))}
               </div>
-              <div className="space-y-1.5">
-                <label className="text-xs font-medium text-foreground">Greeting Message</label>
-                <textarea rows={2} defaultValue={`Thank you for calling ${tenantInfo?.clinic_name ?? "our clinic"}. This is Grace. How can I help you today?`} className="w-full bg-input-background border border-border rounded-md px-3 py-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring resize-none" />
-              </div>
-              <div className="space-y-1.5">
-                <label className="text-xs font-medium text-foreground">After-Hours Greeting</label>
-                <textarea rows={2} defaultValue={`Thank you for calling ${tenantInfo?.clinic_name ?? "our clinic"}. Our clinic is currently closed. Please call back during business hours or leave a message.`} className="w-full bg-input-background border border-border rounded-md px-3 py-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring resize-none" />
-              </div>
-              <div className="space-y-1.5">
-                <label className="text-xs font-medium text-foreground">Recording Consent Message</label>
-                <textarea rows={2} defaultValue="This call may be recorded for quality assurance purposes." className="w-full bg-input-background border border-border rounded-md px-3 py-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring resize-none" />
-              </div>
+              {([
+                ["Greeting Message", "greeting_message", `Thank you for calling ${tenantInfo?.clinic_name ?? "our clinic"}. This is Grace. How can I help you today?`],
+                ["After-Hours Greeting", "after_hours_greeting", `Thank you for calling ${tenantInfo?.clinic_name ?? "our clinic"}. Our clinic is currently closed. Please call back during business hours or leave a message.`],
+                ["Recording Consent Message", "recording_consent_message", "This call may be recorded for quality assurance purposes."],
+              ] as [string, string, string][]).map(([label, name, fallback]) => (
+                <div key={name} className="space-y-1.5">
+                  <label className="text-xs font-medium text-foreground">{label}</label>
+                  <textarea name={name} rows={2} defaultValue={sv[name] ?? fallback} className="w-full bg-input-background border border-border rounded-md px-3 py-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring resize-none" />
+                </div>
+              ))}
             </Card>
-          </div>
+          </form>
         )}
 
         {!["Clinic Profile", "Clinic Hours", "Juvonno Integration", "Voice & AI Personality"].includes(activeSection) && (
-          <div className="space-y-5">
+          <form onSubmit={e => handleSave(activeSection.toLowerCase().replace(/[^a-z0-9]+/g, '_'), e)} className="space-y-5">
             <div className="flex items-center justify-between">
               <h2 className="text-base font-semibold text-foreground">{activeSection}</h2>
-              <button className="bg-primary text-primary-foreground text-xs font-medium px-4 py-2 rounded-md hover:opacity-90">Save Changes</button>
+              <SaveBtn />
             </div>
             <Card className="p-8 flex flex-col items-center justify-center gap-3 text-center">
               <Settings size={28} className="text-muted-foreground/30" />
               <p className="text-sm font-medium text-foreground">{activeSection}</p>
               <p className="text-xs text-muted-foreground max-w-xs">This settings section is ready to be configured. Click a field to begin editing your {activeSection.toLowerCase()} settings.</p>
-              <button className="mt-2 bg-primary text-primary-foreground text-xs font-medium px-4 py-2 rounded-md hover:opacity-90">Configure {activeSection}</button>
+              <button type="submit" className="mt-2 bg-primary text-primary-foreground text-xs font-medium px-4 py-2 rounded-md hover:opacity-90">Configure {activeSection}</button>
             </Card>
-          </div>
+          </form>
         )}
       </div>
     </div>
@@ -1757,6 +1789,7 @@ export default function App() {
   const [tenantInfo, setTenantInfo] = useState<TenantInfo | null>(null);
   const [staffTasks, setStaffTasks] = useState<StaffTask[]>([]);
   const [callLogs, setCallLogs] = useState<CallLog[]>([]);
+  const [settings, setSettings] = useState<Record<string, unknown>>({});
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
@@ -1765,10 +1798,12 @@ export default function App() {
     Promise.all([
       fetch(`/api/link/${accessToken}/tenant`).then(r => r.ok ? r.json() : null),
       fetch(`/api/link/${accessToken}/queue/requests`).then(r => r.ok ? r.json() : []),
+      fetch(`/api/link/${accessToken}/settings`).then(r => r.ok ? r.json() : {}),
     ])
-      .then(([tenant, requests]) => {
+      .then(([tenant, requests, savedSettings]) => {
         setTenantInfo(tenant);
         setStaffTasks(requests);
+        setSettings(savedSettings ?? {});
       })
       .catch(() => {})
       .finally(() => setLoading(false));
@@ -1785,6 +1820,26 @@ export default function App() {
       const updated: StaffTask = await res.json();
       setStaffTasks(prev => prev.map(t => t.id === updated.id ? updated : t));
     }
+  }
+
+  async function saveSection(section: string, data: Record<string, string>) {
+    if (!accessToken) return;
+    const res = await fetch(`/api/link/${accessToken}/settings`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ section, data }),
+    });
+    if (res.ok) {
+      const updated: Record<string, unknown> = await res.json();
+      setSettings(updated);
+    }
+  }
+
+  async function syncRetell(): Promise<{ ok: boolean; error?: string }> {
+    if (!accessToken) return { ok: false, error: 'No access token' };
+    const res = await fetch(`/api/link/${accessToken}/settings/retell-sync`, { method: 'POST' });
+    const json = await res.json();
+    return res.ok ? { ok: true } : { ok: false, error: json.error ?? 'Sync failed' };
   }
 
   const Screen = SCREENS[activeNav] ?? OverviewScreen;
@@ -1804,7 +1859,7 @@ export default function App() {
   }
 
   return (
-    <DashboardContext.Provider value={{ accessToken, tenantInfo, staffTasks, callLogs, loading, updateTaskStatus }}>
+    <DashboardContext.Provider value={{ accessToken, tenantInfo, staffTasks, callLogs, loading, settings, updateTaskStatus, saveSection, syncRetell }}>
       <div
         className="flex h-screen w-screen overflow-hidden bg-background"
         style={{ fontFamily: "'Inter', sans-serif" }}
