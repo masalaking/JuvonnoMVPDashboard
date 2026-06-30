@@ -1,0 +1,10 @@
+[
+  {
+    "access_token": "demo-token-abc123",
+    "client_id": "client_001",
+    "clinic_id": "clinic_001",
+    "clinic_name": "Demo Clinic",
+    "receptionist_name": "Grace",
+    "link_label": "Demo Clinic Dashboard"
+  }
+]

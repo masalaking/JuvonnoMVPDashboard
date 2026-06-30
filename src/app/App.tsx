@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect, createContext, useContext } from "react";
 import {
   LayoutDashboard, Bot, PhoneCall, FileText, Mic, BarChart2, TrendingUp,
   ClipboardList, Heart, Settings, CreditCard, Activity, ChevronDown,
@@ -26,93 +26,75 @@ const RED = "#EF4444";
 const GREEN = "#10B981";
 const SLATE = "#64748B";
 
-// ── Sample data ──────────────────────────────────────────────────────────────
-const callsOverTime = [
-  { day: "Mon", calls: 42, bookings: 18 },
-  { day: "Tue", calls: 58, bookings: 27 },
-  { day: "Wed", calls: 51, bookings: 22 },
-  { day: "Thu", calls: 67, bookings: 31 },
-  { day: "Fri", calls: 74, bookings: 35 },
-  { day: "Sat", calls: 38, bookings: 14 },
-  { day: "Sun", calls: 19, bookings: 7 },
-];
+// ── Types ─────────────────────────────────────────────────────────────────────
+interface StaffTask {
+  id: string;
+  patient?: string;
+  phone?: string;
+  type?: string;
+  summary?: string;
+  sentiment?: string;
+  priority?: string;
+  due?: string;
+  assignee?: string;
+  status: string;
+  created_at?: string;
+  [key: string]: unknown;
+}
 
-const outcomeData = [
-  { name: "Booked", value: 154, color: GREEN },
-  { name: "Transferred", value: 48, color: PURPLE },
-  { name: "FAQ Answered", value: 72, color: TEAL },
-  { name: "Staff Action", value: 31, color: AMBER },
-  { name: "Failed", value: 12, color: RED },
-];
+interface CallLog {
+  id: number | string;
+  time?: string;
+  caller?: string;
+  phone?: string;
+  type?: string;
+  service?: string;
+  provider?: string;
+  outcome?: string;
+  sentiment?: string;
+  duration?: string;
+  staffAction?: boolean;
+}
 
-const sentimentData = [
-  { name: "Positive", value: 182, color: GREEN },
-  { name: "Neutral", value: 98, color: SLATE },
-  { name: "Negative", value: 29, color: AMBER },
-];
+type Transcript = {
+  id: number | string;
+  time?: string;
+  caller?: string;
+  outcome?: string;
+  sentiment?: string;
+  service?: string;
+  duration?: string;
+  preview?: string;
+};
 
-const sentimentOverTime = [
-  { day: "Mon", score: 4.1 },
-  { day: "Tue", score: 4.3 },
-  { day: "Wed", score: 3.8 },
-  { day: "Thu", score: 4.2 },
-  { day: "Fri", score: 4.5 },
-  { day: "Sat", score: 4.4 },
-  { day: "Sun", score: 4.6 },
-];
+// ── Dashboard context ─────────────────────────────────────────────────────────
+interface DashboardCtx {
+  accessToken: string | null;
+  staffTasks: StaffTask[];
+  callLogs: CallLog[];
+  loading: boolean;
+  updateTaskStatus: (id: string, status: string) => Promise<void>;
+}
 
-const topServices = [
-  { service: "Chiropractic", requests: 87 },
-  { service: "Physiotherapy", requests: 73 },
-  { service: "Massage Therapy", requests: 61 },
-  { service: "Pelvic Physio", requests: 38 },
-  { service: "Stretch Therapy", requests: 24 },
-];
+const DashboardContext = createContext<DashboardCtx>({
+  accessToken: null,
+  staffTasks: [],
+  callLogs: [],
+  loading: false,
+  updateTaskStatus: async () => {},
+});
 
-const callLogs = [
-  { id: 1, time: "2024-06-28 10:02", caller: "Aaryan Anjan", phone: "+1 604-555-0142", type: "New Patient", service: "Chiropractic", provider: "Dr. Jasjit Khaira", outcome: "Booked", sentiment: "Positive", duration: "3:24", staffAction: false },
-  { id: 2, time: "2024-06-28 10:18", caller: "Mei Tanaka", phone: "+1 604-555-0287", type: "Existing", service: "Massage Therapy", provider: "Ariel Zohar", outcome: "Booked", sentiment: "Positive", duration: "2:47", staffAction: false },
-  { id: 3, time: "2024-06-28 10:35", caller: "David Osei", phone: "+1 604-555-0391", type: "Existing", service: "Physiotherapy", provider: "Sharisse Dukhu", outcome: "Transferred", sentiment: "Neutral", duration: "1:58", staffAction: false },
-  { id: 4, time: "2024-06-28 10:52", caller: "Priya Singh", phone: "+1 604-555-0445", type: "New Patient", service: "Pelvic Physio", provider: "Priya Kaushal", outcome: "Staff Action", sentiment: "Negative", duration: "5:12", staffAction: true },
-  { id: 5, time: "2024-06-28 11:07", caller: "Marcus Webb", phone: "+1 604-555-0563", type: "Existing", service: "Chiropractic", provider: "Dr. Jasjit Khaira", outcome: "FAQ Answered", sentiment: "Neutral", duration: "1:23", staffAction: false },
-  { id: 6, time: "2024-06-28 11:24", caller: "Fatima Al-Hassan", phone: "+1 604-555-0672", type: "New Patient", service: "Stretch Therapy", provider: "Kulwinder Chohan", outcome: "Booked", sentiment: "Positive", duration: "4:01", staffAction: false },
-  { id: 7, time: "2024-06-28 11:39", caller: "James Okonkwo", phone: "+1 604-555-0714", type: "Existing", service: "Physiotherapy", provider: "Sabreen Sanghera", outcome: "Failed", sentiment: "Negative", duration: "6:43", staffAction: true },
-  { id: 8, time: "2024-06-28 11:55", caller: "Lena Kovacs", phone: "+1 604-555-0823", type: "New Patient", service: "Massage Therapy", provider: "Ariel Zohar", outcome: "Booked", sentiment: "Positive", duration: "3:15", staffAction: false },
-];
+function useDashboard() { return useContext(DashboardContext); }
 
-const staffTasks = [
-  { id: 1, patient: "Priya Singh", phone: "+1 604-555-0445", type: "Reschedule Request", summary: "Patient unable to attend Friday appointment, requests Monday morning slot", sentiment: "Negative", priority: "High", due: "2:00 PM", assignee: "Front Desk", status: "New" },
-  { id: 2, patient: "James Okonkwo", phone: "+1 604-555-0714", type: "Failed Booking", summary: "API error during booking — patient needs callback to confirm slot", sentiment: "Negative", priority: "High", due: "1:30 PM", assignee: "Sharisse Dukhu", status: "In Progress" },
-  { id: 3, patient: "Anika Patel", phone: "+1 604-555-0916", type: "Cancellation Request", summary: "Patient cancelling 2 PM massage due to illness. Needs rebooking next week.", sentiment: "Neutral", priority: "Medium", due: "3:00 PM", assignee: "Front Desk", status: "New" },
-  { id: 4, patient: "Ryan Cho", phone: "+1 604-555-1027", type: "Billing Question", summary: "Asked about insurance coverage for pelvic physio — transferred to staff, call missed", sentiment: "Neutral", priority: "Low", due: "EOD", assignee: "Billing Admin", status: "New" },
-  { id: 5, patient: "Nadia Hussain", phone: "+1 604-555-1138", type: "Complaint", summary: "Patient frustrated with appointment wait time, wants to speak to manager", sentiment: "Negative", priority: "High", due: "12:00 PM", assignee: "Manager", status: "Completed" },
-];
-
-const transcripts = [
-  { id: 1, time: "2024-06-28 10:02", caller: "Aaryan Anjan", outcome: "Booked", sentiment: "Positive", service: "Chiropractic", duration: "3:24", preview: "Hi, I'd like to book a chiropractic appointment..." },
-  { id: 2, time: "2024-06-28 10:52", caller: "Priya Singh", outcome: "Staff Action", sentiment: "Negative", service: "Pelvic Physio", duration: "5:12", preview: "I've been waiting for a callback and nobody is helping..." },
-  { id: 3, time: "2024-06-28 11:39", caller: "James Okonkwo", outcome: "Failed", sentiment: "Negative", service: "Physiotherapy", duration: "6:43", preview: "The system said it booked but I never got a confirmation..." },
-];
-
-const sampleTranscriptLines = [
-  { speaker: "Grace (AI)", text: "Thank you for calling Recoup Health. This is Grace. How can I help you today?" },
-  { speaker: "Caller", text: "Hi, I'd like to book a chiropractic appointment with Dr. Khaira if possible." },
-  { speaker: "Grace (AI)", text: "Absolutely! I can help with that. Are you a new or existing patient with us?" },
-  { speaker: "Caller", text: "I'm an existing patient. My name is Aaryan Anjan." },
-  { speaker: "Grace (AI)", text: "Great, let me look you up in our system. Could you please confirm your date of birth for verification?" },
-  { speaker: "Caller", text: "Sure, it's March 12th, 1990." },
-  { speaker: "Grace (AI)", text: "Perfect, I've found your record. Dr. Khaira has availability this Thursday at 10:30 AM or Friday at 2:00 PM. Which works better for you?" },
-  { speaker: "Caller", text: "Thursday at 10:30 works great." },
-  { speaker: "Grace (AI)", text: "Wonderful! I've booked you in for Thursday, June 29th at 10:30 AM with Dr. Jasjit Khaira for a chiropractic session. You'll receive a confirmation text shortly. Is there anything else I can help you with?" },
-  { speaker: "Caller", text: "No, that's perfect. Thank you!" },
-  { speaker: "Grace (AI)", text: "You're welcome! We'll see you Thursday. Have a great day!" },
-];
-
-const errorLogs = [
-  { id: 1, time: "2024-06-28 11:39", fn: "book_appointment", clinic: "Recoup Health", error: "API Timeout", status: "Failed", retry: "3/3", notes: "Juvonno unresponsive", action: "Review" },
-  { id: 2, time: "2024-06-28 09:14", fn: "lookup_patient", clinic: "Recoup Health", error: "404 Not Found", status: "Resolved", retry: "1/3", notes: "New patient, no record", action: "None" },
-  { id: 3, time: "2024-06-27 16:52", fn: "check_availability", clinic: "Recoup Health", error: "Rate Limit", status: "Resolved", retry: "2/3", notes: "Retried successfully", action: "None" },
-];
+// ── Chart/static placeholders (populated when analytics endpoints are added) ──
+const callsOverTime: { day: string; calls: number; bookings: number }[] = [];
+const outcomeData: { name: string; value: number; color: string }[] = [];
+const sentimentData: { name: string; value: number; color: string }[] = [];
+const sentimentOverTime: { day: string; score: number }[] = [];
+const topServices: { service: string; requests: number }[] = [];
+const transcripts: Transcript[] = [];
+const sampleTranscriptLines: { speaker: string; text: string }[] = [];
+const errorLogs: { id: number; time: string; fn: string; clinic: string; error: string; status: string; retry: string; notes: string; action: string }[] = [];
 
 // ── Small reusable UI ─────────────────────────────────────────────────────────
 function Badge({ label, variant }: { label: string; variant: string }) {
@@ -202,7 +184,7 @@ const navItems = [
   { id: "transcripts", label: "Transcripts", icon: FileText },
   { id: "recordings", label: "Recordings", icon: Mic },
   { id: "analytics", label: "Analytics", icon: BarChart2 },
-  { id: "staff-queue", label: "Staff Action Queue", icon: ClipboardList, badge: 4 },
+  { id: "staff-queue", label: "Staff Action Queue", icon: ClipboardList },
   { id: "sentiment", label: "Sentiment Insights", icon: Heart },
   { id: "settings", label: "Settings", icon: Settings },
   { id: "billing", label: "Billing & Usage", icon: CreditCard },
@@ -210,6 +192,9 @@ const navItems = [
 ];
 
 function Sidebar({ active, onNav }: { active: string; onNav: (id: string) => void }) {
+  const { staffTasks } = useDashboard();
+  const openTaskCount = staffTasks.filter(t => t.status !== "Completed").length;
+
   return (
     <div className="w-[240px] min-h-screen bg-sidebar flex flex-col flex-shrink-0">
       <div className="px-5 py-5 border-b border-sidebar-border">
@@ -224,7 +209,7 @@ function Sidebar({ active, onNav }: { active: string; onNav: (id: string) => voi
         </div>
       </div>
       <nav className="flex-1 px-3 py-4 space-y-0.5">
-        {navItems.map(({ id, label, icon: Icon, badge }) => (
+        {navItems.map(({ id, label, icon: Icon }) => (
           <button
             key={id}
             onClick={() => onNav(id)}
@@ -236,8 +221,8 @@ function Sidebar({ active, onNav }: { active: string; onNav: (id: string) => voi
           >
             <Icon size={15} className={active === id ? "text-violet-400" : ""} />
             <span className="flex-1">{label}</span>
-            {badge && (
-              <span className="bg-red-500 text-white text-[10px] font-bold px-1.5 py-0.5 rounded-full">{badge}</span>
+            {id === "staff-queue" && openTaskCount > 0 && (
+              <span className="bg-red-500 text-white text-[10px] font-bold px-1.5 py-0.5 rounded-full">{openTaskCount}</span>
             )}
           </button>
         ))}
@@ -292,6 +277,7 @@ function TopBar() {
 
 // ── Screen: Overview ─────────────────────────────────────────────────────────
 function OverviewScreen() {
+  const { callLogs } = useDashboard();
   return (
     <div className="p-6 space-y-6">
       <div className="flex items-center justify-between">
@@ -433,11 +419,11 @@ function OverviewScreen() {
                 <tbody>
                   {callLogs.slice(0, 5).map((c) => (
                     <tr key={c.id} className="border-b border-border last:border-0 hover:bg-muted/30 transition-colors">
-                      <td className="px-4 py-2.5 font-mono text-muted-foreground">{c.time.split(" ")[1]}</td>
+                      <td className="px-4 py-2.5 font-mono text-muted-foreground">{c.time?.split(" ")[1]}</td>
                       <td className="px-4 py-2.5 font-medium text-foreground">{c.caller}</td>
                       <td className="px-4 py-2.5 text-muted-foreground">{c.service}</td>
-                      <td className="px-4 py-2.5"><Badge label={c.outcome} variant={c.outcome} /></td>
-                      <td className="px-4 py-2.5"><Badge label={c.sentiment} variant={c.sentiment} /></td>
+                      <td className="px-4 py-2.5"><Badge label={c.outcome ?? ""} variant={c.outcome ?? ""} /></td>
+                      <td className="px-4 py-2.5"><Badge label={c.sentiment ?? ""} variant={c.sentiment ?? ""} /></td>
                       <td className="px-4 py-2.5 font-mono text-muted-foreground">{c.duration}</td>
                     </tr>
                   ))}
@@ -644,7 +630,8 @@ function AIReceptionistScreen() {
 
 // ── Screen: Call Logs ─────────────────────────────────────────────────────────
 function CallLogsScreen() {
-  const [selectedCall, setSelectedCall] = useState<typeof callLogs[0] | null>(null);
+  const { callLogs } = useDashboard();
+  const [selectedCall, setSelectedCall] = useState<CallLog | null>(null);
 
   return (
     <div className="p-6 space-y-4 h-full">
@@ -703,9 +690,9 @@ function CallLogsScreen() {
                       <td className="px-3 py-2.5 font-mono text-muted-foreground">{c.phone}</td>
                       <td className="px-3 py-2.5 text-muted-foreground">{c.type}</td>
                       <td className="px-3 py-2.5 text-foreground whitespace-nowrap">{c.service}</td>
-                      <td className="px-3 py-2.5 text-muted-foreground whitespace-nowrap">{c.provider.split(" ").slice(-1)[0]}</td>
-                      <td className="px-3 py-2.5"><Badge label={c.outcome} variant={c.outcome} /></td>
-                      <td className="px-3 py-2.5"><Badge label={c.sentiment} variant={c.sentiment} /></td>
+                      <td className="px-3 py-2.5 text-muted-foreground whitespace-nowrap">{c.provider?.split(" ").slice(-1)[0]}</td>
+                      <td className="px-3 py-2.5"><Badge label={c.outcome ?? ""} variant={c.outcome ?? ""} /></td>
+                      <td className="px-3 py-2.5"><Badge label={c.sentiment ?? ""} variant={c.sentiment ?? ""} /></td>
                       <td className="px-3 py-2.5 font-mono text-muted-foreground">{c.duration}</td>
                       <td className="px-3 py-2.5">
                         <div className="flex gap-1">
@@ -731,7 +718,7 @@ function CallLogsScreen() {
               </div>
               <div className="space-y-2 text-xs">
                 <div className="flex items-center gap-2">
-                  <div className="w-8 h-8 rounded-full bg-violet-100 flex items-center justify-center text-violet-700 font-semibold text-sm">{selectedCall.caller[0]}</div>
+                  <div className="w-8 h-8 rounded-full bg-violet-100 flex items-center justify-center text-violet-700 font-semibold text-sm">{selectedCall.caller?.[0]}</div>
                   <div>
                     <p className="font-semibold text-foreground">{selectedCall.caller}</p>
                     <p className="text-muted-foreground font-mono">{selectedCall.phone}</p>
@@ -751,11 +738,11 @@ function CallLogsScreen() {
                 ))}
                 <div className="flex justify-between py-1.5 border-b border-border">
                   <span className="text-muted-foreground">Outcome</span>
-                  <Badge label={selectedCall.outcome} variant={selectedCall.outcome} />
+                  <Badge label={selectedCall.outcome ?? ""} variant={selectedCall.outcome ?? ""} />
                 </div>
                 <div className="flex justify-between py-1.5">
                   <span className="text-muted-foreground">Sentiment</span>
-                  <Badge label={selectedCall.sentiment} variant={selectedCall.sentiment} />
+                  <Badge label={selectedCall.sentiment ?? ""} variant={selectedCall.sentiment ?? ""} />
                 </div>
               </div>
               {/* Mock audio player */}
@@ -793,7 +780,7 @@ function CallLogsScreen() {
 
 // ── Screen: Transcripts ───────────────────────────────────────────────────────
 function TranscriptsScreen() {
-  const [selected, setSelected] = useState(transcripts[0]);
+  const [selected, setSelected] = useState<Transcript | null>(null);
   const [masked, setMasked] = useState(false);
 
   return (
@@ -831,7 +818,7 @@ function TranscriptsScreen() {
               <div
                 key={t.id}
                 onClick={() => setSelected(t)}
-                className={`p-3 rounded-lg border cursor-pointer transition-colors ${selected.id === t.id ? "border-primary/50 bg-violet-50" : "border-border bg-card hover:bg-muted/40"}`}
+                className={`p-3 rounded-lg border cursor-pointer transition-colors ${selected?.id === t.id ? "border-primary/50 bg-violet-50" : "border-border bg-card hover:bg-muted/40"}`}
               >
                 <div className="flex items-center justify-between mb-1">
                   <p className="text-xs font-semibold text-foreground">{t.caller}</p>
@@ -849,39 +836,41 @@ function TranscriptsScreen() {
         </div>
 
         {/* Transcript Preview */}
-        <Card className="flex-1 flex flex-col min-h-0">
-          <div className="px-5 py-3 border-b border-border flex items-center justify-between flex-shrink-0">
-            <div>
-              <p className="text-sm font-semibold text-foreground">{selected.caller}</p>
-              <p className="text-xs text-muted-foreground">{selected.time} · {selected.service} · {selected.duration}</p>
+        {selected ? (
+          <Card className="flex-1 flex flex-col min-h-0">
+            <div className="px-5 py-3 border-b border-border flex items-center justify-between flex-shrink-0">
+              <div>
+                <p className="text-sm font-semibold text-foreground">{selected.caller}</p>
+                <p className="text-xs text-muted-foreground">{selected.time} · {selected.service} · {selected.duration}</p>
+              </div>
+              <div className="flex items-center gap-2">
+                <Badge label={selected.outcome ?? ""} variant={selected.outcome ?? ""} />
+                <Badge label={selected.sentiment ?? ""} variant={selected.sentiment ?? ""} />
+              </div>
             </div>
-            <div className="flex items-center gap-2">
-              <Badge label={selected.outcome} variant={selected.outcome} />
-              <Badge label={selected.sentiment} variant={selected.sentiment} />
-            </div>
-          </div>
-          {/* AI summary */}
-          <div className="px-5 py-3 bg-violet-50 border-b border-border flex-shrink-0">
-            <p className="text-[10px] font-semibold text-violet-700 uppercase tracking-wide mb-1">AI Summary</p>
-            <p className="text-xs text-foreground">Existing patient called to book a chiropractic appointment with Dr. Khaira. Identity verified successfully. Thursday 10:30 AM slot confirmed. Positive experience throughout the call. No staff action required.</p>
-          </div>
-          {/* Transcript lines */}
-          <div className="flex-1 overflow-y-auto p-5 space-y-3">
-            {sampleTranscriptLines.map((line, i) => (
-              <div key={i} className={`flex gap-3 ${line.speaker === "Caller" ? "flex-row-reverse" : ""}`}>
-                <div className={`w-6 h-6 rounded-full flex items-center justify-center text-[9px] font-bold flex-shrink-0 ${line.speaker === "Caller" ? "bg-slate-200 text-slate-600" : "bg-violet-100 text-violet-700"}`}>
-                  {line.speaker[0]}
-                </div>
-                <div className={`max-w-md ${line.speaker === "Caller" ? "items-end" : "items-start"} flex flex-col gap-0.5`}>
-                  <span className="text-[10px] text-muted-foreground">{line.speaker}</span>
-                  <div className={`text-xs px-3 py-2 rounded-lg ${line.speaker === "Caller" ? "bg-muted text-foreground" : "bg-violet-100 text-violet-900"}`}>
-                    {masked && line.speaker === "Caller" ? line.text.replace(/\b(March|1990|\d{3}-\d{4})\b/g, "████") : line.text}
+            {/* Transcript lines */}
+            <div className="flex-1 overflow-y-auto p-5 space-y-3">
+              {sampleTranscriptLines.map((line, i) => (
+                <div key={i} className={`flex gap-3 ${line.speaker === "Caller" ? "flex-row-reverse" : ""}`}>
+                  <div className={`w-6 h-6 rounded-full flex items-center justify-center text-[9px] font-bold flex-shrink-0 ${line.speaker === "Caller" ? "bg-slate-200 text-slate-600" : "bg-violet-100 text-violet-700"}`}>
+                    {line.speaker[0]}
+                  </div>
+                  <div className={`max-w-md ${line.speaker === "Caller" ? "items-end" : "items-start"} flex flex-col gap-0.5`}>
+                    <span className="text-[10px] text-muted-foreground">{line.speaker}</span>
+                    <div className={`text-xs px-3 py-2 rounded-lg ${line.speaker === "Caller" ? "bg-muted text-foreground" : "bg-violet-100 text-violet-900"}`}>
+                      {masked && line.speaker === "Caller" ? line.text.replace(/\b(March|1990|\d{3}-\d{4})\b/g, "████") : line.text}
+                    </div>
                   </div>
                 </div>
-              </div>
-            ))}
-          </div>
-        </Card>
+              ))}
+            </div>
+          </Card>
+        ) : (
+          <Card className="flex-1 flex flex-col items-center justify-center gap-2 text-center">
+            <FileText size={24} className="text-muted-foreground/40" />
+            <p className="text-xs text-muted-foreground">Select a transcript to view</p>
+          </Card>
+        )}
       </div>
     </div>
   );
@@ -1058,6 +1047,7 @@ function Moon({ size = 24, ...props }: any) {
 
 // ── Screen: Staff Queue ───────────────────────────────────────────────────────
 function StaffQueueScreen() {
+  const { staffTasks, updateTaskStatus } = useDashboard();
   const [view, setView] = useState<"kanban" | "table">("kanban");
   const columns = [
     { status: "New", tasks: staffTasks.filter(t => t.status === "New") },
@@ -1125,7 +1115,7 @@ function StaffQueueScreen() {
                     <div className="flex items-center justify-between text-[10px] text-muted-foreground">
                       <span>Assigned: {task.assignee}</span>
                       <div className="flex gap-1">
-                        <button className="p-1 hover:text-primary transition-colors"><CheckCircle2 size={11} /></button>
+                        <button onClick={() => updateTaskStatus(task.id, "Completed")} className="p-1 hover:text-primary transition-colors" title="Mark complete"><CheckCircle2 size={11} /></button>
                         <button className="p-1 hover:text-muted-foreground transition-colors"><MoreHorizontal size={11} /></button>
                       </div>
                     </div>
@@ -1255,7 +1245,8 @@ function SentimentScreen() {
 
 // ── Screen: Recordings ────────────────────────────────────────────────────────
 function RecordingsScreen() {
-  const [playing, setPlaying] = useState<number | null>(null);
+  const { callLogs } = useDashboard();
+  const [playing, setPlaying] = useState<number | string | null>(null);
 
   return (
     <div className="p-6 space-y-4">
@@ -1287,8 +1278,8 @@ function RecordingsScreen() {
                 <td className="px-4 py-3 font-mono text-muted-foreground whitespace-nowrap">{c.time}</td>
                 <td className="px-4 py-3 font-medium text-foreground">{c.caller}</td>
                 <td className="px-4 py-3 text-muted-foreground">{c.service}</td>
-                <td className="px-4 py-3"><Badge label={c.outcome} variant={c.outcome} /></td>
-                <td className="px-4 py-3"><Badge label={c.sentiment} variant={c.sentiment} /></td>
+                <td className="px-4 py-3"><Badge label={c.outcome ?? ""} variant={c.outcome ?? ""} /></td>
+                <td className="px-4 py-3"><Badge label={c.sentiment ?? ""} variant={c.sentiment ?? ""} /></td>
                 <td className="px-4 py-3 font-mono text-muted-foreground">{c.duration}</td>
                 <td className="px-4 py-3"><span className="text-emerald-600 flex items-center gap-1"><CheckCircle2 size={11} /> Consented</span></td>
                 <td className="px-4 py-3 text-muted-foreground">90 days</td>
@@ -1740,22 +1731,77 @@ const SCREENS: Record<string, React.FC> = {
   "integration": IntegrationScreen,
 };
 
+function getTokenFromURL(): string | null {
+  const match = window.location.pathname.match(/^\/t\/([^/]+)/);
+  return match ? match[1] : null;
+}
+
 export default function App() {
   const [activeNav, setActiveNav] = useState("overview");
+  const [accessToken] = useState<string | null>(getTokenFromURL);
+  const [staffTasks, setStaffTasks] = useState<StaffTask[]>([]);
+  const [callLogs, setCallLogs] = useState<CallLog[]>([]);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    if (!accessToken) return;
+    setLoading(true);
+    fetch(`/api/link/${accessToken}/queue/requests`)
+      .then(r => r.ok ? r.json() : Promise.reject(r.status))
+      .then((data: StaffTask[]) => setStaffTasks(data))
+      .catch(() => {})
+      .finally(() => setLoading(false));
+  }, [accessToken]);
+
+  async function updateTaskStatus(id: string, status: string) {
+    if (!accessToken) return;
+    const res = await fetch(`/api/link/${accessToken}/queue/requests/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status }),
+    });
+    if (res.ok) {
+      const updated: StaffTask = await res.json();
+      setStaffTasks(prev => prev.map(t => t.id === updated.id ? updated : t));
+    }
+  }
+
   const Screen = SCREENS[activeNav] ?? OverviewScreen;
 
-  return (
-    <div
-      className="flex h-screen w-screen overflow-hidden bg-background"
-      style={{ fontFamily: "'Inter', sans-serif" }}
-    >
-      <Sidebar active={activeNav} onNav={setActiveNav} />
-      <div className="flex flex-col flex-1 min-w-0 overflow-hidden">
-        <TopBar />
-        <main className="flex-1 overflow-y-auto">
-          <Screen />
-        </main>
+  if (!accessToken) {
+    return (
+      <div className="flex h-screen w-screen items-center justify-center bg-background" style={{ fontFamily: "'Inter', sans-serif" }}>
+        <div className="text-center space-y-3">
+          <div className="w-12 h-12 rounded-full bg-muted flex items-center justify-center mx-auto">
+            <Lock size={20} className="text-muted-foreground" />
+          </div>
+          <h1 className="text-sm font-semibold text-foreground">No dashboard link</h1>
+          <p className="text-xs text-muted-foreground max-w-xs">Open this dashboard using your unique link, e.g. <span className="font-mono">/t/your-token</span></p>
+        </div>
       </div>
-    </div>
+    );
+  }
+
+  return (
+    <DashboardContext.Provider value={{ accessToken, staffTasks, callLogs, loading, updateTaskStatus }}>
+      <div
+        className="flex h-screen w-screen overflow-hidden bg-background"
+        style={{ fontFamily: "'Inter', sans-serif" }}
+      >
+        <Sidebar active={activeNav} onNav={setActiveNav} />
+        <div className="flex flex-col flex-1 min-w-0 overflow-hidden">
+          <TopBar />
+          <main className="flex-1 overflow-y-auto">
+            {loading ? (
+              <div className="flex items-center justify-center h-full">
+                <p className="text-xs text-muted-foreground">Loading…</p>
+              </div>
+            ) : (
+              <Screen />
+            )}
+          </main>
+        </div>
+      </div>
+    </DashboardContext.Provider>
   );
 }
