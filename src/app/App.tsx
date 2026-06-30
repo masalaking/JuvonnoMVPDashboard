@@ -84,7 +84,7 @@ interface DashboardCtx {
   loading: boolean;
   settings: Record<string, unknown>;
   updateTaskStatus: (id: string, status: string) => Promise<void>;
-  saveSection: (section: string, data: Record<string, string>) => Promise<void>;
+  saveSection: (section: string, data: Record<string, unknown>) => Promise<void>;
   syncRetell: () => Promise<{ ok: boolean; error?: string }>;
 }
 
@@ -1350,35 +1350,58 @@ function RecordingsScreen() {
 }
 
 // ── Screen: Settings ──────────────────────────────────────────────────────────
+interface Practitioner { id: string; name: string; services: string; }
+
 function SettingsScreen() {
   const { tenantInfo, settings, saveSection } = useDashboard();
   const [activeSection, setActiveSection] = useState("Clinic Profile");
   const [saving, setSaving] = useState(false);
+  const [practitioners, setPractitioners] = useState<Practitioner[]>([]);
 
   const sections = [
-    "Clinic Profile", "Clinic Hours", "Services", "Practitioners",
-    "Booking Rules", "Transfer & Escalation", "Cancellation/Reschedule",
-    "FAQs / Knowledge Base", "SMS Follow-Ups", "Voice & AI Personality",
-    "Notifications", "Privacy & Compliance", "User Roles",
-    "Juvonno Integration", "Billing Settings",
+    "Clinic Profile", "Clinic Hours", "Practitioners",
+    "Booking Rules", "Transfer & Escalation",
+    "FAQs / Knowledge Base", "SMS Follow-Ups",
   ];
 
   const sp = (settings.clinic_profile ?? {}) as Record<string, string>;
-  const sv = (settings.voice_personality ?? {}) as Record<string, string>;
-  const sj = (settings.juvonno_integration ?? {}) as Record<string, string>;
   const sh = (settings.clinic_hours ?? {}) as Record<string, string>;
   const settingsKey = JSON.stringify(settings);
+
+  // Sync practitioners from saved settings when settings load
+  useEffect(() => {
+    const saved = (settings.practitioners as { list?: Practitioner[] })?.list;
+    if (saved && saved.length > 0) setPractitioners(saved);
+  }, [settings]);
 
   async function handleSave(section: string, e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
     setSaving(true);
     const fd = new FormData(e.currentTarget);
-    const data: Record<string, string> = {};
+    const data: Record<string, unknown> = {};
     fd.forEach((v, k) => { data[k] = String(v); });
     const boxes = e.currentTarget.querySelectorAll<HTMLInputElement>('input[type="checkbox"]');
     boxes.forEach(box => { if (box.name && !box.checked) data[box.name] = 'false'; });
     await saveSection(section, data);
     setSaving(false);
+  }
+
+  async function handleSavePractitioners() {
+    setSaving(true);
+    await saveSection('practitioners', { list: practitioners });
+    setSaving(false);
+  }
+
+  function addPractitioner() {
+    setPractitioners(prev => [...prev, { id: crypto.randomUUID(), name: "", services: "" }]);
+  }
+
+  function removePractitioner(id: string) {
+    setPractitioners(prev => prev.filter(p => p.id !== id));
+  }
+
+  function updatePractitioner(id: string, field: keyof Practitioner, value: string) {
+    setPractitioners(prev => prev.map(p => p.id === id ? { ...p, [field]: value } : p));
   }
 
   const SaveBtn = ({ label = "Save Changes" }: { label?: string }) => (
@@ -1479,105 +1502,73 @@ function SettingsScreen() {
           </form>
         )}
 
-        {activeSection === "Juvonno Integration" && (
-          <form key={settingsKey} onSubmit={e => handleSave('juvonno_integration', e)} className="space-y-5">
+        {activeSection === "Practitioners" && (
+          <div className="space-y-5">
             <div className="flex items-center justify-between">
-              <h2 className="text-base font-semibold text-foreground">Juvonno Integration</h2>
+              <h2 className="text-base font-semibold text-foreground">Practitioners</h2>
               <div className="flex items-center gap-2">
-                <Badge label="Connected" variant="Connected" />
-                <SaveBtn />
+                <button type="button" onClick={addPractitioner} className="flex items-center gap-1.5 bg-muted border border-border text-xs font-medium px-3 py-2 rounded-md hover:bg-accent transition-colors">
+                  <Plus size={12} /> Add Practitioner
+                </button>
+                <button type="button" onClick={handleSavePractitioners} disabled={saving} className="bg-primary text-primary-foreground text-xs font-medium px-4 py-2 rounded-md hover:opacity-90 disabled:opacity-50">
+                  {saving ? "Saving…" : "Save Changes"}
+                </button>
               </div>
             </div>
-            <Card className="p-5 space-y-3">
-              <div className="flex items-center gap-2 p-3 bg-emerald-50 border border-emerald-200 rounded-lg">
-                <CheckCircle2 size={14} className="text-emerald-600" />
-                <p className="text-xs text-emerald-700 font-medium">Juvonno API connected and healthy · Last sync 2 min ago</p>
-              </div>
-              <div className="grid grid-cols-2 gap-3 text-xs">
-                {[
-                  ["Booking API", "✓ Operational"],
-                  ["Lookup API", "✓ Operational"],
-                  ["Availability API", "✓ Operational"],
-                  ["Errors Today", "0"],
-                ].map(([k, v]) => (
-                  <div key={k} className="p-3 bg-muted rounded-lg flex justify-between">
-                    <span className="text-muted-foreground">{k}</span>
-                    <span className="font-medium text-foreground">{v}</span>
-                  </div>
-                ))}
-              </div>
-              <div className="pt-2 space-y-3">
-                <div className="flex items-center gap-2">
-                  <Lock size={12} className="text-muted-foreground" />
-                  <p className="text-xs text-muted-foreground">Read-only fields are managed server-side. Retell fields are editable.</p>
-                </div>
-                <div className="grid grid-cols-2 gap-3">
-                  {([
-                    ["API Key", "api_key", "—", true],
-                    ["API Base URL", "api_base_url", "—", true],
-                    ["Branch Code", "branch_code", "—", true],
-                    ["Clinic/Company ID", "clinic_company_id", tenantInfo?.clinic_id ?? "—", true],
-                  ] as [string, string, string, boolean][]).map(([label, name, val, ro]) => (
-                    <div key={name} className="space-y-1.5">
-                      <label className="text-xs font-medium text-muted-foreground flex items-center gap-1"><Lock size={10} /> {label}</label>
-                      <input readOnly={ro} name={ro ? undefined : name} value={ro ? val : undefined} defaultValue={ro ? undefined : (sj[name] ?? "")} className="w-full bg-muted border border-border rounded-md px-3 py-2 text-xs text-muted-foreground cursor-not-allowed font-mono" />
+
+            {practitioners.length === 0 ? (
+              <Card className="p-10 flex flex-col items-center justify-center gap-3 text-center">
+                <Users size={28} className="text-muted-foreground/30" />
+                <p className="text-sm font-medium text-foreground">No practitioners added yet</p>
+                <p className="text-xs text-muted-foreground">Click "Add Practitioner" to get started.</p>
+                <button type="button" onClick={addPractitioner} className="mt-1 flex items-center gap-1.5 bg-primary text-primary-foreground text-xs font-medium px-4 py-2 rounded-md hover:opacity-90">
+                  <Plus size={12} /> Add Practitioner
+                </button>
+              </Card>
+            ) : (
+              <div className="space-y-3">
+                {practitioners.map((p) => (
+                  <Card key={p.id} className="p-4">
+                    <div className="flex items-start gap-4">
+                      <div className="flex-1 grid grid-cols-2 gap-3">
+                        <div className="space-y-1.5">
+                          <label className="text-xs font-medium text-foreground">Name</label>
+                          <input
+                            value={p.name}
+                            onChange={e => updatePractitioner(p.id, 'name', e.target.value)}
+                            placeholder="Dr. Sarah Chen"
+                            className="w-full bg-input-background border border-border rounded-md px-3 py-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+                          />
+                        </div>
+                        <div className="space-y-1.5">
+                          <label className="text-xs font-medium text-foreground">Services Offered</label>
+                          <input
+                            value={p.services}
+                            onChange={e => updatePractitioner(p.id, 'services', e.target.value)}
+                            placeholder="Physiotherapy, Massage Therapy"
+                            className="w-full bg-input-background border border-border rounded-md px-3 py-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+                          />
+                        </div>
+                      </div>
+                      <button type="button" onClick={() => removePractitioner(p.id)} className="mt-5 text-muted-foreground hover:text-destructive transition-colors">
+                        <X size={14} />
+                      </button>
                     </div>
-                  ))}
-                  <div className="space-y-1.5">
-                    <label className="text-xs font-medium text-foreground">Retell Agent ID</label>
-                    <input name="retell_agent_id" defaultValue={sj.retell_agent_id ?? ""} placeholder="agent_xxxxx" className="w-full bg-input-background border border-border rounded-md px-3 py-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring font-mono" />
-                  </div>
-                  <div className="space-y-1.5">
-                    <label className="text-xs font-medium text-foreground">Retell API Key</label>
-                    <input name="retell_api_key" type="password" defaultValue={sj.retell_api_key ?? ""} placeholder="key_xxxxxxxx" className="w-full bg-input-background border border-border rounded-md px-3 py-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring font-mono" />
-                  </div>
-                  <div className="space-y-1.5">
-                    <label className="text-xs font-medium text-muted-foreground flex items-center gap-1"><Lock size={10} /> Twilio Number</label>
-                    <input readOnly value="—" className="w-full bg-muted border border-border rounded-md px-3 py-2 text-xs text-muted-foreground cursor-not-allowed font-mono" />
-                  </div>
-                </div>
-              </div>
-            </Card>
-          </form>
-        )}
-
-        {activeSection === "Voice & AI Personality" && (
-          <form key={settingsKey} onSubmit={e => handleSave('voice_personality', e)} className="space-y-5">
-            <div className="flex items-center justify-between">
-              <h2 className="text-base font-semibold text-foreground">Voice & AI Personality</h2>
-              <SaveBtn />
-            </div>
-            <Card className="p-5 space-y-4">
-              <div className="grid grid-cols-2 gap-4">
-                {([
-                  ["Voice", "voice", ["Alloy (Female)", "Echo (Male)", "Nova (Female)"]],
-                  ["Speaking Style", "speaking_style", ["Warm and professional", "Formal", "Casual and friendly"]],
-                  ["Language", "language", ["English", "French"]],
-                  ["Conversation Speed", "conversation_speed", ["Normal", "Slightly slower", "Slightly faster"]],
-                ] as [string, string, string[]][]).map(([label, name, opts]) => (
-                  <div key={name} className="space-y-1.5">
-                    <label className="text-xs font-medium text-foreground">{label}</label>
-                    <select name={name} defaultValue={sv[name] ?? opts[0]} className="w-full bg-input-background border border-border rounded-md px-3 py-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring">
-                      {opts.map(o => <option key={o}>{o}</option>)}
-                    </select>
-                  </div>
+                    {p.services && (
+                      <div className="mt-2 flex flex-wrap gap-1.5">
+                        {p.services.split(',').map(s => s.trim()).filter(Boolean).map(s => (
+                          <span key={s} className="text-[10px] bg-primary/10 text-primary px-2 py-0.5 rounded-full font-medium">{s}</span>
+                        ))}
+                      </div>
+                    )}
+                  </Card>
                 ))}
               </div>
-              {([
-                ["Greeting Message", "greeting_message", `Thank you for calling ${tenantInfo?.clinic_name ?? "our clinic"}. This is Grace. How can I help you today?`],
-                ["After-Hours Greeting", "after_hours_greeting", `Thank you for calling ${tenantInfo?.clinic_name ?? "our clinic"}. Our clinic is currently closed. Please call back during business hours or leave a message.`],
-                ["Recording Consent Message", "recording_consent_message", "This call may be recorded for quality assurance purposes."],
-              ] as [string, string, string][]).map(([label, name, fallback]) => (
-                <div key={name} className="space-y-1.5">
-                  <label className="text-xs font-medium text-foreground">{label}</label>
-                  <textarea name={name} rows={2} defaultValue={sv[name] ?? fallback} className="w-full bg-input-background border border-border rounded-md px-3 py-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring resize-none" />
-                </div>
-              ))}
-            </Card>
-          </form>
+            )}
+          </div>
         )}
 
-        {!["Clinic Profile", "Clinic Hours", "Juvonno Integration", "Voice & AI Personality"].includes(activeSection) && (
+        {!["Clinic Profile", "Clinic Hours", "Practitioners"].includes(activeSection) && (
           <form onSubmit={e => handleSave(activeSection.toLowerCase().replace(/[^a-z0-9]+/g, '_'), e)} className="space-y-5">
             <div className="flex items-center justify-between">
               <h2 className="text-base font-semibold text-foreground">{activeSection}</h2>
@@ -1822,7 +1813,7 @@ export default function App() {
     }
   }
 
-  async function saveSection(section: string, data: Record<string, string>) {
+  async function saveSection(section: string, data: Record<string, unknown>) {
     if (!accessToken) return;
     const res = await fetch(`/api/link/${accessToken}/settings`, {
       method: 'PUT',
