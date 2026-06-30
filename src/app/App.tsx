@@ -1350,7 +1350,7 @@ function RecordingsScreen() {
 }
 
 // ── Screen: Settings ──────────────────────────────────────────────────────────
-interface Practitioner { id: string; name: string; services: string; }
+interface Practitioner { id: string; name: string; services: string; clinic_id: string; }
 interface FAQ { id: string; question: string; answer: string; }
 
 function SettingsScreen() {
@@ -1362,7 +1362,7 @@ function SettingsScreen() {
 
   const sections = [
     "Clinic Profile", "Clinic Hours", "Practitioners",
-    "Booking Rules", "Transfer & Escalation",
+    "Transfer & Escalation",
     "FAQs / Knowledge Base", "SMS Follow-Ups",
   ];
 
@@ -1396,7 +1396,7 @@ function SettingsScreen() {
   }
 
   function addPractitioner() {
-    setPractitioners(prev => [...prev, { id: crypto.randomUUID(), name: "", services: "" }]);
+    setPractitioners(prev => [...prev, { id: crypto.randomUUID(), name: "", services: "", clinic_id: "" }]);
   }
 
   function removePractitioner(id: string) {
@@ -1539,7 +1539,7 @@ function SettingsScreen() {
                 {practitioners.map((p) => (
                   <Card key={p.id} className="p-4">
                     <div className="flex items-start gap-4">
-                      <div className="flex-1 grid grid-cols-2 gap-3">
+                      <div className="flex-1 grid grid-cols-3 gap-3">
                         <div className="space-y-1.5">
                           <label className="text-xs font-medium text-foreground">Name</label>
                           <input
@@ -1547,6 +1547,15 @@ function SettingsScreen() {
                             onChange={e => updatePractitioner(p.id, 'name', e.target.value)}
                             placeholder="Dr. Sarah Chen"
                             className="w-full bg-input-background border border-border rounded-md px-3 py-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+                          />
+                        </div>
+                        <div className="space-y-1.5">
+                          <label className="text-xs font-medium text-foreground">Clinic ID</label>
+                          <input
+                            value={p.clinic_id}
+                            onChange={e => updatePractitioner(p.id, 'clinic_id', e.target.value)}
+                            placeholder="clinic_001"
+                            className="w-full bg-input-background border border-border rounded-md px-3 py-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring font-mono"
                           />
                         </div>
                         <div className="space-y-1.5">
@@ -1576,53 +1585,6 @@ function SettingsScreen() {
             )}
           </div>
         )}
-
-        {activeSection === "Booking Rules" && (() => {
-          const sb = (settings.booking_rules ?? {}) as Record<string, string>;
-          return (
-            <form key={settingsKey} onSubmit={e => handleSave('booking_rules', e)} className="space-y-5">
-              <div className="flex items-center justify-between">
-                <h2 className="text-base font-semibold text-foreground">Booking Rules</h2>
-                <SaveBtn />
-              </div>
-              <Card className="p-5 space-y-4">
-                <div className="grid grid-cols-2 gap-4">
-                  {([
-                    ["Default Appointment Duration", "default_duration", ["30 min", "15 min", "45 min", "60 min", "90 min"]],
-                    ["New Patient Duration", "new_patient_duration", ["60 min", "30 min", "45 min", "90 min"]],
-                    ["Minimum Advance Notice", "min_notice", ["None", "1 hour", "2 hours", "4 hours", "24 hours", "48 hours"]],
-                    ["Booking Window", "booking_window", ["1 month", "1 week", "2 weeks", "3 months", "6 months"]],
-                    ["Max Bookings per Day", "max_per_day", ["No limit", "5", "10", "15", "20", "25", "30"]],
-                    ["Appointment Spacing", "spacing", ["None", "5 min", "10 min", "15 min"]],
-                  ] as [string, string, string[]][]).map(([label, name, opts]) => (
-                    <div key={name} className="space-y-1.5">
-                      <label className="text-xs font-medium text-foreground">{label}</label>
-                      <select name={name} defaultValue={sb[name] ?? opts[0]} className="w-full bg-input-background border border-border rounded-md px-3 py-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring">
-                        {opts.map(o => <option key={o}>{o}</option>)}
-                      </select>
-                    </div>
-                  ))}
-                </div>
-                <div className="flex flex-col gap-3 pt-1">
-                  {[
-                    ["allow_same_day", "Allow same-day bookings"],
-                    ["require_reason", "Require a reason when booking"],
-                    ["new_patients_only_morning", "Accept new patients in morning slots only"],
-                  ].map(([name, label]) => (
-                    <label key={name} className="flex items-center gap-2.5 text-xs text-foreground cursor-pointer">
-                      <input type="checkbox" name={name} defaultChecked={sb[name] === 'true'} className="rounded" />
-                      {label}
-                    </label>
-                  ))}
-                </div>
-                <div className="space-y-1.5 pt-1">
-                  <label className="text-xs font-medium text-foreground">Additional Instructions for AI</label>
-                  <textarea name="additional_instructions" rows={3} defaultValue={sb.additional_instructions ?? ""} placeholder="e.g. Never book two new patients back-to-back. Always offer the earliest available slot first." className="w-full bg-input-background border border-border rounded-md px-3 py-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring resize-none" />
-                </div>
-              </Card>
-            </form>
-          );
-        })()}
 
         {activeSection === "Transfer & Escalation" && (() => {
           const st = (settings.transfer_escalation ?? {}) as Record<string, string>;
