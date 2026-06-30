@@ -35,6 +35,14 @@ function findTenant(accessToken) {
 
 app.get('/health', (_req, res) => res.json({ ok: true }));
 
+// Frontend fetches tenant info (clinic name, receptionist, etc.)
+app.get('/api/link/:accessToken/tenant', (req, res) => {
+  const tenant = findTenant(req.params.accessToken);
+  if (!tenant) return res.status(404).json({ error: 'Invalid access token' });
+  const { access_token, ...info } = tenant;
+  res.json(info);
+});
+
 // n8n pushes incoming request data here
 app.post('/api/link/:accessToken/intake/requests', (req, res) => {
   const apiKey = req.headers['x-dashboard-api-key'];

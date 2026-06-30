@@ -68,8 +68,17 @@ type Transcript = {
 };
 
 // ── Dashboard context ─────────────────────────────────────────────────────────
+interface TenantInfo {
+  client_id: string;
+  clinic_id: string;
+  clinic_name: string;
+  receptionist_name: string;
+  link_label: string;
+}
+
 interface DashboardCtx {
   accessToken: string | null;
+  tenantInfo: TenantInfo | null;
   staffTasks: StaffTask[];
   callLogs: CallLog[];
   loading: boolean;
@@ -78,6 +87,7 @@ interface DashboardCtx {
 
 const DashboardContext = createContext<DashboardCtx>({
   accessToken: null,
+  tenantInfo: null,
   staffTasks: [],
   callLogs: [],
   loading: false,
@@ -191,8 +201,12 @@ const navItems = [
   { id: "integration", label: "Integration Health", icon: Activity },
 ];
 
+function initials(name: string) {
+  return name.split(" ").map(w => w[0]).join("").toUpperCase().slice(0, 2);
+}
+
 function Sidebar({ active, onNav }: { active: string; onNav: (id: string) => void }) {
-  const { staffTasks } = useDashboard();
+  const { staffTasks, tenantInfo } = useDashboard();
   const openTaskCount = staffTasks.filter(t => t.status !== "Completed").length;
 
   return (
@@ -203,7 +217,7 @@ function Sidebar({ active, onNav }: { active: string; onNav: (id: string) => voi
             <Bot size={14} className="text-white" />
           </div>
           <div>
-            <p className="text-sm font-semibold text-white leading-none">NAP Clinic</p>
+            <p className="text-sm font-semibold text-white leading-none">{tenantInfo?.clinic_name ?? "Dashboard"}</p>
             <p className="text-[10px] text-sidebar-foreground opacity-60 mt-0.5">Automation Dashboard</p>
           </div>
         </div>
@@ -229,10 +243,12 @@ function Sidebar({ active, onNav }: { active: string; onNav: (id: string) => voi
       </nav>
       <div className="px-4 py-4 border-t border-sidebar-border">
         <div className="flex items-center gap-2.5">
-          <div className="w-7 h-7 rounded-full bg-violet-700 flex items-center justify-center text-xs text-white font-semibold">SK</div>
+          <div className="w-7 h-7 rounded-full bg-violet-700 flex items-center justify-center text-xs text-white font-semibold">
+            {tenantInfo ? initials(tenantInfo.receptionist_name) : "—"}
+          </div>
           <div className="flex-1 min-w-0">
-            <p className="text-xs font-medium text-white truncate">Sabreen Sanghera</p>
-            <p className="text-[10px] text-sidebar-foreground opacity-60">Manager</p>
+            <p className="text-xs font-medium text-white truncate">{tenantInfo?.receptionist_name ?? ""}</p>
+            <p className="text-[10px] text-sidebar-foreground opacity-60">Front Desk</p>
           </div>
         </div>
       </div>
@@ -242,11 +258,12 @@ function Sidebar({ active, onNav }: { active: string; onNav: (id: string) => voi
 
 // ── Top Bar ───────────────────────────────────────────────────────────────────
 function TopBar() {
+  const { tenantInfo } = useDashboard();
   return (
     <div className="h-14 bg-card border-b border-border flex items-center px-6 gap-4 flex-shrink-0">
       <div className="flex items-center gap-2 bg-muted border border-border rounded-md px-3 py-1.5 min-w-[160px] cursor-pointer hover:bg-accent transition-colors">
         <Building2 size={13} className="text-muted-foreground" />
-        <span className="text-sm font-medium text-foreground">Recoup Health</span>
+        <span className="text-sm font-medium text-foreground">{tenantInfo?.clinic_name ?? "—"}</span>
         <ChevronDown size={12} className="text-muted-foreground ml-auto" />
       </div>
       <div className="flex items-center gap-2 bg-muted border border-border rounded-md px-3 py-1.5 cursor-pointer hover:bg-accent transition-colors">
@@ -269,7 +286,7 @@ function TopBar() {
         <button className="p-2 rounded-md hover:bg-muted transition-colors">
           <HelpCircle size={15} className="text-muted-foreground" />
         </button>
-        <button className="w-7 h-7 rounded-full bg-violet-600 flex items-center justify-center text-xs text-white font-semibold">SS</button>
+        <button className="w-7 h-7 rounded-full bg-violet-600 flex items-center justify-center text-xs text-white font-semibold">{tenantInfo ? initials(tenantInfo.receptionist_name) : "—"}</button>
       </div>
     </div>
   );
@@ -1739,6 +1756,7 @@ function getTokenFromURL(): string | null {
 export default function App() {
   const [activeNav, setActiveNav] = useState("overview");
   const [accessToken] = useState<string | null>(getTokenFromURL);
+  const [tenantInfo, setTenantInfo] = useState<TenantInfo | null>(null);
   const [staffTasks, setStaffTasks] = useState<StaffTask[]>([]);
   const [callLogs, setCallLogs] = useState<CallLog[]>([]);
   const [loading, setLoading] = useState(false);
@@ -1746,9 +1764,14 @@ export default function App() {
   useEffect(() => {
     if (!accessToken) return;
     setLoading(true);
-    fetch(`/api/link/${accessToken}/queue/requests`)
-      .then(r => r.ok ? r.json() : Promise.reject(r.status))
-      .then((data: StaffTask[]) => setStaffTasks(data))
+    Promise.all([
+      fetch(`/api/link/${accessToken}/tenant`).then(r => r.ok ? r.json() : null),
+      fetch(`/api/link/${accessToken}/queue/requests`).then(r => r.ok ? r.json() : []),
+    ])
+      .then(([tenant, requests]) => {
+        setTenantInfo(tenant);
+        setStaffTasks(requests);
+      })
       .catch(() => {})
       .finally(() => setLoading(false));
   }, [accessToken]);
@@ -1783,7 +1806,7 @@ export default function App() {
   }
 
   return (
-    <DashboardContext.Provider value={{ accessToken, staffTasks, callLogs, loading, updateTaskStatus }}>
+    <DashboardContext.Provider value={{ accessToken, tenantInfo, staffTasks, callLogs, loading, updateTaskStatus }}>
       <div
         className="flex h-screen w-screen overflow-hidden bg-background"
         style={{ fontFamily: "'Inter', sans-serif" }}
