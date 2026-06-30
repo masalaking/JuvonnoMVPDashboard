@@ -1350,7 +1350,7 @@ function RecordingsScreen() {
 }
 
 // ── Screen: Settings ──────────────────────────────────────────────────────────
-interface Practitioner { id: string; name: string; services: string; clinic_id: string; }
+interface Practitioner { id: string; name: string; services: string; practitioner_id: string; }
 interface FAQ { id: string; question: string; answer: string; }
 
 function SettingsScreen() {
@@ -1396,7 +1396,7 @@ function SettingsScreen() {
   }
 
   function addPractitioner() {
-    setPractitioners(prev => [...prev, { id: crypto.randomUUID(), name: "", services: "", clinic_id: "" }]);
+    setPractitioners(prev => [...prev, { id: crypto.randomUUID(), name: "", services: "", practitioner_id: "" }]);
   }
 
   function removePractitioner(id: string) {
@@ -1550,11 +1550,11 @@ function SettingsScreen() {
                           />
                         </div>
                         <div className="space-y-1.5">
-                          <label className="text-xs font-medium text-foreground">Clinic ID</label>
+                          <label className="text-xs font-medium text-foreground">Practitioner ID</label>
                           <input
-                            value={p.clinic_id}
-                            onChange={e => updatePractitioner(p.id, 'clinic_id', e.target.value)}
-                            placeholder="clinic_001"
+                            value={p.practitioner_id}
+                            onChange={e => updatePractitioner(p.id, 'practitioner_id', e.target.value)}
+                            placeholder="prac_001"
                             className="w-full bg-input-background border border-border rounded-md px-3 py-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring font-mono"
                           />
                         </div>
