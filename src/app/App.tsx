@@ -294,7 +294,7 @@ function TopBar() {
 
 // ── Screen: Overview ─────────────────────────────────────────────────────────
 function OverviewScreen() {
-  const { callLogs } = useDashboard();
+  const { callLogs, tenantInfo } = useDashboard();
   return (
     <div className="p-6 space-y-6">
       <div className="flex items-center justify-between">
