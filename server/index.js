@@ -115,6 +115,51 @@ app.get('/api/link/:accessToken/settings', (req, res) => {
   res.json(all[tenant.client_id] ?? {});
 });
 
+// Save all sections at once — body: { sections: { clinic_profile: {...}, practitioners: {...}, ... } }
+// Fires one webhook per section so n8n processes each independently
+app.put('/api/link/:accessToken/settings/bulk', async (req, res) => {
+  const tenant = findTenant(req.params.accessToken);
+  if (!tenant) return res.status(404).json({ error: 'Invalid access token' });
+  const { sections } = req.body;
+  if (!sections || typeof sections !== 'object') return res.status(400).json({ error: 'sections is required' });
+
+  const all = loadSettings();
+  const existing = all[tenant.client_id] ?? {};
+
+  for (const [section, data] of Object.entries(sections)) {
+    existing[section] = { ...(existing[section] ?? {}), ...data };
+  }
+  all[tenant.client_id] = existing;
+  saveSettingsFile(all);
+
+  res.json(existing);
+
+  // Fire sequentially after responding so concurrent executions don't race on
+  // n8n's read→merge→write pattern inside $getWorkflowStaticData('global').
+  if (tenant.n8n_webhook_url) {
+    (async () => {
+      for (const [section, data] of Object.entries(sections)) {
+        try {
+          await fetch(tenant.n8n_webhook_url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              event: 'settings.changed',
+              client_id: tenant.client_id,
+              clinic_name: tenant.clinic_name,
+              section,
+              changed: data,
+              all_settings: existing,
+            }),
+          });
+        } catch (err) {
+          console.error(`[webhook] failed to notify n8n for section "${section}" (${tenant.client_id}):`, err.message);
+        }
+      }
+    })();
+  }
+});
+
 // Save (merge) one section — body: { section: 'voice_personality', data: {...} }
 // After saving, fires a webhook to n8n so it can react (e.g. update Retell AI)
 app.put('/api/link/:accessToken/settings', async (req, res) => {
@@ -129,7 +174,8 @@ app.put('/api/link/:accessToken/settings', async (req, res) => {
   all[tenant.client_id] = existing;
   saveSettingsFile(all);
 
-  // Fire-and-forget to this tenant's own n8n webhook
+  res.json(existing);
+
   if (tenant.n8n_webhook_url) {
     fetch(tenant.n8n_webhook_url, {
       method: 'POST',
@@ -142,10 +188,8 @@ app.put('/api/link/:accessToken/settings', async (req, res) => {
         changed: data,
         all_settings: existing,
       }),
-    }).catch(() => {});
+    }).catch(err => console.error(`[webhook] failed to notify n8n for section "${section}" (${tenant.client_id}):`, err.message));
   }
-
-  res.json(existing);
 });
 
 // Serve built frontend
