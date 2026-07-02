@@ -1352,7 +1352,9 @@ function RecordingsScreen() {
 }
 
 // ── Screen: Settings ──────────────────────────────────────────────────────────
-interface Practitioner { id: string; name: string; services: string; keywords: string; practitioner_id: string; initial_duration: string; followup_durations: string; }
+interface DurationCategory { id: string; label: string; durations: string; }
+interface AppointmentType { id: string; service_name: string; duration_categories: DurationCategory[]; }
+interface Practitioner { id: string; name: string; keywords: string; practitioner_id: string; appointment_types: AppointmentType[]; }
 interface FAQ { id: string; question: string; answer: string; }
 
 type DraftKey = 'clinic_profile' | 'clinic_hours' | 'transfer_escalation' | 'sms_follow_ups';
@@ -1436,15 +1438,76 @@ function SettingsScreen() {
   }
 
   function addPractitioner() {
-    setPractitioners(prev => [...prev, { id: crypto.randomUUID(), name: "", services: "", keywords: "", practitioner_id: "", initial_duration: "45", followup_durations: "30,45,60" }]);
+    setPractitioners(prev => [...prev, {
+      id: crypto.randomUUID(), name: "", keywords: "", practitioner_id: "",
+      appointment_types: [newAppointmentType()],
+    }]);
   }
 
   function removePractitioner(id: string) {
     setPractitioners(prev => prev.filter(p => p.id !== id));
   }
 
-  function updatePractitioner(id: string, field: keyof Practitioner, value: string) {
+  function updatePractitioner(id: string, field: 'name' | 'keywords' | 'practitioner_id', value: string) {
     setPractitioners(prev => prev.map(p => p.id === id ? { ...p, [field]: value } : p));
+  }
+
+  function newAppointmentType(): AppointmentType {
+    return {
+      id: crypto.randomUUID(), service_name: "",
+      duration_categories: [
+        { id: crypto.randomUUID(), label: "Initial", durations: "45,60" },
+        { id: crypto.randomUUID(), label: "Follow-up", durations: "30,45,60" },
+      ],
+    };
+  }
+
+  function addAppointmentType(practitionerId: string) {
+    setPractitioners(prev => prev.map(p => p.id === practitionerId ? {
+      ...p, appointment_types: [...(p.appointment_types ?? []), newAppointmentType()],
+    } : p));
+  }
+
+  function removeAppointmentType(practitionerId: string, typeId: string) {
+    setPractitioners(prev => prev.map(p => p.id === practitionerId ? {
+      ...p, appointment_types: p.appointment_types.filter(t => t.id !== typeId),
+    } : p));
+  }
+
+  function updateAppointmentTypeName(practitionerId: string, typeId: string, value: string) {
+    setPractitioners(prev => prev.map(p => p.id === practitionerId ? {
+      ...p, appointment_types: p.appointment_types.map(t => t.id === typeId ? { ...t, service_name: value } : t),
+    } : p));
+  }
+
+  function addDurationCategory(practitionerId: string, typeId: string) {
+    setPractitioners(prev => prev.map(p => p.id === practitionerId ? {
+      ...p, appointment_types: p.appointment_types.map(t => t.id === typeId ? {
+        ...t, duration_categories: [...(t.duration_categories ?? []), { id: crypto.randomUUID(), label: "", durations: "" }],
+      } : t),
+    } : p));
+  }
+
+  function removeDurationCategory(practitionerId: string, typeId: string, catId: string) {
+    setPractitioners(prev => prev.map(p => p.id === practitionerId ? {
+      ...p, appointment_types: p.appointment_types.map(t => t.id === typeId ? {
+        ...t, duration_categories: t.duration_categories.filter(c => c.id !== catId),
+      } : t),
+    } : p));
+  }
+
+  function updateDurationCategory(practitionerId: string, typeId: string, catId: string, field: 'label' | 'durations', value: string) {
+    setPractitioners(prev => prev.map(p => p.id === practitionerId ? {
+      ...p, appointment_types: p.appointment_types.map(t => t.id === typeId ? {
+        ...t, duration_categories: t.duration_categories.map(c => c.id === catId ? { ...c, [field]: value } : c),
+      } : t),
+    } : p));
+  }
+
+  function toggleDuration(practitionerId: string, typeId: string, catId: string, dur: string, currentDurations: string) {
+    const set = new Set(currentDurations.split(',').map(s => s.trim()).filter(Boolean));
+    set.has(dur) ? set.delete(dur) : set.add(dur);
+    updateDurationCategory(practitionerId, typeId, catId, 'durations', [...set].join(','));
   }
 
   const SectionSaveBtn = ({ section, label = "Save" }: { section?: DraftKey; label?: string }) => (
@@ -1581,12 +1644,7 @@ function SettingsScreen() {
               <div className="space-y-3">
                 {practitioners.map((p, i) => {
                   const durations = ["15", "30", "45", "60", "75", "90"];
-                  const followupSet = new Set((p.followup_durations ?? '').split(',').map(s => s.trim()).filter(Boolean));
-                  function toggleFollowup(dur: string) {
-                    const next = new Set(followupSet);
-                    next.has(dur) ? next.delete(dur) : next.add(dur);
-                    updatePractitioner(p.id, 'followup_durations', [...next].join(','));
-                  }
+                  const types = p.appointment_types ?? [];
                   return (
                     <Card key={p.id} className="p-4 space-y-3">
                       {/* Header */}
@@ -1596,7 +1654,7 @@ function SettingsScreen() {
                           <X size={13} />
                         </button>
                       </div>
-                      {/* Row 1: Name + ID */}
+                      {/* Name + ID */}
                       <div className="grid grid-cols-2 gap-3">
                         <div className="space-y-1.5">
                           <label className="text-xs font-medium text-foreground">Name</label>
@@ -1607,46 +1665,58 @@ function SettingsScreen() {
                           <input value={p.practitioner_id} onChange={e => updatePractitioner(p.id, 'practitioner_id', e.target.value)} placeholder="prac_001" className="w-full bg-input-background border border-border rounded-md px-3 py-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring font-mono" />
                         </div>
                       </div>
-                      {/* Row 2: Discipline + Keywords */}
-                      <div className="grid grid-cols-2 gap-3">
-                        <div className="space-y-1.5">
-                          <label className="text-xs font-medium text-foreground">Discipline / Service Type</label>
-                          <input value={p.services} onChange={e => updatePractitioner(p.id, 'services', e.target.value)} placeholder="Chiropractic, Physiotherapy, RMT" className="w-full bg-input-background border border-border rounded-md px-3 py-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring" />
-                        </div>
-                        <div className="space-y-1.5">
-                          <label className="text-xs font-medium text-foreground">Keywords</label>
-                          <input value={p.keywords} onChange={e => updatePractitioner(p.id, 'keywords', e.target.value)} placeholder="chiro, physio, RMT, acupuncture, osteopath" className="w-full bg-input-background border border-border rounded-md px-3 py-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring" />
-                        </div>
+                      {/* Keywords */}
+                      <div className="space-y-1.5">
+                        <label className="text-xs font-medium text-foreground">Keywords</label>
+                        <input value={p.keywords} onChange={e => updatePractitioner(p.id, 'keywords', e.target.value)} placeholder="chiro, physio, RMT, acupuncture, osteopath" className="w-full bg-input-background border border-border rounded-md px-3 py-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring" />
                       </div>
-                      {/* Appointment Durations */}
-                      <div className="border-t border-border pt-3 space-y-2.5">
-                        <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">Appointment Durations</p>
-                        <div className="flex items-center gap-3">
-                          <label className="text-xs font-medium text-foreground w-24 shrink-0">Initial visit</label>
-                          <select value={p.initial_duration ?? "45"} onChange={e => updatePractitioner(p.id, 'initial_duration', e.target.value)} className="bg-input-background border border-border rounded-md px-2 py-1.5 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring">
-                            {durations.map(d => <option key={d} value={d}>{d} min</option>)}
-                          </select>
-                        </div>
-                        <div className="flex items-center gap-3">
-                          <label className="text-xs font-medium text-foreground w-24 shrink-0">Follow-ups</label>
-                          <div className="flex flex-wrap gap-2">
-                            {durations.map(d => (
-                              <label key={d} className="flex items-center gap-1.5 text-xs text-foreground cursor-pointer select-none">
-                                <input type="checkbox" checked={followupSet.has(d)} onChange={() => toggleFollowup(d)} className="rounded" />
-                                {d} min
-                              </label>
-                            ))}
+                      {/* Service types */}
+                      <div className="border-t border-border pt-3 space-y-2">
+                        <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">Service Types & Appointment Durations</p>
+                        {types.map((t, ti) => (
+                          <div key={t.id} className="bg-muted/40 border border-border rounded-md p-3 space-y-2">
+                            {/* Service name */}
+                            <div className="flex items-center gap-2">
+                              <input value={t.service_name} onChange={e => updateAppointmentTypeName(p.id, t.id, e.target.value)} placeholder={`Service type #${ti + 1} (e.g. Chiropractic)`} className="flex-1 bg-input-background border border-border rounded-md px-3 py-1.5 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring font-medium" />
+                              {types.length > 1 && (
+                                <button type="button" onClick={() => removeAppointmentType(p.id, t.id)} className="text-muted-foreground hover:text-destructive transition-colors shrink-0">
+                                  <X size={12} />
+                                </button>
+                              )}
+                            </div>
+                            {/* Duration categories */}
+                            <div className="space-y-1.5 pl-1">
+                              {(t.duration_categories ?? []).map(c => {
+                                const selected = new Set((c.durations ?? '').split(',').map(s => s.trim()).filter(Boolean));
+                                return (
+                                  <div key={c.id} className="flex flex-wrap items-center gap-2">
+                                    <input value={c.label} onChange={e => updateDurationCategory(p.id, t.id, c.id, 'label', e.target.value)} placeholder="e.g. Initial, Follow-up, Cleaning" className="w-28 shrink-0 bg-input-background border border-border rounded px-2 py-1 text-[10px] text-foreground focus:outline-none focus:ring-1 focus:ring-ring" />
+                                    <div className="flex flex-wrap gap-1.5">
+                                      {durations.map(d => (
+                                        <label key={d} className="flex items-center gap-1 text-[10px] text-foreground cursor-pointer select-none">
+                                          <input type="checkbox" checked={selected.has(d)} onChange={() => toggleDuration(p.id, t.id, c.id, d, c.durations)} className="rounded" />
+                                          {d}
+                                        </label>
+                                      ))}
+                                    </div>
+                                    {(t.duration_categories ?? []).length > 1 && (
+                                      <button type="button" onClick={() => removeDurationCategory(p.id, t.id, c.id)} className="text-muted-foreground hover:text-destructive transition-colors ml-auto">
+                                        <X size={10} />
+                                      </button>
+                                    )}
+                                  </div>
+                                );
+                              })}
+                              <button type="button" onClick={() => addDurationCategory(p.id, t.id)} className="flex items-center gap-1 text-[10px] text-muted-foreground hover:text-foreground transition-colors pt-0.5">
+                                <Plus size={9} /> Add duration type
+                              </button>
+                            </div>
                           </div>
-                        </div>
+                        ))}
+                        <button type="button" onClick={() => addAppointmentType(p.id)} className="flex items-center gap-1.5 text-[10px] font-medium text-muted-foreground hover:text-foreground transition-colors pt-0.5">
+                          <Plus size={10} /> Add Service Type
+                        </button>
                       </div>
-                      {/* Service pills */}
-                      {p.services && (
-                        <div className="flex flex-wrap gap-1.5 pt-0.5">
-                          {p.services.split(',').map(s => s.trim()).filter(Boolean).map(s => (
-                            <span key={s} className="text-[10px] bg-primary/10 text-primary px-2 py-0.5 rounded-full font-medium">{s}</span>
-                          ))}
-                        </div>
-                      )}
                     </Card>
                   );
                 })}
