@@ -1352,7 +1352,7 @@ function RecordingsScreen() {
 }
 
 // ── Screen: Settings ──────────────────────────────────────────────────────────
-interface Practitioner { id: string; name: string; services: string; keywords: string; practitioner_id: string; }
+interface Practitioner { id: string; name: string; services: string; keywords: string; practitioner_id: string; initial_duration: string; followup_durations: string; }
 interface FAQ { id: string; question: string; answer: string; }
 
 type DraftKey = 'clinic_profile' | 'clinic_hours' | 'transfer_escalation' | 'sms_follow_ups';
@@ -1436,7 +1436,7 @@ function SettingsScreen() {
   }
 
   function addPractitioner() {
-    setPractitioners(prev => [...prev, { id: crypto.randomUUID(), name: "", services: "", keywords: "", practitioner_id: "" }]);
+    setPractitioners(prev => [...prev, { id: crypto.randomUUID(), name: "", services: "", keywords: "", practitioner_id: "", initial_duration: "45", followup_durations: "30,45,60" }]);
   }
 
   function removePractitioner(id: string) {
@@ -1579,60 +1579,77 @@ function SettingsScreen() {
               </Card>
             ) : (
               <div className="space-y-3">
-                {practitioners.map((p) => (
-                  <Card key={p.id} className="p-4">
-                    <div className="flex items-start gap-4">
-                      <div className="flex-1 grid grid-cols-3 gap-3">
+                {practitioners.map((p, i) => {
+                  const durations = ["15", "30", "45", "60", "75", "90"];
+                  const followupSet = new Set(p.followup_durations.split(',').map(s => s.trim()).filter(Boolean));
+                  function toggleFollowup(dur: string) {
+                    const next = new Set(followupSet);
+                    next.has(dur) ? next.delete(dur) : next.add(dur);
+                    updatePractitioner(p.id, 'followup_durations', [...next].join(','));
+                  }
+                  return (
+                    <Card key={p.id} className="p-4 space-y-3">
+                      {/* Header */}
+                      <div className="flex items-center justify-between">
+                        <span className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">Practitioner #{i + 1}</span>
+                        <button type="button" onClick={() => removePractitioner(p.id)} className="text-muted-foreground hover:text-destructive transition-colors">
+                          <X size={13} />
+                        </button>
+                      </div>
+                      {/* Row 1: Name + ID */}
+                      <div className="grid grid-cols-2 gap-3">
                         <div className="space-y-1.5">
                           <label className="text-xs font-medium text-foreground">Name</label>
-                          <input
-                            value={p.name}
-                            onChange={e => updatePractitioner(p.id, 'name', e.target.value)}
-                            placeholder="Dr. Sarah Chen"
-                            className="w-full bg-input-background border border-border rounded-md px-3 py-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
-                          />
+                          <input value={p.name} onChange={e => updatePractitioner(p.id, 'name', e.target.value)} placeholder="Dr. Sarah Chen" className="w-full bg-input-background border border-border rounded-md px-3 py-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring" />
                         </div>
                         <div className="space-y-1.5">
                           <label className="text-xs font-medium text-foreground">Practitioner ID</label>
-                          <input
-                            value={p.practitioner_id}
-                            onChange={e => updatePractitioner(p.id, 'practitioner_id', e.target.value)}
-                            placeholder="prac_001"
-                            className="w-full bg-input-background border border-border rounded-md px-3 py-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring font-mono"
-                          />
+                          <input value={p.practitioner_id} onChange={e => updatePractitioner(p.id, 'practitioner_id', e.target.value)} placeholder="prac_001" className="w-full bg-input-background border border-border rounded-md px-3 py-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring font-mono" />
                         </div>
+                      </div>
+                      {/* Row 2: Discipline + Keywords */}
+                      <div className="grid grid-cols-2 gap-3">
                         <div className="space-y-1.5">
-                          <label className="text-xs font-medium text-foreground">Services Offered</label>
-                          <input
-                            value={p.services}
-                            onChange={e => updatePractitioner(p.id, 'services', e.target.value)}
-                            placeholder="Physiotherapy, Massage Therapy"
-                            className="w-full bg-input-background border border-border rounded-md px-3 py-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
-                          />
+                          <label className="text-xs font-medium text-foreground">Discipline / Service Type</label>
+                          <input value={p.services} onChange={e => updatePractitioner(p.id, 'services', e.target.value)} placeholder="Chiropractic, Physiotherapy, RMT" className="w-full bg-input-background border border-border rounded-md px-3 py-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring" />
                         </div>
                         <div className="space-y-1.5">
                           <label className="text-xs font-medium text-foreground">Keywords</label>
-                          <input
-                            value={p.keywords}
-                            onChange={e => updatePractitioner(p.id, 'keywords', e.target.value)}
-                            placeholder="chiro, physio, RMT, acupuncture, osteopath"
-                            className="w-full bg-input-background border border-border rounded-md px-3 py-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
-                          />
+                          <input value={p.keywords} onChange={e => updatePractitioner(p.id, 'keywords', e.target.value)} placeholder="chiro, physio, RMT, acupuncture, osteopath" className="w-full bg-input-background border border-border rounded-md px-3 py-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring" />
                         </div>
                       </div>
-                      <button type="button" onClick={() => removePractitioner(p.id)} className="mt-5 text-muted-foreground hover:text-destructive transition-colors">
-                        <X size={14} />
-                      </button>
-                    </div>
-                    {p.services && (
-                      <div className="mt-2 flex flex-wrap gap-1.5">
-                        {p.services.split(',').map(s => s.trim()).filter(Boolean).map(s => (
-                          <span key={s} className="text-[10px] bg-primary/10 text-primary px-2 py-0.5 rounded-full font-medium">{s}</span>
-                        ))}
+                      {/* Appointment Durations */}
+                      <div className="border-t border-border pt-3 space-y-2.5">
+                        <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">Appointment Durations</p>
+                        <div className="flex items-center gap-3">
+                          <label className="text-xs font-medium text-foreground w-24 shrink-0">Initial visit</label>
+                          <select value={p.initial_duration} onChange={e => updatePractitioner(p.id, 'initial_duration', e.target.value)} className="bg-input-background border border-border rounded-md px-2 py-1.5 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring">
+                            {durations.map(d => <option key={d} value={d}>{d} min</option>)}
+                          </select>
+                        </div>
+                        <div className="flex items-center gap-3">
+                          <label className="text-xs font-medium text-foreground w-24 shrink-0">Follow-ups</label>
+                          <div className="flex flex-wrap gap-2">
+                            {durations.map(d => (
+                              <label key={d} className="flex items-center gap-1.5 text-xs text-foreground cursor-pointer select-none">
+                                <input type="checkbox" checked={followupSet.has(d)} onChange={() => toggleFollowup(d)} className="rounded" />
+                                {d} min
+                              </label>
+                            ))}
+                          </div>
+                        </div>
                       </div>
-                    )}
-                  </Card>
-                ))}
+                      {/* Service pills */}
+                      {p.services && (
+                        <div className="flex flex-wrap gap-1.5 pt-0.5">
+                          {p.services.split(',').map(s => s.trim()).filter(Boolean).map(s => (
+                            <span key={s} className="text-[10px] bg-primary/10 text-primary px-2 py-0.5 rounded-full font-medium">{s}</span>
+                          ))}
+                        </div>
+                      )}
+                    </Card>
+                  );
+                })}
               </div>
             )}
           </div>
