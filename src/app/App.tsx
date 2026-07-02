@@ -1615,7 +1615,7 @@ function SettingsScreen() {
                           <input
                             value={p.keywords}
                             onChange={e => updatePractitioner(p.id, 'keywords', e.target.value)}
-                            placeholder="back pain, sports injury, acupuncture"
+                            placeholder="chiro, physio, RMT, acupuncture, osteopath"
                             className="w-full bg-input-background border border-border rounded-md px-3 py-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
                           />
                         </div>
