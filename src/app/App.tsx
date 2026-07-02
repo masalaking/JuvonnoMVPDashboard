@@ -1352,7 +1352,7 @@ function RecordingsScreen() {
 }
 
 // ── Screen: Settings ──────────────────────────────────────────────────────────
-interface Practitioner { id: string; name: string; services: string; practitioner_id: string; }
+interface Practitioner { id: string; name: string; services: string; keywords: string; practitioner_id: string; }
 interface FAQ { id: string; question: string; answer: string; }
 
 type DraftKey = 'clinic_profile' | 'clinic_hours' | 'transfer_escalation' | 'sms_follow_ups';
@@ -1436,7 +1436,7 @@ function SettingsScreen() {
   }
 
   function addPractitioner() {
-    setPractitioners(prev => [...prev, { id: crypto.randomUUID(), name: "", services: "", practitioner_id: "" }]);
+    setPractitioners(prev => [...prev, { id: crypto.randomUUID(), name: "", services: "", keywords: "", practitioner_id: "" }]);
   }
 
   function removePractitioner(id: string) {
@@ -1607,6 +1607,15 @@ function SettingsScreen() {
                             value={p.services}
                             onChange={e => updatePractitioner(p.id, 'services', e.target.value)}
                             placeholder="Physiotherapy, Massage Therapy"
+                            className="w-full bg-input-background border border-border rounded-md px-3 py-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+                          />
+                        </div>
+                        <div className="space-y-1.5">
+                          <label className="text-xs font-medium text-foreground">Keywords</label>
+                          <input
+                            value={p.keywords}
+                            onChange={e => updatePractitioner(p.id, 'keywords', e.target.value)}
+                            placeholder="back pain, sports injury, acupuncture"
                             className="w-full bg-input-background border border-border rounded-md px-3 py-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
                           />
                         </div>
