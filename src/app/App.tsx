@@ -1581,7 +1581,7 @@ function SettingsScreen() {
               <div className="space-y-3">
                 {practitioners.map((p, i) => {
                   const durations = ["15", "30", "45", "60", "75", "90"];
-                  const followupSet = new Set(p.followup_durations.split(',').map(s => s.trim()).filter(Boolean));
+                  const followupSet = new Set((p.followup_durations ?? '').split(',').map(s => s.trim()).filter(Boolean));
                   function toggleFollowup(dur: string) {
                     const next = new Set(followupSet);
                     next.has(dur) ? next.delete(dur) : next.add(dur);
@@ -1623,7 +1623,7 @@ function SettingsScreen() {
                         <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">Appointment Durations</p>
                         <div className="flex items-center gap-3">
                           <label className="text-xs font-medium text-foreground w-24 shrink-0">Initial visit</label>
-                          <select value={p.initial_duration} onChange={e => updatePractitioner(p.id, 'initial_duration', e.target.value)} className="bg-input-background border border-border rounded-md px-2 py-1.5 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring">
+                          <select value={p.initial_duration ?? "45"} onChange={e => updatePractitioner(p.id, 'initial_duration', e.target.value)} className="bg-input-background border border-border rounded-md px-2 py-1.5 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring">
                             {durations.map(d => <option key={d} value={d}>{d} min</option>)}
                           </select>
                         </div>
