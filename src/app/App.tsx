@@ -1409,15 +1409,29 @@ function SettingsScreen() {
   }
 
   async function handleSaveAll() {
+    const changed: Record<string, unknown> = {};
+
+    const draftKeys: DraftKey[] = ['clinic_profile', 'clinic_hours', 'transfer_escalation', 'sms_follow_ups'];
+    for (const key of draftKeys) {
+      if (JSON.stringify(draft[key]) !== JSON.stringify(settings[key] ?? {})) {
+        changed[key] = draft[key];
+      }
+    }
+
+    const savedPractitioners = (settings.practitioners as { list?: Practitioner[] })?.list ?? [];
+    if (JSON.stringify(practitioners) !== JSON.stringify(savedPractitioners)) {
+      changed.practitioners = { list: practitioners };
+    }
+
+    const savedFaqs = (settings.faqs as { list?: FAQ[] })?.list ?? [];
+    if (JSON.stringify(faqs) !== JSON.stringify(savedFaqs)) {
+      changed.faqs = { list: faqs };
+    }
+
+    if (Object.keys(changed).length === 0) return;
+
     setSaving(true);
-    await saveBulk({
-      clinic_profile: draft.clinic_profile,
-      clinic_hours: draft.clinic_hours,
-      transfer_escalation: draft.transfer_escalation,
-      sms_follow_ups: draft.sms_follow_ups,
-      practitioners: { list: practitioners },
-      faqs: { list: faqs },
-    });
+    await saveBulk(changed);
     setSaving(false);
   }
 
