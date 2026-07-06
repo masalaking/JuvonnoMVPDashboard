@@ -1354,7 +1354,7 @@ function RecordingsScreen() {
 // ── Screen: Settings ──────────────────────────────────────────────────────────
 interface DurationCategory { id: string; label: string; durations: string; }
 interface AppointmentType { id: string; service_name: string; duration_categories: DurationCategory[]; }
-interface Practitioner { id: string; name: string; keywords: string; practitioner_id: string; appointment_types: AppointmentType[]; }
+interface Practitioner { id: string; name: string; keywords: string; staff_num: string; appointment_types: AppointmentType[]; }
 interface FAQ { id: string; question: string; answer: string; }
 
 type DraftKey = 'clinic_profile' | 'clinic_hours' | 'transfer_escalation' | 'sms_follow_ups';
@@ -1439,7 +1439,7 @@ function SettingsScreen() {
 
   function addPractitioner() {
     setPractitioners(prev => [...prev, {
-      id: crypto.randomUUID(), name: "", keywords: "", practitioner_id: "",
+      id: crypto.randomUUID(), name: "", keywords: "", staff_num: "",
       appointment_types: [newAppointmentType()],
     }]);
   }
@@ -1448,7 +1448,7 @@ function SettingsScreen() {
     setPractitioners(prev => prev.filter(p => p.id !== id));
   }
 
-  function updatePractitioner(id: string, field: 'name' | 'keywords' | 'practitioner_id', value: string) {
+  function updatePractitioner(id: string, field: 'name' | 'keywords' | 'staff_num', value: string) {
     setPractitioners(prev => prev.map(p => p.id === id ? { ...p, [field]: value } : p));
   }
 
@@ -1661,8 +1661,8 @@ function SettingsScreen() {
                           <input value={p.name} onChange={e => updatePractitioner(p.id, 'name', e.target.value)} placeholder="Dr. Sarah Chen" className="w-full bg-input-background border border-border rounded-md px-3 py-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring" />
                         </div>
                         <div className="space-y-1.5">
-                          <label className="text-xs font-medium text-foreground">Practitioner ID</label>
-                          <input value={p.practitioner_id} onChange={e => updatePractitioner(p.id, 'practitioner_id', e.target.value)} placeholder="prac_001" className="w-full bg-input-background border border-border rounded-md px-3 py-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring font-mono" />
+                          <label className="text-xs font-medium text-foreground">Staff Number</label>
+                          <input value={p.staff_num} onChange={e => updatePractitioner(p.id, 'staff_num', e.target.value)} placeholder="1122" className="w-full bg-input-background border border-border rounded-md px-3 py-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring font-mono" />
                         </div>
                       </div>
                       {/* Keywords */}

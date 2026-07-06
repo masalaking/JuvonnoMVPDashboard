@@ -42,6 +42,44 @@ function saveSettingsFile(data) {
   writeFileSync(SETTINGS_FILE, JSON.stringify(data, null, 2));
 }
 
+// Transform one section from internal storage format into the shape n8n expects.
+function formatForN8n(section, data) {
+  if (section === 'practitioners') {
+    const list = Array.isArray(data?.list) ? data.list : [];
+    return {
+      practitioners: list.map(p => ({
+        name: p.name,
+        staff_num: String(p.staff_num ?? ''),
+        keywords: typeof p.keywords === 'string'
+          ? p.keywords.split(',').map(k => k.trim()).filter(Boolean)
+          : (Array.isArray(p.keywords) ? p.keywords : []),
+        service_types: (p.appointment_types ?? []).map(t => ({
+          service: t.service_name,
+          durations: Object.fromEntries(
+            (t.duration_categories ?? []).map(c => [
+              c.label,
+              (c.durations ?? '').split(',').map(d => parseInt(d.trim(), 10)).filter(n => !isNaN(n)),
+            ])
+          ),
+        })),
+      })),
+    };
+  }
+  if (section === 'faqs') {
+    return { faqs: (data?.list ?? []).map(f => ({ question: f.question, answer: f.answer })) };
+  }
+  return { [section]: data };
+}
+
+// Build the full all_settings object in n8n's expected shape.
+function buildN8nAllSettings(allSettings) {
+  const result = {};
+  for (const [section, data] of Object.entries(allSettings)) {
+    Object.assign(result, formatForN8n(section, data));
+  }
+  return result;
+}
+
 app.get('/health', (_req, res) => res.json({ ok: true }));
 
 // Frontend fetches tenant info (clinic name, receptionist, etc.)
@@ -146,10 +184,11 @@ app.put('/api/link/:accessToken/settings/bulk', async (req, res) => {
             body: JSON.stringify({
               event: 'settings.changed',
               client_id: tenant.client_id,
+              clinic_id: tenant.clinic_id,
               clinic_name: tenant.clinic_name,
               section,
-              changed: data,
-              all_settings: existing,
+              changed: formatForN8n(section, data),
+              all_settings: buildN8nAllSettings(existing),
             }),
           });
         } catch (err) {
@@ -183,10 +222,11 @@ app.put('/api/link/:accessToken/settings', async (req, res) => {
       body: JSON.stringify({
         event: 'settings.changed',
         client_id: tenant.client_id,
+        clinic_id: tenant.clinic_id,
         clinic_name: tenant.clinic_name,
         section,
-        changed: data,
-        all_settings: existing,
+        changed: formatForN8n(section, data),
+        all_settings: buildN8nAllSettings(existing),
       }),
     }).catch(err => console.error(`[webhook] failed to notify n8n for section "${section}" (${tenant.client_id}):`, err.message));
   }
