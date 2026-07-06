@@ -55,6 +55,9 @@ function formatForN8n(section, data) {
           : (Array.isArray(p.keywords) ? p.keywords : []),
         service_types: (p.appointment_types ?? []).map(t => ({
           service: t.service_name,
+          keywords: typeof t.keywords === 'string'
+            ? t.keywords.split(',').map(k => k.trim()).filter(Boolean)
+            : (Array.isArray(t.keywords) ? t.keywords : []),
           durations: Object.fromEntries(
             (t.duration_categories ?? []).map(c => [
               c.label,

@@ -1353,7 +1353,7 @@ function RecordingsScreen() {
 
 // ── Screen: Settings ──────────────────────────────────────────────────────────
 interface DurationCategory { id: string; label: string; durations: string; }
-interface AppointmentType { id: string; service_name: string; duration_categories: DurationCategory[]; }
+interface AppointmentType { id: string; service_name: string; keywords: string; duration_categories: DurationCategory[]; }
 interface Practitioner { id: string; name: string; keywords: string; staff_num: string; appointment_types: AppointmentType[]; }
 interface FAQ { id: string; question: string; answer: string; }
 
@@ -1454,7 +1454,7 @@ function SettingsScreen() {
 
   function newAppointmentType(): AppointmentType {
     return {
-      id: crypto.randomUUID(), service_name: "",
+      id: crypto.randomUUID(), service_name: "", keywords: "",
       duration_categories: [
         { id: crypto.randomUUID(), label: "Initial", durations: "45,60" },
         { id: crypto.randomUUID(), label: "Follow-up", durations: "30,45,60" },
@@ -1474,9 +1474,9 @@ function SettingsScreen() {
     } : p));
   }
 
-  function updateAppointmentTypeName(practitionerId: string, typeId: string, value: string) {
+  function updateAppointmentTypeField(practitionerId: string, typeId: string, field: 'service_name' | 'keywords', value: string) {
     setPractitioners(prev => prev.map(p => p.id === practitionerId ? {
-      ...p, appointment_types: p.appointment_types.map(t => t.id === typeId ? { ...t, service_name: value } : t),
+      ...p, appointment_types: p.appointment_types.map(t => t.id === typeId ? { ...t, [field]: value } : t),
     } : p));
   }
 
@@ -1665,21 +1665,25 @@ function SettingsScreen() {
                           <input value={p.staff_num} onChange={e => updatePractitioner(p.id, 'staff_num', e.target.value)} placeholder="1122" className="w-full bg-input-background border border-border rounded-md px-3 py-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring font-mono" />
                         </div>
                       </div>
-                      {/* Keywords */}
+                      {/* Name keywords */}
                       <div className="space-y-1.5">
-                        <label className="text-xs font-medium text-foreground">Keywords</label>
-                        <input value={p.keywords} onChange={e => updatePractitioner(p.id, 'keywords', e.target.value)} placeholder="chiro, physio, RMT, acupuncture, osteopath" className="w-full bg-input-background border border-border rounded-md px-3 py-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring" />
+                        <label className="text-xs font-medium text-foreground">Name Keywords</label>
+                        <input value={p.keywords} onChange={e => updatePractitioner(p.id, 'keywords', e.target.value)} placeholder="Erika, Dr. Bishop, Bishop" className="w-full bg-input-background border border-border rounded-md px-3 py-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring" />
+                        <p className="text-[10px] text-muted-foreground">Aliases the AI uses to match callers asking for this person by name.</p>
                       </div>
                       {/* Service types */}
                       <div className="border-t border-border pt-3 space-y-2">
                         <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">Service Types & Appointment Durations</p>
                         {types.map((t, ti) => (
                           <div key={t.id} className="bg-muted/40 border border-border rounded-md p-3 space-y-2">
-                            {/* Service name */}
-                            <div className="flex items-center gap-2">
-                              <input value={t.service_name} onChange={e => updateAppointmentTypeName(p.id, t.id, e.target.value)} placeholder={`Service type #${ti + 1} (e.g. Chiropractic)`} className="flex-1 bg-input-background border border-border rounded-md px-3 py-1.5 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring font-medium" />
+                            {/* Service name + keywords */}
+                            <div className="flex items-start gap-2">
+                              <div className="flex-1 space-y-1.5">
+                                <input value={t.service_name} onChange={e => updateAppointmentTypeField(p.id, t.id, 'service_name', e.target.value)} placeholder={`Service type #${ti + 1} (e.g. Chiropractic)`} className="w-full bg-input-background border border-border rounded-md px-3 py-1.5 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring font-medium" />
+                                <input value={t.keywords ?? ""} onChange={e => updateAppointmentTypeField(p.id, t.id, 'keywords', e.target.value)} placeholder="Service keywords (e.g. chiro, chiropractor, adjustment)" className="w-full bg-input-background border border-border rounded-md px-3 py-1.5 text-[10px] text-foreground focus:outline-none focus:ring-1 focus:ring-ring text-muted-foreground" />
+                              </div>
                               {types.length > 1 && (
-                                <button type="button" onClick={() => removeAppointmentType(p.id, t.id)} className="text-muted-foreground hover:text-destructive transition-colors shrink-0">
+                                <button type="button" onClick={() => removeAppointmentType(p.id, t.id)} className="text-muted-foreground hover:text-destructive transition-colors shrink-0 mt-1.5">
                                   <X size={12} />
                                 </button>
                               )}
