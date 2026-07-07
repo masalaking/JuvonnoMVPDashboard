@@ -953,6 +953,7 @@ function AnalyticsScreen() {
           <h3 className="text-sm font-semibold text-foreground mb-4">AI Success Rate Over Time</h3>
           <ResponsiveContainer width="100%" height={200}>
             <AreaChart data={[
+              // TODO: Fetch from /api/link/:accessToken/analytics (real data from call logs)
               { day: "Mon", rate: 94 }, { day: "Tue", rate: 97 }, { day: "Wed", rate: 95 },
               { day: "Thu", rate: 96 }, { day: "Fri", rate: 98 }, { day: "Sat", rate: 96 }, { day: "Sun", rate: 97 }
             ]}>
@@ -986,6 +987,7 @@ function AnalyticsScreen() {
             </tr>
           </thead>
           <tbody>
+            {/* TODO: Fetch from /api/link/:accessToken/analytics/booking-failures (real data from call logs) */}
             {[
               ["API Timeout / Juvonno Error", "5", "41.7%", "Physiotherapy", "+2"],
               ["No Availability Found", "4", "33.3%", "Chiropractic", "0"],
@@ -1009,6 +1011,8 @@ function AnalyticsScreen() {
 
 // ── Screen: Trends ────────────────────────────────────────────────────────────
 function TrendsScreen() {
+  // TODO: Replace with real insights from /api/link/:accessToken/analytics/insights
+  // These are generated from call transcripts, sentiment analysis, and call outcomes via n8n
   const insights = [
     { icon: Clock, color: "violet", title: "Peak Call Times", body: "Most calls this week happened between 10 AM and 1 PM, with a secondary peak at 3–4 PM." },
     { icon: Star, color: "teal", title: "Most Requested Service", body: "Chiropractic leads with 87 requests (+11% vs last week). Massage therapy close behind at 61." },
@@ -2073,6 +2077,7 @@ function RecoveryBadge({ status }: { status: RecoveryStatus }) {
   return <span className={`inline-flex items-center px-2 py-0.5 rounded text-[10px] font-medium ${STATUS_COLORS[status]}`}>{STATUS_LABELS[status]}</span>;
 }
 
+// TODO: Replace with real data from GET /billing/invoices endpoint (connects to n8n workflow that syncs Juvonno invoices)
 const PR_INVOICES: PRInvoice[] = [
   { invoice_id:"inv_001", invoice_number:"INV-1001", clinic_id:"juvonno", patient_name:"Sarah Mitchell", patient_phone:"+16045550101", patient_email:"sarah@example.com", amount_due:285.00, original_amount:285, due_date:"2026-06-15", status:"sms_reminder_1_sent", last_reminder_at:"2026-07-01T09:00:00Z", next_reminder_at:"2026-07-02T09:00:00Z", last_updated:"2026-07-01T09:00:00Z", attempt_count:1, last_synced_at:"2026-07-04T08:00:00Z" },
   { invoice_id:"inv_002", invoice_number:"INV-1002", clinic_id:"juvonno", patient_name:"James Okafor", patient_phone:"+16045550102", patient_email:"james@example.com", amount_due:150.00, original_amount:150, due_date:"2026-06-20", status:"email_reminder_1_sent", last_reminder_at:"2026-07-02T10:00:00Z", next_reminder_at:"2026-07-05T09:00:00Z", last_updated:"2026-07-02T10:00:00Z", attempt_count:2, last_synced_at:"2026-07-04T08:00:00Z" },
@@ -2082,6 +2087,7 @@ const PR_INVOICES: PRInvoice[] = [
   { invoice_id:"inv_006", invoice_number:"INV-1006", clinic_id:"juvonno", patient_name:"David Lam", patient_phone:"+16045550106", patient_email:"", amount_due:175.00, original_amount:175, due_date:"2026-07-01", status:"new", next_reminder_at:"2026-07-06T09:00:00Z", last_updated:"2026-07-04T00:00:00Z", attempt_count:0, last_synced_at:"2026-07-04T08:00:00Z" },
   { invoice_id:"inv_007", invoice_number:"INV-1007", clinic_id:"juvonno", patient_name:"Anita Patel", patient_phone:"+16045550107", patient_email:"anita@example.com", amount_due:512.00, original_amount:512, due_date:"2026-06-05", status:"failed", last_reminder_at:"2026-07-01T09:00:00Z", last_updated:"2026-07-01T09:05:00Z", attempt_count:3, last_synced_at:"2026-07-04T08:00:00Z" },
 ];
+// TODO: Replace with real data from GET /billing/tasks endpoint (n8n maintains reminder tasks in Google Sheets)
 const PR_TASKS: PRTask[] = [
   { task_id:"task_001", invoice_id:"inv_001", invoice_number:"INV-1001", patient_name:"Sarah Mitchell", reminder_type:"email_reminder_1", scheduled_time:"2026-07-02T09:00:00Z", status:"pending", attempt_count:0 },
   { task_id:"task_002", invoice_id:"inv_002", invoice_number:"INV-1002", patient_name:"James Okafor", reminder_type:"sms_reminder_2", scheduled_time:"2026-07-05T09:00:00Z", status:"pending", attempt_count:0 },
@@ -2093,6 +2099,7 @@ const PR_TASKS: PRTask[] = [
   { task_id:"task_006", invoice_id:"inv_006", invoice_number:"INV-1006", patient_name:"David Lam", reminder_type:"sms_reminder_1", scheduled_time:"2026-07-06T09:00:00Z", status:"pending", attempt_count:0 },
   { task_id:"task_009", invoice_id:"inv_005", invoice_number:"INV-1005", patient_name:"Rachel Ng", reminder_type:"sms_reminder_1", scheduled_time:"2026-06-29T09:00:00Z", status:"cancelled", attempt_count:0 },
 ];
+// TODO: Replace with real data from GET /billing/communications endpoint (SMS/email history from Twilio & email provider)
 const PR_COMMS: PRComm[] = [
   { comm_id:"c001", invoice_id:"inv_001", invoice_number:"INV-1001", patient_name:"Sarah Mitchell", channel:"sms", recipient:"+1604···0101", reminder_type:"sms_reminder_1", message:"Hi Sarah, invoice INV-1001 has an outstanding balance of $285.00.", status:"delivered", timestamp:"2026-07-01T09:00:00Z" },
   { comm_id:"c002", invoice_id:"inv_002", invoice_number:"INV-1002", patient_name:"James Okafor", channel:"sms", recipient:"+1604···0102", reminder_type:"sms_reminder_1", message:"Hi James, invoice INV-1002 has an outstanding balance of $150.00.", status:"delivered", timestamp:"2026-07-01T09:01:00Z" },
@@ -2101,6 +2108,8 @@ const PR_COMMS: PRComm[] = [
   { comm_id:"c005", invoice_id:"inv_004", invoice_number:"INV-1004", patient_name:"Tom Bellamy", channel:"sms", recipient:"+1604···0104", reminder_type:"sms_reminder_1", message:"Hi Tom, invoice INV-1004 has an outstanding balance of $95.00.", status:"delivered", timestamp:"2026-06-25T09:00:00Z" },
   { comm_id:"c006", invoice_id:"inv_007", invoice_number:"INV-1007", patient_name:"Anita Patel", channel:"sms", recipient:"+1604···0107", reminder_type:"sms_reminder_2", message:"Hi Anita, invoice INV-1007 still has a balance of $512.00.", status:"failed", timestamp:"2026-07-01T09:00:00Z" },
 ];
+// TODO: Fetch settings (templates, schedule, toggles) from GET /billing/settings endpoint
+// POST /billing/settings saves back to n8n (which persists to Google Sheets or environment config)
 const DEFAULT_TEMPLATES = {
   sms_1: "Hi {{patient_first_name}}, this is a reminder that invoice {{invoice_number}} has an outstanding balance of {{amount_due}}. {{payment_link}}",
   email_1_subject: "Payment reminder for invoice {{invoice_number}}",
@@ -2133,8 +2142,14 @@ function PRErrorState({ onRetry }: { onRetry: () => void }) {
   );
 }
 
+interface PRActivityEvent {
+  id: string; invoice_number: string; label: string; timestamp: string;
+}
+
 function PaymentRecoveryScreen() {
+  const { accessToken } = useDashboard();
   const [activeTab, setActiveTab] = useState("overview");
+  const [activityLog, setActivityLog] = useState<PRActivityEvent[]>([]);
   const [search, setSearch] = useState("");
   const [invoiceFilter, setInvoiceFilter] = useState("all");
   const [sortField, setSortField] = useState<"amount_due"|"due_date"|"last_updated"|"next_reminder_at">("due_date");
@@ -2159,8 +2174,17 @@ function PaymentRecoveryScreen() {
   const VARS = ["{{patient_first_name}}","{{invoice_number}}","{{amount_due}}","{{due_date}}","{{payment_link}}","{{clinic_phone}}"];
 
   const showSuccess = (msg: string) => { setSuccessMsg(msg); setTimeout(() => setSuccessMsg(""), 3000); };
+
+  // Records the action in the Overview "Recent Activity" feed immediately (client-side, optimistic).
+  // TODO: once endpoints below are live, replace this with the response from that POST call
+  // so Recent Activity reflects the actual server-confirmed result instead of an optimistic entry.
+  function logActivity(invoiceNum: string, label: string) {
+    setActivityLog(prev => [{ id: crypto.randomUUID(), invoice_number: invoiceNum, label, timestamp: new Date().toISOString() }, ...prev].slice(0, 20));
+  }
+
+  // TODO: Wire each action to its n8n webhook via POST /api/link/:accessToken/billing/... (see endpoint list below)
   const simulateAction = (label: string, invoiceNum: string, cb?: () => void) => {
-    setConfirm({ label, invoiceNum, onConfirm: cb });
+    setConfirm({ label, invoiceNum, onConfirm: () => { cb?.(); logActivity(invoiceNum, label); } });
   };
 
   const totalOutstanding = PR_INVOICES.filter(i => i.status !== "paid").reduce((s,i) => s + i.amount_due, 0);
@@ -2253,13 +2277,14 @@ function PaymentRecoveryScreen() {
   ) : null;
 
   // Confirmation modal
+  // TODO: On confirm, call POST /api/link/:accessToken/billing/invoices/:invoiceId/:action (see endpoint list)
   if (confirm) return (
     <>
       {SuccessToast}
       <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
         <Card className="p-6 max-w-sm w-full mx-4 space-y-4">
           <h3 className="text-sm font-semibold text-foreground">{confirm.label}</h3>
-          <p className="text-xs text-muted-foreground">This will update the automation for invoice <span className="font-mono font-medium">{confirm.invoiceNum}</span>. This action will be logged.</p>
+          <p className="text-xs text-muted-foreground">This will update the automation for invoice <span className="font-mono font-medium">{confirm.invoiceNum}</span>.</p>
           <div className="flex gap-2 justify-end">
             <button onClick={() => setConfirm(null)} className="text-xs border border-border px-3 py-1.5 rounded-md hover:bg-muted transition-colors">Cancel</button>
             <button onClick={() => { const cb = confirm.onConfirm; setConfirm(null); cb?.(); showSuccess(`${confirm.label} completed`); }} className="text-xs bg-primary text-primary-foreground px-3 py-1.5 rounded-md hover:opacity-90">Confirm</button>
@@ -2457,26 +2482,46 @@ function PaymentRecoveryScreen() {
             </div>
             <Card className="p-4">
               <p className="text-xs font-semibold text-foreground mb-3">Recent Activity</p>
-              {PR_COMMS.length === 0
-                ? <p className="text-xs text-muted-foreground text-center py-6">No recent activity.</p>
-                : <div className="space-y-0">
-                  {[...PR_COMMS].sort((a,b) => b.timestamp.localeCompare(a.timestamp)).slice(0,10).map(c => (
-                    <div key={c.comm_id} className="flex items-center gap-3 py-2.5 border-b border-border last:border-0">
-                      <div className={`w-6 h-6 rounded-full flex items-center justify-center flex-shrink-0 ${c.status === "failed" ? "bg-red-100" : c.channel === "sms" ? "bg-blue-100" : "bg-violet-100"}`}>
-                        {c.channel === "sms" ? <MessageSquare size={10} className={c.status === "failed" ? "text-red-600" : "text-blue-600"} /> : <Mail size={10} className="text-violet-600" />}
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <p className="text-xs text-foreground">
-                          <span className="font-medium">{c.patient_name}</span> · {c.channel.toUpperCase()}{" "}
-                          <span className={c.status === "failed" ? "text-red-600" : c.status === "delivered" ? "text-emerald-600" : "text-muted-foreground"}>{c.status}</span>
-                        </p>
-                        <p className="text-[10px] text-muted-foreground truncate">{c.message}</p>
-                      </div>
-                      <span className="text-[10px] text-muted-foreground shrink-0">{fmt(c.timestamp)}</span>
-                    </div>
-                  ))}
-                </div>
-              }
+              {/* Merges system communications (SMS/email sends) with staff-triggered actions (send/pause/escalate/etc.) into one feed */}
+              {(() => {
+                const commEvents = PR_COMMS.map(c => ({
+                  key: `comm_${c.comm_id}`, timestamp: c.timestamp, kind: "comm" as const, comm: c,
+                }));
+                const actionEvents = activityLog.map(a => ({
+                  key: `act_${a.id}`, timestamp: a.timestamp, kind: "action" as const, action: a,
+                }));
+                const merged = [...commEvents, ...actionEvents].sort((a, b) => b.timestamp.localeCompare(a.timestamp)).slice(0, 10);
+                return merged.length === 0
+                  ? <p className="text-xs text-muted-foreground text-center py-6">No recent activity.</p>
+                  : <div className="space-y-0">
+                      {merged.map(ev => ev.kind === "comm" ? (
+                        <div key={ev.key} className="flex items-center gap-3 py-2.5 border-b border-border last:border-0">
+                          <div className={`w-6 h-6 rounded-full flex items-center justify-center flex-shrink-0 ${ev.comm.status === "failed" ? "bg-red-100" : ev.comm.channel === "sms" ? "bg-blue-100" : "bg-violet-100"}`}>
+                            {ev.comm.channel === "sms" ? <MessageSquare size={10} className={ev.comm.status === "failed" ? "text-red-600" : "text-blue-600"} /> : <Mail size={10} className="text-violet-600" />}
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <p className="text-xs text-foreground">
+                              <span className="font-medium">{ev.comm.patient_name}</span> · {ev.comm.channel.toUpperCase()}{" "}
+                              <span className={ev.comm.status === "failed" ? "text-red-600" : ev.comm.status === "delivered" ? "text-emerald-600" : "text-muted-foreground"}>{ev.comm.status}</span>
+                            </p>
+                            <p className="text-[10px] text-muted-foreground truncate">{ev.comm.message}</p>
+                          </div>
+                          <span className="text-[10px] text-muted-foreground shrink-0">{fmt(ev.comm.timestamp)}</span>
+                        </div>
+                      ) : (
+                        <div key={ev.key} className="flex items-center gap-3 py-2.5 border-b border-border last:border-0">
+                          <div className="w-6 h-6 rounded-full flex items-center justify-center flex-shrink-0 bg-amber-100">
+                            <ClipboardList size={10} className="text-amber-600" />
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <p className="text-xs text-foreground"><span className="font-medium">{ev.action.label}</span> · {ev.action.invoice_number}</p>
+                            <p className="text-[10px] text-muted-foreground">Staff action</p>
+                          </div>
+                          <span className="text-[10px] text-muted-foreground shrink-0">{fmt(ev.action.timestamp)}</span>
+                        </div>
+                      ))}
+                    </div>;
+              })()}
             </Card>
           </div>
         )}
