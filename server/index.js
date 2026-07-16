@@ -228,6 +228,22 @@ app.patch('/api/link/:accessToken/queue/requests/:id', (req, res) => {
   res.json(requests[idx]);
 });
 
+// Frontend deletes a request from the queue
+app.delete('/api/link/:accessToken/queue/requests/:id', (req, res) => {
+  const tenant = findTenant(req.params.accessToken);
+  if (!tenant) return res.status(404).json({ error: 'Invalid access token' });
+
+  const requests = loadRequests();
+  const idx = requests.findIndex(
+    r => r.id === req.params.id && r.client_id === tenant.client_id
+  );
+  if (idx === -1) return res.status(404).json({ error: 'Request not found' });
+
+  requests.splice(idx, 1);
+  saveRequests(requests);
+  res.status(204).end();
+});
+
 // ── Settings endpoints ────────────────────────────────────────────────────────
 
 // Return all saved settings for this tenant

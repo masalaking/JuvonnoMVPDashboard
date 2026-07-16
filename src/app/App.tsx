@@ -86,6 +86,7 @@ interface DashboardCtx {
   loading: boolean;
   settings: Record<string, unknown>;
   updateTaskStatus: (id: string, status: string) => Promise<void>;
+  deleteTask: (id: string) => Promise<void>;
   saveSection: (section: string, data: Record<string, unknown>) => Promise<void>;
   saveBulk: (sections: Record<string, unknown>) => Promise<void>;
   syncRetell: () => Promise<{ ok: boolean; error?: string }>;
@@ -99,6 +100,7 @@ const DashboardContext = createContext<DashboardCtx>({
   loading: false,
   settings: {},
   updateTaskStatus: async () => {},
+  deleteTask: async () => {},
   saveSection: async () => {},
   saveBulk: async () => {},
   syncRetell: async () => ({ ok: false }),
@@ -1294,117 +1296,91 @@ function Moon({ size = 24, ...props }: any) {
 }
 
 // ── Screen: Staff Queue ───────────────────────────────────────────────────────
+const STAFF_TASK_STATUSES = ["New", "In Progress", "Completed"] as const;
+
 function StaffQueueScreen() {
-  const { staffTasks, updateTaskStatus } = useDashboard();
-  const [view, setView] = useState<"kanban" | "table">("kanban");
-  const columns = [
-    { status: "New", tasks: staffTasks.filter(t => t.status === "New") },
-    { status: "In Progress", tasks: staffTasks.filter(t => t.status === "In Progress") },
-    { status: "Completed", tasks: staffTasks.filter(t => t.status === "Completed") },
-  ];
+  const { staffTasks, updateTaskStatus, deleteTask } = useDashboard();
+  const [filter, setFilter] = useState("All");
+  const [confirmingId, setConfirmingId] = useState<string | null>(null);
+
+  function handleDelete(id: string) {
+    if (confirmingId === id) {
+      deleteTask(id);
+      setConfirmingId(null);
+    } else {
+      setConfirmingId(id);
+    }
+  }
+
+  const filters = ["All", "New", "In Progress", "Completed"];
+  const visibleTasks = filter === "All" ? staffTasks : staffTasks.filter(t => t.status === filter);
+  const sortedTasks = [...visibleTasks].sort((a, b) => (a.status === "Completed" ? 1 : 0) - (b.status === "Completed" ? 1 : 0));
 
   return (
     <div className="p-6 space-y-4">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-lg font-semibold text-foreground">Staff Action Queue</h1>
-          <p className="text-xs text-muted-foreground">{staffTasks.filter(t => t.status !== "Completed").length} open tasks · 1 urgent</p>
-        </div>
-        <div className="flex items-center gap-2">
-          <div className="flex border border-border rounded-md overflow-hidden">
-            <button onClick={() => setView("kanban")} className={`px-3 py-1.5 text-xs font-medium flex items-center gap-1.5 transition-colors ${view === "kanban" ? "bg-primary text-white" : "bg-card hover:bg-muted text-foreground"}`}>
-              <Columns size={12} /> Kanban
-            </button>
-            <button onClick={() => setView("table")} className={`px-3 py-1.5 text-xs font-medium flex items-center gap-1.5 transition-colors ${view === "table" ? "bg-primary text-white" : "bg-card hover:bg-muted text-foreground"}`}>
-              <List size={12} /> Table
-            </button>
-          </div>
-          <button className="flex items-center gap-1.5 bg-primary text-primary-foreground text-xs font-medium px-3 py-1.5 rounded-md hover:opacity-90">
-            <Plus size={12} /> Add Task
-          </button>
-        </div>
+      <div>
+        <h1 className="text-lg font-semibold text-foreground">Staff Action Queue</h1>
+        <p className="text-xs text-muted-foreground">{staffTasks.filter(t => t.status !== "Completed").length} open tasks</p>
       </div>
 
       {/* Filters */}
       <div className="flex items-center gap-2">
-        {["All", "New", "In Progress", "High Priority", "Cancellations", "Failed Bookings"].map((f) => (
-          <button key={f} className="text-xs px-2.5 py-1.5 rounded-md border border-border hover:bg-muted transition-colors font-medium">{f}</button>
+        {filters.map((f) => (
+          <button
+            key={f}
+            onClick={() => setFilter(f)}
+            className={`text-xs px-2.5 py-1.5 rounded-md border transition-colors font-medium ${filter === f ? "bg-primary text-white border-primary" : "border-border hover:bg-muted"}`}
+          >
+            {f}
+          </button>
         ))}
       </div>
 
-      {view === "kanban" ? (
-        <div className="grid grid-cols-3 gap-4">
-          {columns.map(({ status, tasks }) => (
-            <div key={status}>
-              <div className="flex items-center justify-between mb-3">
-                <span className="text-xs font-semibold text-foreground">{status}</span>
-                <span className="text-[10px] bg-muted text-muted-foreground px-1.5 py-0.5 rounded font-mono">{tasks.length}</span>
+      <div className="space-y-3">
+        {sortedTasks.length === 0 && (
+          <p className="text-xs text-muted-foreground py-8 text-center">No tasks here.</p>
+        )}
+        {sortedTasks.map((task) => (
+          <Card key={task.id} className={`p-4 space-y-2.5 ${task.status === "Completed" ? "opacity-60" : ""}`}>
+            <div className="flex items-start justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <p className="text-xs font-semibold text-foreground leading-snug">{task.type}</p>
+                <Badge label={task.priority} variant={task.priority} />
               </div>
-              <div className="space-y-3">
-                {tasks.map((task) => (
-                  <Card key={task.id} className="p-3 space-y-2.5 hover:shadow-md transition-shadow cursor-pointer">
-                    <div className="flex items-start justify-between gap-2">
-                      <p className="text-xs font-semibold text-foreground leading-snug">{task.type}</p>
-                      <Badge label={task.priority} variant={task.priority} />
-                    </div>
-                    <p className="text-[10px] text-muted-foreground leading-relaxed">{task.summary}</p>
-                    <div className="flex items-center gap-1.5">
-                      <div className="w-5 h-5 rounded-full bg-violet-100 text-violet-700 flex items-center justify-center text-[9px] font-bold">{task.patient[0]}</div>
-                      <span className="text-[10px] font-medium text-foreground">{task.patient}</span>
-                    </div>
-                    <div className="flex items-center justify-between pt-1 border-t border-border">
-                      <div className="flex items-center gap-1.5">
-                        <Badge label={task.sentiment} variant={task.sentiment} />
-                      </div>
-                      <div className="flex items-center gap-1 text-[10px] text-muted-foreground">
-                        <Clock size={9} /> {task.due}
-                      </div>
-                    </div>
-                    <div className="flex items-center justify-between text-[10px] text-muted-foreground">
-                      <span>Assigned: {task.assignee}</span>
-                      <div className="flex gap-1">
-                        <button onClick={() => updateTaskStatus(task.id, "Completed")} className="p-1 hover:text-primary transition-colors" title="Mark complete"><CheckCircle2 size={11} /></button>
-                        <button className="p-1 hover:text-muted-foreground transition-colors"><MoreHorizontal size={11} /></button>
-                      </div>
-                    </div>
-                  </Card>
-                ))}
+              <div className="flex items-center gap-1.5">
+                <select
+                  value={task.status}
+                  onChange={(e) => updateTaskStatus(task.id, e.target.value)}
+                  className="text-[10px] font-medium border border-border rounded-md px-2 py-1 bg-card hover:bg-muted focus:outline-none focus:ring-1 focus:ring-ring cursor-pointer"
+                >
+                  {STAFF_TASK_STATUSES.map(s => <option key={s} value={s}>{s}</option>)}
+                </select>
+                <button
+                  onClick={() => handleDelete(task.id)}
+                  onBlur={() => setConfirmingId(null)}
+                  title={confirmingId === task.id ? "Click again to confirm delete" : "Delete"}
+                  className={`p-1.5 rounded-md transition-colors ${confirmingId === task.id ? "bg-destructive/10 text-destructive" : "text-muted-foreground hover:text-destructive hover:bg-muted"}`}
+                >
+                  <Trash2 size={12} />
+                </button>
               </div>
             </div>
-          ))}
-        </div>
-      ) : (
-        <Card>
-          <table className="w-full text-xs">
-            <thead>
-              <tr className="border-b border-border bg-muted/40">
-                {["Patient", "Type", "Priority", "Sentiment", "Due", "Assignee", "Status", ""].map(h => (
-                  <th key={h} className="text-left px-4 py-2.5 text-muted-foreground font-medium">{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {staffTasks.map((t) => (
-                <tr key={t.id} className="border-b border-border last:border-0 hover:bg-muted/30 transition-colors">
-                  <td className="px-4 py-3">
-                    <p className="font-medium text-foreground">{t.patient}</p>
-                    <p className="text-muted-foreground font-mono">{t.phone}</p>
-                  </td>
-                  <td className="px-4 py-3 text-foreground">{t.type}</td>
-                  <td className="px-4 py-3"><Badge label={t.priority} variant={t.priority} /></td>
-                  <td className="px-4 py-3"><Badge label={t.sentiment} variant={t.sentiment} /></td>
-                  <td className="px-4 py-3 font-mono text-muted-foreground">{t.due}</td>
-                  <td className="px-4 py-3 text-muted-foreground">{t.assignee}</td>
-                  <td className="px-4 py-3"><Badge label={t.status} variant={t.status} /></td>
-                  <td className="px-4 py-3">
-                    <button className="p-1 hover:text-primary transition-colors"><MoreHorizontal size={13} /></button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </Card>
-      )}
+            <p className="text-[11px] text-muted-foreground leading-relaxed">{task.summary}</p>
+            <div className="flex items-center gap-1.5">
+              <div className="w-5 h-5 rounded-full bg-violet-100 text-violet-700 flex items-center justify-center text-[9px] font-bold">{task.patient?.[0]}</div>
+              <span className="text-[11px] font-medium text-foreground">{task.patient}</span>
+              {task.phone && <span className="text-[10px] text-muted-foreground font-mono">· {task.phone}</span>}
+            </div>
+            <div className="flex items-center justify-between pt-2 border-t border-border text-[10px] text-muted-foreground">
+              <div className="flex items-center gap-3">
+                {task.sentiment && <Badge label={task.sentiment} variant={task.sentiment} />}
+                {task.assignee && <span>Assigned: {task.assignee}</span>}
+              </div>
+              {task.due && <div className="flex items-center gap-1"><Clock size={9} /> {task.due}</div>}
+            </div>
+          </Card>
+        ))}
+      </div>
     </div>
   );
 }
@@ -2914,6 +2890,12 @@ export default function App() {
     }
   }
 
+  async function deleteTask(id: string) {
+    if (!accessToken) return;
+    const res = await fetch(`/api/link/${accessToken}/queue/requests/${id}`, { method: 'DELETE' });
+    if (res.ok) setStaffTasks(prev => prev.filter(t => t.id !== id));
+  }
+
   async function saveSection(section: string, data: Record<string, unknown>) {
     if (!accessToken) return;
     const res = await fetch(`/api/link/${accessToken}/settings`, {
@@ -2961,7 +2943,7 @@ export default function App() {
   }
 
   return (
-    <DashboardContext.Provider value={{ accessToken, tenantInfo, staffTasks, callLogs, loading, settings, updateTaskStatus, saveSection, saveBulk, syncRetell }}>
+    <DashboardContext.Provider value={{ accessToken, tenantInfo, staffTasks, callLogs, loading, settings, updateTaskStatus, deleteTask, saveSection, saveBulk, syncRetell }}>
       <div
         className="flex h-screen w-screen overflow-hidden bg-background"
         style={{ fontFamily: "'Inter', sans-serif" }}
