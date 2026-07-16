@@ -1298,6 +1298,26 @@ function Moon({ size = 24, ...props }: any) {
 // ── Screen: Staff Queue ───────────────────────────────────────────────────────
 const STAFF_TASK_STATUSES = ["New", "In Progress", "Completed"] as const;
 
+// Some staff-queue entries were saved by n8n workflows with fields as nested
+// objects instead of plain strings (e.g. patient: {full_name: "..."}).
+// React throws "Objects are not valid as a React child" if such a value is
+// rendered directly, which crashes the whole screen - always render through
+// this instead of the raw field.
+function safeText(value: unknown): string {
+  if (value == null) return "";
+  if (typeof value === "string" || typeof value === "number") return String(value);
+  if (typeof value === "object") {
+    const obj = value as Record<string, unknown>;
+    return String(obj.full_name ?? obj.name ?? obj.label ?? JSON.stringify(obj));
+  }
+  return String(value);
+}
+
+function patientName(task: StaffTask): string {
+  const name = safeText(task.patient);
+  return name || "Unknown";
+}
+
 function StaffQueueScreen() {
   const { staffTasks, updateTaskStatus, deleteTask } = useDashboard();
   const [filter, setFilter] = useState("All");
@@ -1344,8 +1364,8 @@ function StaffQueueScreen() {
           <Card key={task.id} className={`p-4 space-y-2.5 ${task.status === "Completed" ? "opacity-60" : ""}`}>
             <div className="flex items-start justify-between gap-2">
               <div className="flex items-center gap-2">
-                <p className="text-xs font-semibold text-foreground leading-snug">{task.type}</p>
-                <Badge label={task.priority} variant={task.priority} />
+                <p className="text-xs font-semibold text-foreground leading-snug">{safeText(task.type)}</p>
+                {task.priority && <Badge label={safeText(task.priority)} variant={safeText(task.priority)} />}
               </div>
               <div className="flex items-center gap-1.5">
                 <select
@@ -1365,18 +1385,18 @@ function StaffQueueScreen() {
                 </button>
               </div>
             </div>
-            <p className="text-[11px] text-muted-foreground leading-relaxed">{task.summary}</p>
+            <p className="text-[11px] text-muted-foreground leading-relaxed">{safeText(task.summary)}</p>
             <div className="flex items-center gap-1.5">
-              <div className="w-5 h-5 rounded-full bg-violet-100 text-violet-700 flex items-center justify-center text-[9px] font-bold">{task.patient?.[0]}</div>
-              <span className="text-[11px] font-medium text-foreground">{task.patient}</span>
-              {task.phone && <span className="text-[10px] text-muted-foreground font-mono">· {task.phone}</span>}
+              <div className="w-5 h-5 rounded-full bg-violet-100 text-violet-700 flex items-center justify-center text-[9px] font-bold">{patientName(task).charAt(0)}</div>
+              <span className="text-[11px] font-medium text-foreground">{patientName(task)}</span>
+              {task.phone && <span className="text-[10px] text-muted-foreground font-mono">· {safeText(task.phone)}</span>}
             </div>
             <div className="flex items-center justify-between pt-2 border-t border-border text-[10px] text-muted-foreground">
               <div className="flex items-center gap-3">
-                {task.sentiment && <Badge label={task.sentiment} variant={task.sentiment} />}
-                {task.assignee && <span>Assigned: {task.assignee}</span>}
+                {task.sentiment && <Badge label={safeText(task.sentiment)} variant={safeText(task.sentiment)} />}
+                {task.assignee && <span>Assigned: {safeText(task.assignee)}</span>}
               </div>
-              {task.due && <div className="flex items-center gap-1"><Clock size={9} /> {task.due}</div>}
+              {task.due && <div className="flex items-center gap-1"><Clock size={9} /> {safeText(task.due)}</div>}
             </div>
           </Card>
         ))}
