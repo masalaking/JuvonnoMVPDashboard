@@ -91,8 +91,38 @@ function n8nRoute(handler) {
   };
 }
 
+// Strict boolean coercion for values that may arrive as a real boolean, the
+// string "true"/"false", or be missing. Boolean("false") === true in JS, so
+// any Boolean(value)/!!value on a stored string is a bug — this is the one
+// place that decides truthiness for values coming from storage/API.
+function parseBoolean(value) {
+  if (value === true) return true;
+  if (value === false || value == null) return false;
+  return String(value).trim().toLowerCase() === 'true';
+}
+
+const CLINIC_HOURS_DAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
+
+// Always emits open_<Day> as the literal string "true"/"false", regardless of
+// what shape it arrived in (boolean, "true", "false", undefined). This is
+// applied both to a single section's `changed` payload and to `all_settings`,
+// so the two can never disagree about whether a day is open.
+function formatClinicHoursForN8n(data) {
+  const src = data ?? {};
+  const out = {};
+  for (const day of CLINIC_HOURS_DAYS) {
+    out[`open_${day}`] = parseBoolean(src[`open_${day}`]) ? 'true' : 'false';
+    out[`start_${day}`] = String(src[`start_${day}`] ?? '');
+    out[`end_${day}`] = String(src[`end_${day}`] ?? '');
+  }
+  return out;
+}
+
 // Transform one section from internal storage format into the shape n8n expects.
 function formatForN8n(section, data) {
+  if (section === 'clinic_hours') {
+    return { clinic_hours: formatClinicHoursForN8n(data) };
+  }
   if (section === 'practitioners') {
     const list = Array.isArray(data?.list) ? data.list : [];
     return {

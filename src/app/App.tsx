@@ -224,6 +224,17 @@ function initials(name: string) {
   return name.split(" ").map(w => w[0]).join("").toUpperCase().slice(0, 2);
 }
 
+// Strict boolean coercion for values loaded from settings/storage, which may
+// arrive as a real boolean, the string "true"/"false", or be missing.
+// Boolean("false") === true in JS, so Boolean(value)/!!value on a stored
+// string silently treats every closed day as open — use this instead
+// anywhere a clinic-hours "open" flag (or similar stored flag) is read.
+function parseBoolean(value: unknown): boolean {
+  if (value === true) return true;
+  if (value === false || value == null) return false;
+  return String(value).trim().toLowerCase() === "true";
+}
+
 function Sidebar({ active, onNav }: { active: string; onNav: (id: string) => void }) {
   const { staffTasks, tenantInfo } = useDashboard();
   const openTaskCount = staffTasks.filter(t => t.status !== "Completed").length;
@@ -1717,7 +1728,7 @@ function SettingsScreen() {
             </div>
             <Card className="p-5 space-y-3">
               {["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"].map((day, i) => {
-                const isOpen = draft.clinic_hours[`open_${day}`] !== undefined ? draft.clinic_hours[`open_${day}`] === 'true' : i < 6;
+                const isOpen = draft.clinic_hours[`open_${day}`] !== undefined ? parseBoolean(draft.clinic_hours[`open_${day}`]) : i < 6;
                 const startVal = draft.clinic_hours[`start_${day}`] ?? (i < 6 ? "08:00" : "");
                 const endVal = draft.clinic_hours[`end_${day}`] ?? (i < 5 ? "18:00" : i === 5 ? "14:00" : "");
                 return (
