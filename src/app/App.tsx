@@ -1507,7 +1507,7 @@ interface FAQ { id: string; question: string; answer: string; }
 type DraftKey = 'clinic_profile' | 'clinic_hours' | 'transfer_escalation' | 'sms_follow_ups';
 
 function SettingsScreen() {
-  const { tenantInfo, settings, saveSection, saveBulk } = useDashboard();
+  const { tenantInfo, settings, saveSection } = useDashboard();
   const [activeSection, setActiveSection] = useState("Clinic Profile");
   const [saving, setSaving] = useState(false);
   const [practitioners, setPractitioners] = useState<Practitioner[]>([]);
@@ -1554,33 +1554,6 @@ function SettingsScreen() {
   async function handleSaveFaqs() {
     setSaving(true);
     await saveSection('faqs', { list: faqs });
-    setSaving(false);
-  }
-
-  async function handleSaveAll() {
-    const changed: Record<string, unknown> = {};
-
-    const draftKeys: DraftKey[] = ['clinic_profile', 'clinic_hours', 'transfer_escalation', 'sms_follow_ups'];
-    for (const key of draftKeys) {
-      if (JSON.stringify(draft[key]) !== JSON.stringify(settings[key] ?? {})) {
-        changed[key] = draft[key];
-      }
-    }
-
-    const savedPractitioners = (settings.practitioners as { list?: Practitioner[] })?.list ?? [];
-    if (JSON.stringify(practitioners) !== JSON.stringify(savedPractitioners)) {
-      changed.practitioners = { list: practitioners };
-    }
-
-    const savedFaqs = (settings.faqs as { list?: FAQ[] })?.list ?? [];
-    if (JSON.stringify(faqs) !== JSON.stringify(savedFaqs)) {
-      changed.faqs = { list: faqs };
-    }
-
-    if (Object.keys(changed).length === 0) return;
-
-    setSaving(true);
-    await saveBulk(changed);
     setSaving(false);
   }
 
@@ -1665,14 +1638,6 @@ function SettingsScreen() {
 
   return (
     <div className="p-6 space-y-4">
-      {/* Save All bar */}
-      <div className="flex items-center justify-between py-2 px-4 bg-muted/60 border border-border rounded-lg">
-        <p className="text-xs text-muted-foreground">Changes are kept while you navigate between sections.</p>
-        <button type="button" disabled={saving} onClick={handleSaveAll} className="bg-primary text-primary-foreground text-xs font-semibold px-5 py-2 rounded-md hover:opacity-90 disabled:opacity-50">
-          {saving ? "Saving…" : "Save All Changes"}
-        </button>
-      </div>
-
       <div className="flex gap-6">
       {/* Settings nav */}
       <div className="w-52 flex-shrink-0">
