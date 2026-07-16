@@ -235,6 +235,24 @@ function parseBoolean(value: unknown): boolean {
   return String(value).trim().toLowerCase() === "true";
 }
 
+const CLINIC_HOURS_DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+
+// The Clinic Hours form renders Mon-Sat as checked/8-6 (Sat 8-2) by default
+// when a day's fields are still undefined, so the boxes look pre-filled on
+// first load. That default is display-only unless it's written into the
+// draft here too - otherwise saving before ever touching an already-"checked"
+// box sends open_<Day> as "false" (missing -> parseBoolean(undefined)),
+// silently contradicting what the screen showed.
+function normalizeClinicHours(data: Record<string, string>): Record<string, string> {
+  const out = { ...data };
+  CLINIC_HOURS_DAYS.forEach((day, i) => {
+    if (out[`open_${day}`] === undefined) out[`open_${day}`] = i < 6 ? "true" : "false";
+    if (out[`start_${day}`] === undefined) out[`start_${day}`] = i < 6 ? "08:00" : "";
+    if (out[`end_${day}`] === undefined) out[`end_${day}`] = i < 5 ? "18:00" : i === 5 ? "14:00" : "";
+  });
+  return out;
+}
+
 function Sidebar({ active, onNav }: { active: string; onNav: (id: string) => void }) {
   const { staffTasks, tenantInfo } = useDashboard();
   const openTaskCount = staffTasks.filter(t => t.status !== "Completed").length;
@@ -1507,7 +1525,7 @@ function SettingsScreen() {
   useEffect(() => {
     setDraft({
       clinic_profile: (settings.clinic_profile ?? {}) as Record<string, string>,
-      clinic_hours: (settings.clinic_hours ?? {}) as Record<string, string>,
+      clinic_hours: normalizeClinicHours((settings.clinic_hours ?? {}) as Record<string, string>),
       transfer_escalation: (settings.transfer_escalation ?? {}) as Record<string, string>,
       sms_follow_ups: (settings.sms_follow_ups ?? {}) as Record<string, string>,
     });
