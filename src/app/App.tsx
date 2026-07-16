@@ -214,7 +214,6 @@ const navItems = [
   { id: "outbound-transcripts", label: "Transcripts", icon: FileText, group: "Outbound" },
   { id: "outbound-recordings", label: "Recordings", icon: Mic, group: "Outbound" },
   { id: "outbound-analytics", label: "Analytics", icon: BarChart2, group: "Outbound" },
-  { id: "outbound-staff-queue", label: "Staff Action Queue", icon: ClipboardList, group: "Outbound" },
   { id: "outbound-settings", label: "Settings", icon: Settings, group: "Outbound" },
 
   { id: "payment-recovery", label: "Payment Recovery", icon: TrendingUp, group: "Billing" },
@@ -261,7 +260,7 @@ function Sidebar({ active, onNav }: { active: string; onNav: (id: string) => voi
               >
                 <Icon size={15} className={active === id ? "text-violet-400" : ""} />
                 <span className="flex-1">{label}</span>
-                {(id === "staff-queue" || id === "outbound-staff-queue") && openTaskCount > 0 && (
+                {id === "staff-queue" && openTaskCount > 0 && (
                   <span className="bg-red-500 text-white text-[10px] font-bold px-1.5 py-0.5 rounded-full">{openTaskCount}</span>
                 )}
               </button>
@@ -2872,7 +2871,6 @@ const SCREENS: Record<string, React.FC> = {
   "outbound-transcripts": OutboundTranscriptsScreen,
   "outbound-recordings": OutboundRecordingsScreen,
   "outbound-analytics": OutboundAnalyticsScreen,
-  "outbound-staff-queue": StaffQueueScreen,
   "outbound-settings": SettingsScreen,
   "payment-recovery": PaymentRecoveryScreen,
   "billing": BillingScreen,
