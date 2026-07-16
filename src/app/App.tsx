@@ -1,7 +1,7 @@
 import { useState, useEffect, createContext, useContext } from "react";
 import {
   LayoutDashboard, Bot, PhoneCall, FileText, Mic, BarChart2, TrendingUp,
-  ClipboardList, Heart, Settings, CreditCard, Activity, ChevronDown,
+  ClipboardList, Heart, Settings, CreditCard, ChevronDown,
   Bell, HelpCircle, Search, User, Circle, CheckCircle2, AlertCircle,
   XCircle, Clock, ArrowUpRight, ArrowDownRight, Minus, Play, Pause,
   Download, Flag, Send, ChevronRight, Phone, Star, Zap, Shield,
@@ -114,7 +114,6 @@ const sentimentOverTime: { day: string; score: number }[] = [];
 const topServices: { service: string; requests: number }[] = [];
 const transcripts: Transcript[] = [];
 const sampleTranscriptLines: { speaker: string; text: string }[] = [];
-const errorLogs: { id: number; time: string; fn: string; clinic: string; error: string; status: string; retry: string; notes: string; action: string }[] = [];
 
 // ── Small reusable UI ─────────────────────────────────────────────────────────
 function Badge({ label, variant }: { label: string; variant: string }) {
@@ -201,21 +200,25 @@ function Card({ children, className = "" }: { children: React.ReactNode; classNa
 // with no group render as a plain top-level link.
 const navItems = [
   { id: "overview", label: "Overview", icon: LayoutDashboard },
+
   { id: "ai-receptionist", label: "AI Receptionist", icon: Bot, group: "Inbound" },
   { id: "call-logs", label: "Call Logs", icon: PhoneCall, group: "Inbound" },
   { id: "transcripts", label: "Transcripts", icon: FileText, group: "Inbound" },
   { id: "recordings", label: "Recordings", icon: Mic, group: "Inbound" },
+  { id: "analytics", label: "Analytics", icon: BarChart2, group: "Inbound" },
+  { id: "staff-queue", label: "Staff Action Queue", icon: ClipboardList, group: "Inbound" },
+  { id: "settings", label: "Settings", icon: Settings, group: "Inbound" },
+
   { id: "outbound-agent", label: "Outbound Agent", icon: PhoneOutgoing, group: "Outbound" },
   { id: "outbound-call-logs", label: "Call Logs", icon: PhoneCall, group: "Outbound" },
   { id: "outbound-transcripts", label: "Transcripts", icon: FileText, group: "Outbound" },
   { id: "outbound-recordings", label: "Recordings", icon: Mic, group: "Outbound" },
-  { id: "analytics", label: "Analytics", icon: BarChart2 },
-  { id: "staff-queue", label: "Staff Action Queue", icon: ClipboardList },
-  { id: "sentiment", label: "Sentiment Insights", icon: Heart },
-  { id: "settings", label: "Settings", icon: Settings },
-  { id: "payment-recovery", label: "Payment Recovery", icon: TrendingUp },
-  { id: "billing", label: "Billing & Usage", icon: CreditCard },
-  { id: "integration", label: "Integration Health", icon: Activity },
+  { id: "outbound-analytics", label: "Analytics", icon: BarChart2, group: "Outbound" },
+  { id: "outbound-staff-queue", label: "Staff Action Queue", icon: ClipboardList, group: "Outbound" },
+  { id: "outbound-settings", label: "Settings", icon: Settings, group: "Outbound" },
+
+  { id: "payment-recovery", label: "Payment Recovery", icon: TrendingUp, group: "Billing" },
+  { id: "billing", label: "Billing & Usage", icon: CreditCard, group: "Billing" },
 ];
 
 function initials(name: string) {
@@ -258,7 +261,7 @@ function Sidebar({ active, onNav }: { active: string; onNav: (id: string) => voi
               >
                 <Icon size={15} className={active === id ? "text-violet-400" : ""} />
                 <span className="flex-1">{label}</span>
-                {id === "staff-queue" && openTaskCount > 0 && (
+                {(id === "staff-queue" || id === "outbound-staff-queue") && openTaskCount > 0 && (
                   <span className="bg-red-500 text-white text-[10px] font-bold px-1.5 py-0.5 rounded-full">{openTaskCount}</span>
                 )}
               </button>
@@ -1087,10 +1090,10 @@ function InboundTranscriptsScreen() { return <TranscriptsScreen direction="inbou
 function OutboundTranscriptsScreen() { return <TranscriptsScreen direction="outbound" />; }
 
 // ── Screen: Analytics ─────────────────────────────────────────────────────────
-function AnalyticsScreen() {
+function AnalyticsScreen({ direction }: { direction: "inbound" | "outbound" }) {
   return (
     <div className="p-6 space-y-6">
-      <h1 className="text-lg font-semibold text-foreground">Analytics</h1>
+      <h1 className="text-lg font-semibold text-foreground">{direction === "outbound" ? "Outbound Analytics" : "Inbound Analytics"}</h1>
 
       <div className="grid grid-cols-4 gap-4">
         <KpiCard label="Total Calls" value="—" icon={PhoneCall} color="purple" />
@@ -1195,6 +1198,9 @@ function AnalyticsScreen() {
     </div>
   );
 }
+
+function InboundAnalyticsScreen() { return <AnalyticsScreen direction="inbound" />; }
+function OutboundAnalyticsScreen() { return <AnalyticsScreen direction="outbound" />; }
 
 // ── Screen: Trends ────────────────────────────────────────────────────────────
 function TrendsScreen() {
@@ -1371,88 +1377,6 @@ function StaffQueueScreen() {
           </table>
         </Card>
       )}
-    </div>
-  );
-}
-
-// ── Screen: Sentiment Insights ────────────────────────────────────────────────
-function SentimentScreen() {
-  return (
-    <div className="p-6 space-y-6">
-      <h1 className="text-lg font-semibold text-foreground">Sentiment Insights</h1>
-
-      <div className="grid grid-cols-5 gap-3">
-        {[
-          { label: "Avg Score", value: "4.2/5", color: "green" },
-          { label: "Positive", value: "182", color: "green" },
-          { label: "Neutral", value: "98", color: "purple" },
-          { label: "Negative", value: "29", color: "amber" },
-          { label: "vs Last Week", value: "+0.3", color: "teal" },
-        ].map((s) => (
-          <KpiCard key={s.label} label={s.label} value={s.value} icon={Heart} color={s.color} />
-        ))}
-      </div>
-
-      <div className="grid grid-cols-2 gap-4">
-        <Card className="p-4">
-          <h3 className="text-sm font-semibold text-foreground mb-4">Sentiment Over Time</h3>
-          <ResponsiveContainer width="100%" height={200}>
-            <LineChart data={sentimentOverTime}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#E8EAF6" />
-              <XAxis dataKey="day" tick={{ fontSize: 11, fill: SLATE }} axisLine={false} tickLine={false} />
-              <YAxis domain={[3, 5]} tick={{ fontSize: 11, fill: SLATE }} axisLine={false} tickLine={false} />
-              <Tooltip contentStyle={{ fontSize: 12, borderRadius: 6 }} />
-              <Line type="monotone" dataKey="score" stroke={GREEN} strokeWidth={2} dot={{ fill: GREEN, r: 3 }} />
-            </LineChart>
-          </ResponsiveContainer>
-        </Card>
-        <Card className="p-4">
-          <h3 className="text-sm font-semibold text-foreground mb-4">Sentiment by Service</h3>
-          <ResponsiveContainer width="100%" height={200}>
-            <BarChart data={topServices.map((s) => ({ ...s, score: (3.8 + Math.random() * 1).toFixed(1) }))}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#E8EAF6" />
-              <XAxis dataKey="service" tick={{ fontSize: 10, fill: SLATE }} axisLine={false} tickLine={false} />
-              <YAxis domain={[3, 5]} tick={{ fontSize: 11, fill: SLATE }} axisLine={false} tickLine={false} />
-              <Tooltip contentStyle={{ fontSize: 12, borderRadius: 6 }} />
-              <Bar dataKey="score" fill={TEAL} radius={[4, 4, 0, 0]} />
-            </BarChart>
-          </ResponsiveContainer>
-        </Card>
-      </div>
-
-      {/* Review Calls */}
-      <div className="grid grid-cols-1 gap-4">
-        <Card>
-          <div className="px-4 py-3 border-b border-border">
-            <h3 className="text-sm font-semibold text-foreground">Calls Needing Review</h3>
-          </div>
-          <table className="w-full text-xs">
-            <thead>
-              <tr className="border-b border-border bg-muted/40">
-                {["Time", "Patient", "Sentiment", "Reason", "Outcome"].map(h => (
-                  <th key={h} className="text-left px-3 py-2 text-muted-foreground font-medium">{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {[
-                { time: "11:39", patient: "James Okonkwo", sentiment: "Negative", reason: "Failed booking", outcome: "Failed" },
-                { time: "10:52", patient: "Priya Singh", sentiment: "Negative", reason: "Wanted human staff", outcome: "Staff Action" },
-                { time: "09:14", patient: "Nadia Hussain", sentiment: "Negative", reason: "Complaint", outcome: "Transferred" },
-                { time: "08:47", patient: "Omar Ibrahim", sentiment: "Negative", reason: "Medical concern", outcome: "Transferred" },
-              ].map((r) => (
-                <tr key={r.patient} className="border-b border-border last:border-0 hover:bg-muted/30 transition-colors">
-                  <td className="px-3 py-2.5 font-mono text-muted-foreground">{r.time}</td>
-                  <td className="px-3 py-2.5 font-medium text-foreground">{r.patient}</td>
-                  <td className="px-3 py-2.5"><Badge label={r.sentiment} variant={r.sentiment} /></td>
-                  <td className="px-3 py-2.5 text-muted-foreground">{r.reason}</td>
-                  <td className="px-3 py-2.5"><Badge label={r.outcome} variant={r.outcome} /></td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </Card>
-      </div>
     </div>
   );
 }
@@ -2142,83 +2066,6 @@ function BillingScreen() {
           </div>
         </Card>
       </div>
-    </div>
-  );
-}
-
-// ── Screen: Integration Health ─────────────────────────────────────────────────
-function IntegrationScreen() {
-  const services = [
-    { name: "Retell AI", status: "Connected", icon: Bot, detail: "Agent active" },
-    { name: "Juvonno API", status: "Connected", icon: Database, detail: "All functions operational" },
-    { name: "Twilio SMS", status: "Connected", icon: MessageSquare, detail: "SMS delivery active" },
-    { name: "Booking Function", status: "Connected", icon: CheckCircle2, detail: "Booking function active" },
-    { name: "Lookup Function", status: "Connected", icon: Search, detail: "Lookup function active" },
-    { name: "Availability Function", status: "Connected", icon: Calendar, detail: "Availability function active" },
-    { name: "Webhook Handler", status: "Connected", icon: Server, detail: "Webhooks active" },
-  ];
-
-  return (
-    <div className="p-6 space-y-6">
-      <h1 className="text-lg font-semibold text-foreground">Integration Health</h1>
-
-      <div className="grid grid-cols-4 gap-4">
-        <KpiCard label="Overall Health" value="—" icon={Activity} color="green" />
-        <KpiCard label="Function Success Rate" value="—" icon={Zap} color="teal" />
-        <KpiCard label="Errors Today" value="—" icon={AlertCircle} color="amber" />
-        <KpiCard label="Last Incident" value="—" icon={Clock} color="purple" />
-      </div>
-
-      <div className="grid grid-cols-2 gap-4">
-        {services.map((s) => (
-          <Card key={s.name} className="p-4 flex items-center gap-4">
-            <div className={`w-9 h-9 rounded-lg flex items-center justify-center flex-shrink-0 ${s.status === "Connected" ? "bg-emerald-50 text-emerald-600" : "bg-red-50 text-red-600"}`}>
-              <s.icon size={16} />
-            </div>
-            <div className="flex-1 min-w-0">
-              <p className="text-xs font-semibold text-foreground">{s.name}</p>
-              <p className="text-[10px] text-muted-foreground truncate">{s.detail}</p>
-            </div>
-            <Badge label={s.status} variant={s.status} />
-          </Card>
-        ))}
-      </div>
-
-      {/* Error log */}
-      <Card>
-        <div className="px-4 py-3 border-b border-border">
-          <h3 className="text-sm font-semibold text-foreground">Technical Error Log</h3>
-        </div>
-        <table className="w-full text-xs">
-          <thead>
-            <tr className="border-b border-border bg-muted/40">
-              {["Timestamp", "Function", "Clinic", "Error Type", "Status", "Retries", "Notes", "Action"].map(h => (
-                <th key={h} className="text-left px-4 py-2.5 text-muted-foreground font-medium">{h}</th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {errorLogs.map((e) => (
-              <tr key={e.id} className="border-b border-border last:border-0 hover:bg-muted/30 transition-colors">
-                <td className="px-4 py-3 font-mono text-muted-foreground whitespace-nowrap">{e.time}</td>
-                <td className="px-4 py-3 text-foreground font-mono text-[10px]">{e.fn}</td>
-                <td className="px-4 py-3 text-muted-foreground">{e.clinic}</td>
-                <td className="px-4 py-3 text-red-600 font-medium">{e.error}</td>
-                <td className="px-4 py-3"><Badge label={e.status} variant={e.status} /></td>
-                <td className="px-4 py-3 font-mono text-muted-foreground">{e.retry}</td>
-                <td className="px-4 py-3 text-muted-foreground">{e.notes}</td>
-                <td className="px-4 py-3">
-                  {e.action === "Review" ? (
-                    <button className="text-[10px] font-medium text-primary border border-primary/30 px-2 py-0.5 rounded hover:bg-primary hover:text-white transition-colors">Review</button>
-                  ) : (
-                    <span className="text-[10px] text-muted-foreground">—</span>
-                  )}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </Card>
     </div>
   );
 }
@@ -3017,17 +2864,18 @@ const SCREENS: Record<string, React.FC> = {
   "call-logs": InboundCallLogsScreen,
   "transcripts": InboundTranscriptsScreen,
   "recordings": InboundRecordingsScreen,
+  "analytics": InboundAnalyticsScreen,
+  "staff-queue": StaffQueueScreen,
+  "settings": SettingsScreen,
   "outbound-agent": OutboundAgentScreen,
   "outbound-call-logs": OutboundCallLogsScreen,
   "outbound-transcripts": OutboundTranscriptsScreen,
   "outbound-recordings": OutboundRecordingsScreen,
-  "analytics": AnalyticsScreen,
-  "staff-queue": StaffQueueScreen,
-  "sentiment": SentimentScreen,
-  "settings": SettingsScreen,
+  "outbound-analytics": OutboundAnalyticsScreen,
+  "outbound-staff-queue": StaffQueueScreen,
+  "outbound-settings": SettingsScreen,
   "payment-recovery": PaymentRecoveryScreen,
   "billing": BillingScreen,
-  "integration": IntegrationScreen,
 };
 
 function getTokenFromURL(): string | null {
