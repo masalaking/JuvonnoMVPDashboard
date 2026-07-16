@@ -9,7 +9,7 @@ import {
   MoreHorizontal, Inbox, AlertTriangle, Check, X, Volume2, List, Columns,
   Lock, Unlock, Info, UploadCloud, MessageSquare, Users, Globe, Mail,
   Building2, Wifi, WifiOff, Database, Server, Layers, ToggleLeft,
-  ToggleRight, ChevronLeft
+  ToggleRight, ChevronLeft, PhoneOutgoing
 } from "lucide-react";
 import {
   LineChart, Line, BarChart, Bar, PieChart, Pie, Cell,
@@ -54,6 +54,7 @@ interface CallLog {
   sentiment?: string;
   duration?: string;
   staffAction?: boolean;
+  direction?: "inbound" | "outbound";
 }
 
 type Transcript = {
@@ -65,6 +66,7 @@ type Transcript = {
   service?: string;
   duration?: string;
   preview?: string;
+  direction?: "inbound" | "outbound";
 };
 
 // ── Dashboard context ─────────────────────────────────────────────────────────
@@ -195,12 +197,18 @@ function Card({ children, className = "" }: { children: React.ReactNode; classNa
 }
 
 // ── Sidebar ───────────────────────────────────────────────────────────────────
+// `group` clusters related nav items under a shared header in the sidebar. Items
+// with no group render as a plain top-level link.
 const navItems = [
   { id: "overview", label: "Overview", icon: LayoutDashboard },
-  { id: "ai-receptionist", label: "AI Receptionist", icon: Bot },
-  { id: "call-logs", label: "Call Logs", icon: PhoneCall },
-  { id: "transcripts", label: "Transcripts", icon: FileText },
-  { id: "recordings", label: "Recordings", icon: Mic },
+  { id: "ai-receptionist", label: "AI Receptionist", icon: Bot, group: "Inbound" },
+  { id: "call-logs", label: "Call Logs", icon: PhoneCall, group: "Inbound" },
+  { id: "transcripts", label: "Transcripts", icon: FileText, group: "Inbound" },
+  { id: "recordings", label: "Recordings", icon: Mic, group: "Inbound" },
+  { id: "outbound-agent", label: "Outbound Agent", icon: PhoneOutgoing, group: "Outbound" },
+  { id: "outbound-call-logs", label: "Call Logs", icon: PhoneCall, group: "Outbound" },
+  { id: "outbound-transcripts", label: "Transcripts", icon: FileText, group: "Outbound" },
+  { id: "outbound-recordings", label: "Recordings", icon: Mic, group: "Outbound" },
   { id: "analytics", label: "Analytics", icon: BarChart2 },
   { id: "staff-queue", label: "Staff Action Queue", icon: ClipboardList },
   { id: "sentiment", label: "Sentiment Insights", icon: Heart },
@@ -232,23 +240,31 @@ function Sidebar({ active, onNav }: { active: string; onNav: (id: string) => voi
         </div>
       </div>
       <nav className="flex-1 px-3 py-4 space-y-0.5">
-        {navItems.map(({ id, label, icon: Icon }) => (
-          <button
-            key={id}
-            onClick={() => onNav(id)}
-            className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-md text-left transition-colors text-sm ${
-              active === id
-                ? "bg-violet-600/20 text-white font-medium"
-                : "text-sidebar-foreground hover:bg-sidebar-accent hover:text-white"
-            }`}
-          >
-            <Icon size={15} className={active === id ? "text-violet-400" : ""} />
-            <span className="flex-1">{label}</span>
-            {id === "staff-queue" && openTaskCount > 0 && (
-              <span className="bg-red-500 text-white text-[10px] font-bold px-1.5 py-0.5 rounded-full">{openTaskCount}</span>
-            )}
-          </button>
-        ))}
+        {navItems.map(({ id, label, icon: Icon, group }, i) => {
+          const prevGroup = i > 0 ? navItems[i - 1].group : undefined;
+          const showGroupHeader = group && group !== prevGroup;
+          return (
+            <div key={id}>
+              {showGroupHeader && (
+                <p className="px-3 pt-3 pb-1 text-[10px] font-semibold text-sidebar-foreground/50 uppercase tracking-wide">{group}</p>
+              )}
+              <button
+                onClick={() => onNav(id)}
+                className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-md text-left transition-colors text-sm ${
+                  active === id
+                    ? "bg-violet-600/20 text-white font-medium"
+                    : "text-sidebar-foreground hover:bg-sidebar-accent hover:text-white"
+                }`}
+              >
+                <Icon size={15} className={active === id ? "text-violet-400" : ""} />
+                <span className="flex-1">{label}</span>
+                {id === "staff-queue" && openTaskCount > 0 && (
+                  <span className="bg-red-500 text-white text-[10px] font-bold px-1.5 py-0.5 rounded-full">{openTaskCount}</span>
+                )}
+              </button>
+            </div>
+          );
+        })}
       </nav>
       <div className="px-4 py-4 border-t border-sidebar-border">
         <div className="flex items-center gap-2.5">
@@ -651,15 +667,170 @@ function AIReceptionistScreen() {
   );
 }
 
+// ── Screen: Outbound Agent ────────────────────────────────────────────────────
+function OutboundAgentScreen() {
+  const { tenantInfo } = useDashboard();
+  const capabilities = [
+    { name: "Appointment reminder calls", status: "Coming Soon" },
+    { name: "Payment reminder calls", status: "Coming Soon" },
+    { name: "Recall / re-engagement campaigns", status: "Coming Soon" },
+    { name: "Post-visit follow-up calls", status: "Coming Soon" },
+    { name: "Voicemail drop", status: "Coming Soon" },
+    { name: "Callback scheduling", status: "Coming Soon" },
+    { name: "No-show follow-up", status: "Coming Soon" },
+    { name: "Waitlist notification calls", status: "Coming Soon" },
+    { name: "Survey / feedback calls", status: "Coming Soon" },
+  ];
+
+  const flowSteps = [
+    "Select Campaign", "Build Call List", "Dial Patient", "Verify Identity",
+    "Deliver Message", "Capture Response", "Update Juvonno", "Log Call"
+  ];
+
+  const activity: { text: string; time: string; icon: any; color: string }[] = [];
+
+  return (
+    <div className="p-6 space-y-6">
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-lg font-semibold text-foreground">Outbound Agent</h1>
+          <p className="text-xs text-muted-foreground">{tenantInfo?.clinic_name ?? "—"} · Not yet configured</p>
+        </div>
+      </div>
+
+      {/* Top section: Agent card + metrics */}
+      <div className="grid grid-cols-3 gap-4">
+        {/* Agent Profile */}
+        <Card className="p-5 flex flex-col gap-4">
+          <div className="flex items-center gap-3">
+            <div className="w-12 h-12 rounded-full bg-gradient-to-br from-amber-500 to-orange-500 flex items-center justify-center text-white font-bold text-lg">O</div>
+            <div>
+              <p className="font-semibold text-foreground">Outbound Agent</p>
+              <p className="text-xs text-muted-foreground">Automated outbound calling</p>
+            </div>
+            <Badge label="Inactive" variant="Inactive" />
+          </div>
+          <div className="space-y-2 text-xs">
+            {[
+              ["Clinic", tenantInfo?.clinic_name ?? "—"],
+              ["Phone", "—"],
+              ["Voice", "—"],
+              ["Language", "English"],
+              ["Mode", "Not configured"],
+              ["Agent ID", "—"],
+            ].map(([k, v]) => (
+              <div key={k} className="flex justify-between py-1.5 border-b border-border last:border-0">
+                <span className="text-muted-foreground">{k}</span>
+                <span className="font-medium text-foreground font-mono">{v}</span>
+              </div>
+            ))}
+          </div>
+          <div className="grid grid-cols-2 gap-2 mt-auto">
+            <button disabled className="bg-primary text-primary-foreground text-xs font-medium px-3 py-2 rounded-md opacity-40 cursor-not-allowed">Test Agent</button>
+            <button className="bg-muted border border-border text-xs font-medium px-3 py-2 rounded-md hover:bg-accent transition-colors">View Logs</button>
+            <button disabled className="bg-amber-50 text-amber-700 border border-amber-200 text-xs font-medium px-3 py-2 rounded-md opacity-40 cursor-not-allowed">Pause Agent</button>
+            <button className="bg-muted border border-border text-xs font-medium px-3 py-2 rounded-md hover:bg-accent transition-colors">Request Setup</button>
+          </div>
+        </Card>
+
+        {/* Performance metrics */}
+        <div className="col-span-2 grid grid-cols-4 gap-3">
+          {[
+            { label: "Calls Today", value: "—", icon: PhoneOutgoing, color: "purple" },
+            { label: "Connected Today", value: "—", icon: CheckCircle2, color: "teal" },
+            { label: "Avg Duration", value: "—", icon: Clock, color: "indigo" },
+            { label: "Voicemail Rate", value: "—", icon: ArrowUpRight, color: "amber" },
+            { label: "Failed Call Rate", value: "—", icon: XCircle, color: "red" },
+            { label: "Avg Sentiment", value: "—", icon: Heart, color: "green" },
+            { label: "Campaigns Active", value: "—", icon: TrendingUp, color: "teal" },
+            { label: "Tasks Created", value: "—", icon: ClipboardList, color: "amber" },
+          ].map((m) => (
+            <KpiCard key={m.label} label={m.label} value={m.value} icon={m.icon} color={m.color} />
+          ))}
+        </div>
+      </div>
+
+      {/* Capabilities grid + flow */}
+      <div className="grid grid-cols-3 gap-4">
+        <div className="col-span-2">
+          <Card>
+            <div className="px-4 py-3 border-b border-border">
+              <h3 className="text-sm font-semibold text-foreground">Capabilities</h3>
+            </div>
+            <div className="p-4 grid grid-cols-3 gap-2">
+              {capabilities.map((c) => (
+                <div key={c.name} className="flex items-center gap-2 p-2 rounded-md border border-border bg-muted/30">
+                  {c.status === "Active" ? <CheckCircle2 size={12} className="text-emerald-500 flex-shrink-0" /> :
+                   c.status === "Coming Soon" ? <Clock size={12} className="text-slate-400 flex-shrink-0" /> :
+                   <AlertCircle size={12} className="text-amber-500 flex-shrink-0" />}
+                  <div className="min-w-0">
+                    <p className="text-xs font-medium text-foreground leading-tight truncate">{c.name}</p>
+                    <p className="text-[10px] text-muted-foreground truncate">{c.status}</p>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </Card>
+        </div>
+
+        {/* Live activity */}
+        <Card>
+          <div className="px-4 py-3 border-b border-border flex items-center gap-2">
+            <span className="w-2 h-2 bg-slate-400 rounded-full" />
+            <h3 className="text-sm font-semibold text-foreground">Live Activity</h3>
+          </div>
+          <div className="p-3 space-y-2.5">
+            {activity.length > 0 ? activity.map((a, i) => (
+              <div key={i} className="flex gap-2.5 p-2 rounded-md hover:bg-muted/50 transition-colors">
+                <a.icon size={13} className={`${a.color} flex-shrink-0 mt-0.5`} />
+                <div>
+                  <p className="text-xs text-foreground leading-snug">{a.text}</p>
+                  <p className="text-[10px] text-muted-foreground mt-0.5">{a.time}</p>
+                </div>
+              </div>
+            )) : (
+              <p className="text-xs text-muted-foreground text-center py-4">No recent activity</p>
+            )}
+          </div>
+        </Card>
+      </div>
+
+      {/* Campaign Flow */}
+      <Card>
+        <div className="px-4 py-3 border-b border-border flex items-center justify-between">
+          <h3 className="text-sm font-semibold text-foreground">Campaign Flow (Read-only)</h3>
+          <span className="text-[10px] text-muted-foreground bg-muted px-2 py-1 rounded">Managed by NAP Admins</span>
+        </div>
+        <div className="p-5">
+          <div className="flex items-center gap-0 overflow-x-auto pb-2">
+            {flowSteps.map((step, i) => (
+              <div key={step} className="flex items-center flex-shrink-0">
+                <div className="flex flex-col items-center gap-1">
+                  <div className="w-8 h-8 rounded-full bg-amber-100 border-2 border-amber-400 flex items-center justify-center text-[10px] font-bold text-amber-700">{i + 1}</div>
+                  <span className="text-[10px] text-center text-foreground whitespace-nowrap w-20">{step}</span>
+                </div>
+                {i < flowSteps.length - 1 && <div className="w-8 h-0.5 bg-amber-200 flex-shrink-0 mb-4" />}
+              </div>
+            ))}
+          </div>
+          <p className="text-[10px] text-muted-foreground mt-3 italic">Outbound campaign logic, call lists, and dialing schedules are managed by NAP admins to protect clinic workflow accuracy.</p>
+        </div>
+      </Card>
+
+    </div>
+  );
+}
+
 // ── Screen: Call Logs ─────────────────────────────────────────────────────────
-function CallLogsScreen() {
-  const { callLogs } = useDashboard();
+function CallLogsScreen({ direction }: { direction: "inbound" | "outbound" }) {
+  const { callLogs: allCallLogs } = useDashboard();
+  const callLogs = allCallLogs.filter(c => (c.direction ?? "inbound") === direction);
   const [selectedCall, setSelectedCall] = useState<CallLog | null>(null);
 
   return (
     <div className="p-6 space-y-4 h-full">
       <div className="flex items-center justify-between">
-        <h1 className="text-lg font-semibold text-foreground">Call Logs</h1>
+        <h1 className="text-lg font-semibold text-foreground">{direction === "outbound" ? "Outbound Call Logs" : "Inbound Call Logs"}</h1>
         <button className="flex items-center gap-2 bg-muted border border-border text-sm font-medium px-3 py-1.5 rounded-md hover:bg-accent transition-colors">
           <Download size={13} /> Export CSV
         </button>
@@ -702,7 +873,11 @@ function CallLogsScreen() {
                   </tr>
                 </thead>
                 <tbody>
-                  {callLogs.map((c) => (
+                  {callLogs.length === 0 ? (
+                    <tr><td colSpan={10} className="px-3 py-10 text-center text-muted-foreground">
+                      No {direction} calls yet.
+                    </td></tr>
+                  ) : callLogs.map((c) => (
                     <tr
                       key={c.id}
                       onClick={() => setSelectedCall(c)}
@@ -801,15 +976,21 @@ function CallLogsScreen() {
   );
 }
 
+function InboundCallLogsScreen() { return <CallLogsScreen direction="inbound" />; }
+function OutboundCallLogsScreen() { return <CallLogsScreen direction="outbound" />; }
+function InboundRecordingsScreen() { return <RecordingsScreen direction="inbound" />; }
+function OutboundRecordingsScreen() { return <RecordingsScreen direction="outbound" />; }
+
 // ── Screen: Transcripts ───────────────────────────────────────────────────────
-function TranscriptsScreen() {
+function TranscriptsScreen({ direction }: { direction: "inbound" | "outbound" }) {
+  const filteredTranscripts = transcripts.filter(t => (t.direction ?? "inbound") === direction);
   const [selected, setSelected] = useState<Transcript | null>(null);
   const [masked, setMasked] = useState(false);
 
   return (
     <div className="p-6 h-full flex flex-col gap-4">
       <div className="flex items-center justify-between">
-        <h1 className="text-lg font-semibold text-foreground">Transcripts</h1>
+        <h1 className="text-lg font-semibold text-foreground">{direction === "outbound" ? "Outbound Transcripts" : "Inbound Transcripts"}</h1>
         <div className="flex items-center gap-2">
           <label className="flex items-center gap-2 text-xs text-foreground cursor-pointer">
             {masked ? <EyeOff size={13} className="text-muted-foreground" /> : <Eye size={13} className="text-muted-foreground" />}
@@ -837,7 +1018,10 @@ function TranscriptsScreen() {
             ))}
           </div>
           <div className="space-y-2 overflow-y-auto flex-1">
-            {transcripts.map((t) => (
+            {filteredTranscripts.length === 0 && (
+              <p className="text-xs text-muted-foreground text-center py-6">No {direction} transcripts yet.</p>
+            )}
+            {filteredTranscripts.map((t) => (
               <div
                 key={t.id}
                 onClick={() => setSelected(t)}
@@ -898,6 +1082,9 @@ function TranscriptsScreen() {
     </div>
   );
 }
+
+function InboundTranscriptsScreen() { return <TranscriptsScreen direction="inbound" />; }
+function OutboundTranscriptsScreen() { return <TranscriptsScreen direction="outbound" />; }
 
 // ── Screen: Analytics ─────────────────────────────────────────────────────────
 function AnalyticsScreen() {
@@ -1271,14 +1458,15 @@ function SentimentScreen() {
 }
 
 // ── Screen: Recordings ────────────────────────────────────────────────────────
-function RecordingsScreen() {
-  const { callLogs } = useDashboard();
+function RecordingsScreen({ direction }: { direction: "inbound" | "outbound" }) {
+  const { callLogs: allCallLogs } = useDashboard();
+  const callLogs = allCallLogs.filter(c => (c.direction ?? "inbound") === direction);
   const [playing, setPlaying] = useState<number | string | null>(null);
 
   return (
     <div className="p-6 space-y-4">
       <div className="flex items-center justify-between">
-        <h1 className="text-lg font-semibold text-foreground">Recordings</h1>
+        <h1 className="text-lg font-semibold text-foreground">{direction === "outbound" ? "Outbound Recordings" : "Inbound Recordings"}</h1>
         <div className="flex items-center gap-2">
           <div className="relative">
             <Search size={13} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
@@ -1300,7 +1488,9 @@ function RecordingsScreen() {
             </tr>
           </thead>
           <tbody>
-            {callLogs.map((c) => (
+            {callLogs.length === 0 ? (
+              <tr><td colSpan={9} className="px-4 py-10 text-center text-muted-foreground">No {direction} recordings yet.</td></tr>
+            ) : callLogs.map((c) => (
               <tr key={c.id} className="border-b border-border last:border-0 hover:bg-muted/30 transition-colors">
                 <td className="px-4 py-3 font-mono text-muted-foreground whitespace-nowrap">{c.time}</td>
                 <td className="px-4 py-3 font-medium text-foreground">{c.caller}</td>
@@ -2824,9 +3014,13 @@ function PaymentRecoveryScreen() {
 const SCREENS: Record<string, React.FC> = {
   "overview": OverviewScreen,
   "ai-receptionist": AIReceptionistScreen,
-  "call-logs": CallLogsScreen,
-  "transcripts": TranscriptsScreen,
-  "recordings": RecordingsScreen,
+  "call-logs": InboundCallLogsScreen,
+  "transcripts": InboundTranscriptsScreen,
+  "recordings": InboundRecordingsScreen,
+  "outbound-agent": OutboundAgentScreen,
+  "outbound-call-logs": OutboundCallLogsScreen,
+  "outbound-transcripts": OutboundTranscriptsScreen,
+  "outbound-recordings": OutboundRecordingsScreen,
   "analytics": AnalyticsScreen,
   "staff-queue": StaffQueueScreen,
   "sentiment": SentimentScreen,

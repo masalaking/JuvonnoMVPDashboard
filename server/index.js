@@ -42,6 +42,55 @@ function saveSettingsFile(data) {
   writeFileSync(SETTINGS_FILE, JSON.stringify(data, null, 2));
 }
 
+// ── n8n proxy helper (Payment Recovery + Call Logs) ─────────────────────────
+// These two feature areas keep no local storage on this server — n8n (backed
+// by Google Sheets / Juvonno) is the source of truth. The dashboard is a thin,
+// per-tenant proxy: it resolves :accessToken -> tenant, forwards an `event` +
+// payload to that tenant's own n8n_webhook_url, and relays back whatever n8n
+// responds with (via n8n's "Respond to Webhook" node). This keeps every
+// request scoped to one clinic's n8n instance, same as /settings scopes
+// writes to one clinic's data.
+async function callN8n(tenant, event, payload = {}) {
+  if (!tenant.n8n_webhook_url) {
+    const err = new Error('No n8n webhook configured for this clinic');
+    err.status = 502;
+    throw err;
+  }
+  const res = await fetch(tenant.n8n_webhook_url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      event,
+      client_id: tenant.client_id,
+      clinic_id: tenant.clinic_id,
+      clinic_name: tenant.clinic_name,
+      ...payload,
+    }),
+  });
+  const text = await res.text();
+  let json;
+  try { json = text ? JSON.parse(text) : {}; } catch { json = { raw: text }; }
+  if (!res.ok) {
+    const err = new Error(json?.error ?? `n8n responded with ${res.status}`);
+    err.status = 502;
+    throw err;
+  }
+  return json;
+}
+
+// Wraps a route handler that talks to n8n so failures come back as a clean
+// 502 instead of an unhandled rejection / stack trace to the client.
+function n8nRoute(handler) {
+  return async (req, res) => {
+    try {
+      await handler(req, res);
+    } catch (err) {
+      console.error(`[n8n proxy] ${req.method} ${req.originalUrl} failed:`, err.message);
+      res.status(err.status ?? 502).json({ error: err.message ?? 'Upstream n8n request failed' });
+    }
+  };
+}
+
 // Transform one section from internal storage format into the shape n8n expects.
 function formatForN8n(section, data) {
   if (section === 'practitioners') {
@@ -234,6 +283,94 @@ app.put('/api/link/:accessToken/settings', async (req, res) => {
     }).catch(err => console.error(`[webhook] failed to notify n8n for section "${section}" (${tenant.client_id}):`, err.message));
   }
 });
+
+// ── Payment Recovery (billing) endpoints ────────────────────────────────────
+// No local storage — every route resolves :accessToken -> tenant, then
+// proxies to that tenant's own n8n_webhook_url (see callN8n above) and
+// relays back n8n's response. n8n / Google Sheets is the single source of
+// truth for invoices, tasks, and communications.
+
+app.get('/api/link/:accessToken/billing/overview', n8nRoute(async (req, res) => {
+  const tenant = findTenant(req.params.accessToken);
+  if (!tenant) return res.status(404).json({ error: 'Invalid access token' });
+  res.json(await callN8n(tenant, 'billing.get_overview'));
+}));
+
+app.get('/api/link/:accessToken/billing/invoices', n8nRoute(async (req, res) => {
+  const tenant = findTenant(req.params.accessToken);
+  if (!tenant) return res.status(404).json({ error: 'Invalid access token' });
+  res.json(await callN8n(tenant, 'billing.get_invoices'));
+}));
+
+app.get('/api/link/:accessToken/billing/invoices/:invoiceId', n8nRoute(async (req, res) => {
+  const tenant = findTenant(req.params.accessToken);
+  if (!tenant) return res.status(404).json({ error: 'Invalid access token' });
+  res.json(await callN8n(tenant, 'billing.get_invoice', { invoice_id: req.params.invoiceId }));
+}));
+
+app.get('/api/link/:accessToken/billing/tasks', n8nRoute(async (req, res) => {
+  const tenant = findTenant(req.params.accessToken);
+  if (!tenant) return res.status(404).json({ error: 'Invalid access token' });
+  res.json(await callN8n(tenant, 'billing.get_tasks'));
+}));
+
+app.get('/api/link/:accessToken/billing/communications', n8nRoute(async (req, res) => {
+  const tenant = findTenant(req.params.accessToken);
+  if (!tenant) return res.status(404).json({ error: 'Invalid access token' });
+  res.json(await callN8n(tenant, 'billing.get_communications'));
+}));
+
+app.get('/api/link/:accessToken/billing/settings', n8nRoute(async (req, res) => {
+  const tenant = findTenant(req.params.accessToken);
+  if (!tenant) return res.status(404).json({ error: 'Invalid access token' });
+  res.json(await callN8n(tenant, 'billing.get_settings'));
+}));
+
+app.post('/api/link/:accessToken/billing/settings', n8nRoute(async (req, res) => {
+  const tenant = findTenant(req.params.accessToken);
+  if (!tenant) return res.status(404).json({ error: 'Invalid access token' });
+  res.json(await callN8n(tenant, 'billing.settings_changed', { settings: req.body }));
+}));
+
+// Staff-triggered invoice actions — each just forwards to n8n, which performs
+// the real side effect (Twilio send, Juvonno lookup, Sheets update) and
+// returns the updated invoice.
+function billingInvoiceAction(event) {
+  return n8nRoute(async (req, res) => {
+    const tenant = findTenant(req.params.accessToken);
+    if (!tenant) return res.status(404).json({ error: 'Invalid access token' });
+    res.json(await callN8n(tenant, event, { invoice_id: req.params.invoiceId }));
+  });
+}
+
+app.post('/api/link/:accessToken/billing/invoices/:invoiceId/send-now', billingInvoiceAction('billing.invoice.send_now'));
+app.post('/api/link/:accessToken/billing/invoices/:invoiceId/pause', billingInvoiceAction('billing.invoice.pause'));
+app.post('/api/link/:accessToken/billing/invoices/:invoiceId/resume', billingInvoiceAction('billing.invoice.resume'));
+app.post('/api/link/:accessToken/billing/invoices/:invoiceId/reconcile', billingInvoiceAction('billing.invoice.reconcile'));
+app.post('/api/link/:accessToken/billing/invoices/:invoiceId/escalate', billingInvoiceAction('billing.invoice.escalate'));
+
+app.post('/api/link/:accessToken/billing/tasks/:taskId/cancel', n8nRoute(async (req, res) => {
+  const tenant = findTenant(req.params.accessToken);
+  if (!tenant) return res.status(404).json({ error: 'Invalid access token' });
+  res.json(await callN8n(tenant, 'billing.task.cancel', { task_id: req.params.taskId }));
+}));
+
+app.post('/api/link/:accessToken/billing/tasks/:taskId/reschedule', n8nRoute(async (req, res) => {
+  const tenant = findTenant(req.params.accessToken);
+  if (!tenant) return res.status(404).json({ error: 'Invalid access token' });
+  res.json(await callN8n(tenant, 'billing.task.reschedule', { task_id: req.params.taskId, scheduled_time: req.body?.scheduled_time }));
+}));
+
+// ── Call logs endpoint ───────────────────────────────────────────────────────
+// No local storage either — proxies to n8n, which owns inbound/outbound call
+// history. `direction` is passed through so n8n can filter or the dashboard
+// can filter the response client-side; entries carry direction: "inbound" |
+// "outbound" so Call Logs / Transcripts / Recordings can split by tab.
+app.get('/api/link/:accessToken/call-logs', n8nRoute(async (req, res) => {
+  const tenant = findTenant(req.params.accessToken);
+  if (!tenant) return res.status(404).json({ error: 'Invalid access token' });
+  res.json(await callN8n(tenant, 'call_logs.get', { direction: req.query.direction ?? null }));
+}));
 
 // Serve built frontend
 app.use(express.static(join(ROOT, 'dist')));
