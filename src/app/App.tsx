@@ -1318,15 +1318,52 @@ function patientName(task: StaffTask): string {
   return name || "Unknown";
 }
 
+// Fields already surfaced explicitly in the list/detail views - anything else
+// on the task gets shown automatically in the detail panel's "Other Details"
+// section, so a new field an n8n workflow starts sending doesn't just vanish.
+const STAFF_TASK_KNOWN_FIELDS = new Set([
+  "id", "client_id", "patient", "phone", "type", "summary",
+  "priority", "sentiment", "due", "assignee", "status", "created_at",
+]);
+
+function humanizeKey(key: string): string {
+  return key.replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase());
+}
+
+function formatDateTime(value: unknown): string {
+  const text = safeText(value);
+  if (!text) return "";
+  const date = new Date(text);
+  if (isNaN(date.getTime())) return text;
+  return date.toLocaleString(undefined, { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+}
+
+function formatRelativeTime(value: unknown): string {
+  const text = safeText(value);
+  if (!text) return "";
+  const date = new Date(text);
+  if (isNaN(date.getTime())) return text;
+  const diffMs = Date.now() - date.getTime();
+  const diffMin = Math.round(diffMs / 60000);
+  if (diffMin < 1) return "just now";
+  if (diffMin < 60) return `${diffMin}m ago`;
+  const diffHr = Math.round(diffMin / 60);
+  if (diffHr < 24) return `${diffHr}h ago`;
+  const diffDay = Math.round(diffHr / 24);
+  return `${diffDay}d ago`;
+}
+
 function StaffQueueScreen() {
   const { staffTasks, updateTaskStatus, deleteTask } = useDashboard();
   const [filter, setFilter] = useState("All");
+  const [selectedId, setSelectedId] = useState<string | null>(null);
   const [confirmingId, setConfirmingId] = useState<string | null>(null);
 
   function handleDelete(id: string) {
     if (confirmingId === id) {
       deleteTask(id);
       setConfirmingId(null);
+      if (selectedId === id) setSelectedId(null);
     } else {
       setConfirmingId(id);
     }
@@ -1335,6 +1372,7 @@ function StaffQueueScreen() {
   const filters = ["All", "New", "In Progress", "Completed"];
   const visibleTasks = filter === "All" ? staffTasks : staffTasks.filter(t => t.status === filter);
   const sortedTasks = [...visibleTasks].sort((a, b) => (a.status === "Completed" ? 1 : 0) - (b.status === "Completed" ? 1 : 0));
+  const selectedTask = staffTasks.find(t => t.id === selectedId) ?? null;
 
   return (
     <div className="p-6 space-y-4">
@@ -1356,51 +1394,140 @@ function StaffQueueScreen() {
         ))}
       </div>
 
-      <div className="space-y-3">
-        {sortedTasks.length === 0 && (
-          <p className="text-xs text-muted-foreground py-8 text-center">No tasks here.</p>
+      <Card className="overflow-hidden">
+        {sortedTasks.length === 0 ? (
+          <p className="text-xs text-muted-foreground py-10 text-center">No tasks here.</p>
+        ) : (
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="border-b border-border bg-muted/40">
+                {["Type", "Patient", "Phone", "Requested", "Submitted", "Status", ""].map(h => (
+                  <th key={h} className="text-left px-4 py-2.5 text-muted-foreground font-medium">{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {sortedTasks.map((task) => (
+                <tr
+                  key={task.id}
+                  onClick={() => setSelectedId(task.id)}
+                  className={`border-b border-border last:border-0 hover:bg-muted/30 transition-colors cursor-pointer ${task.status === "Completed" ? "opacity-60" : ""}`}
+                >
+                  <td className="px-4 py-3 text-foreground">{safeText(task.type) || "—"}</td>
+                  <td className="px-4 py-3">
+                    <div className="flex items-center gap-2">
+                      <div className="w-5 h-5 rounded-full bg-violet-100 text-violet-700 flex items-center justify-center text-[9px] font-bold flex-shrink-0">{patientName(task).charAt(0)}</div>
+                      <span className="font-medium text-foreground">{patientName(task)}</span>
+                    </div>
+                  </td>
+                  <td className="px-4 py-3 font-mono text-muted-foreground">{safeText(task.phone) || "—"}</td>
+                  <td className="px-4 py-3 text-muted-foreground">{formatDateTime(task.due) || "—"}</td>
+                  <td className="px-4 py-3 text-muted-foreground">{formatRelativeTime(task.created_at) || "—"}</td>
+                  <td className="px-4 py-3"><Badge label={task.status} variant={task.status} /></td>
+                  <td className="px-4 py-3 text-muted-foreground"><ChevronRight size={14} /></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         )}
-        {sortedTasks.map((task) => (
-          <Card key={task.id} className={`p-4 space-y-2.5 ${task.status === "Completed" ? "opacity-60" : ""}`}>
-            <div className="flex items-start justify-between gap-2">
+      </Card>
+
+      {selectedTask && (
+        <>
+          <div className="fixed inset-0 bg-black/30 z-40" onClick={() => setSelectedId(null)} />
+          <div className="fixed inset-y-0 right-0 w-full max-w-md bg-card border-l border-border shadow-xl z-50 flex flex-col">
+            <div className="flex items-center justify-between px-5 py-4 border-b border-border">
               <div className="flex items-center gap-2">
-                <p className="text-xs font-semibold text-foreground leading-snug">{safeText(task.type)}</p>
-                {task.priority && <Badge label={safeText(task.priority)} variant={safeText(task.priority)} />}
+                <span className="text-sm font-semibold text-foreground">{safeText(selectedTask.type) || "Request"}</span>
+                <Badge label={selectedTask.status} variant={selectedTask.status} />
               </div>
-              <div className="flex items-center gap-1.5">
+              <button onClick={() => setSelectedId(null)} className="p-1 text-muted-foreground hover:text-foreground transition-colors">
+                <X size={16} />
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto px-5 py-4 space-y-5">
+              <div>
+                <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide mb-2">Patient</p>
+                <div className="grid grid-cols-2 gap-3 text-xs">
+                  <div>
+                    <p className="text-muted-foreground">Name</p>
+                    <p className="font-medium text-foreground mt-0.5">{patientName(selectedTask)}</p>
+                  </div>
+                  <div>
+                    <p className="text-muted-foreground">Phone</p>
+                    <p className="font-medium text-foreground mt-0.5 font-mono">{safeText(selectedTask.phone) || "—"}</p>
+                  </div>
+                </div>
+              </div>
+
+              <div>
+                <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide mb-2">Request Details</p>
+                <div className="grid grid-cols-2 gap-3 text-xs">
+                  <div>
+                    <p className="text-muted-foreground">Requested For</p>
+                    <p className="font-medium text-foreground mt-0.5">{formatDateTime(selectedTask.due) || "—"}</p>
+                  </div>
+                  <div>
+                    <p className="text-muted-foreground">Submitted</p>
+                    <p className="font-medium text-foreground mt-0.5">{formatDateTime(selectedTask.created_at) || "—"}</p>
+                  </div>
+                  {selectedTask.priority && (
+                    <div>
+                      <p className="text-muted-foreground">Priority</p>
+                      <p className="mt-0.5"><Badge label={safeText(selectedTask.priority)} variant={safeText(selectedTask.priority)} /></p>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {!!safeText(selectedTask.summary) && (
+                <div>
+                  <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide mb-2">Call Summary</p>
+                  <p className="text-xs text-foreground leading-relaxed bg-muted/40 border border-border rounded-md p-3">{safeText(selectedTask.summary)}</p>
+                </div>
+              )}
+
+              {(() => {
+                const extraEntries = Object.entries(selectedTask).filter(([key, value]) => !STAFF_TASK_KNOWN_FIELDS.has(key) && value != null && value !== "");
+                if (extraEntries.length === 0) return null;
+                return (
+                  <div>
+                    <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide mb-2">Other Details</p>
+                    <div className="grid grid-cols-2 gap-3 text-xs">
+                      {extraEntries.map(([key, value]) => (
+                        <div key={key}>
+                          <p className="text-muted-foreground">{humanizeKey(key)}</p>
+                          <p className="font-medium text-foreground mt-0.5 break-words">{safeText(value)}</p>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })()}
+            </div>
+
+            <div className="border-t border-border px-5 py-4 space-y-2">
+              <div className="flex items-center gap-2">
                 <select
-                  value={task.status}
-                  onChange={(e) => updateTaskStatus(task.id, e.target.value)}
-                  className="text-[10px] font-medium border border-border rounded-md px-2 py-1 bg-card hover:bg-muted focus:outline-none focus:ring-1 focus:ring-ring cursor-pointer"
+                  value={selectedTask.status}
+                  onChange={(e) => updateTaskStatus(selectedTask.id, e.target.value)}
+                  className="flex-1 text-xs font-medium border border-border rounded-md px-2.5 py-2 bg-card hover:bg-muted focus:outline-none focus:ring-1 focus:ring-ring cursor-pointer"
                 >
                   {STAFF_TASK_STATUSES.map(s => <option key={s} value={s}>{s}</option>)}
                 </select>
                 <button
-                  onClick={() => handleDelete(task.id)}
+                  onClick={() => handleDelete(selectedTask.id)}
                   onBlur={() => setConfirmingId(null)}
-                  title={confirmingId === task.id ? "Click again to confirm delete" : "Delete"}
-                  className={`p-1.5 rounded-md transition-colors ${confirmingId === task.id ? "bg-destructive/10 text-destructive" : "text-muted-foreground hover:text-destructive hover:bg-muted"}`}
+                  className={`flex items-center gap-1.5 text-xs font-medium px-3 py-2 rounded-md border transition-colors ${confirmingId === selectedTask.id ? "bg-destructive/10 text-destructive border-destructive/30" : "border-border text-muted-foreground hover:text-destructive hover:bg-muted"}`}
                 >
-                  <Trash2 size={12} />
+                  <Trash2 size={12} /> {confirmingId === selectedTask.id ? "Confirm Delete" : "Delete"}
                 </button>
               </div>
             </div>
-            <p className="text-[11px] text-muted-foreground leading-relaxed">{safeText(task.summary)}</p>
-            <div className="flex items-center gap-1.5">
-              <div className="w-5 h-5 rounded-full bg-violet-100 text-violet-700 flex items-center justify-center text-[9px] font-bold">{patientName(task).charAt(0)}</div>
-              <span className="text-[11px] font-medium text-foreground">{patientName(task)}</span>
-              {task.phone && <span className="text-[10px] text-muted-foreground font-mono">· {safeText(task.phone)}</span>}
-            </div>
-            <div className="flex items-center justify-between pt-2 border-t border-border text-[10px] text-muted-foreground">
-              <div className="flex items-center gap-3">
-                {task.sentiment && <Badge label={safeText(task.sentiment)} variant={safeText(task.sentiment)} />}
-                {task.assignee && <span>Assigned: {safeText(task.assignee)}</span>}
-              </div>
-              {task.due && <div className="flex items-center gap-1"><Clock size={9} /> {safeText(task.due)}</div>}
-            </div>
-          </Card>
-        ))}
-      </div>
+          </div>
+        </>
+      )}
     </div>
   );
 }
