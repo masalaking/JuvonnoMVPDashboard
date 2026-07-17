@@ -187,11 +187,14 @@ app.post('/api/link/:accessToken/intake/requests', (req, res) => {
 
   const requests = loadRequests();
   const entry = {
+    ...req.body,
+    // These are always ours to set, never the caller's - a new request is
+    // always "New" regardless of what status (if any) the workflow sends,
+    // since staff should be the ones moving it through the queue.
     id: randomUUID(),
     client_id: tenant.client_id,
     created_at: new Date().toISOString(),
     status: 'New',
-    ...req.body,
   };
   requests.push(entry);
   saveRequests(requests);

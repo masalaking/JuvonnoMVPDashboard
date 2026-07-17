@@ -1324,7 +1324,19 @@ function patientName(task: StaffTask): string {
 const STAFF_TASK_KNOWN_FIELDS = new Set([
   "id", "client_id", "patient", "phone", "type", "summary",
   "priority", "sentiment", "due", "assignee", "status", "created_at",
+  // Bookkeeping/duplicate fields some n8n workflows send alongside the ones
+  // above (same info, different key name, or internal event metadata) -
+  // suppressed from "Other Details" so it doesn't just repeat the summary.
+  "event", "event_version", "action_type", "title", "category",
+  "booking_status", "requires_staff_action", "full_name", "phone_number",
+  "ai_call_summary", "reason",
 ]);
+
+const STATUS_ACCENT: Record<string, string> = {
+  New: "bg-blue-50 border-blue-100",
+  "In Progress": "bg-violet-50 border-violet-100",
+  Completed: "bg-emerald-50 border-emerald-100",
+};
 
 function humanizeKey(key: string): string {
   return key.replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase());
@@ -1351,6 +1363,35 @@ function formatRelativeTime(value: unknown): string {
   if (diffHr < 24) return `${diffHr}h ago`;
   const diffDay = Math.round(diffHr / 24);
   return `${diffDay}d ago`;
+}
+
+// Anything on the task that isn't already shown in the main panel layout.
+// Collapsed by default - it's a fallback for fields a workflow might add
+// later, not something staff need to read on every request.
+function StaffTaskExtraDetails({ task }: { task: StaffTask }) {
+  const [open, setOpen] = useState(false);
+  const extraEntries = Object.entries(task).filter(([key, value]) => !STAFF_TASK_KNOWN_FIELDS.has(key) && value != null && value !== "");
+  if (extraEntries.length === 0) return null;
+
+  return (
+    <div className="border-t border-border pt-3">
+      <button onClick={() => setOpen(o => !o)} className="flex items-center gap-1.5 text-[10px] font-semibold text-muted-foreground uppercase tracking-wide hover:text-foreground transition-colors">
+        <Info size={11} />
+        {open ? "Hide" : "Show"} {extraEntries.length} more detail{extraEntries.length === 1 ? "" : "s"}
+        <ChevronDown size={11} className={`transition-transform ${open ? "rotate-180" : ""}`} />
+      </button>
+      {open && (
+        <div className="grid grid-cols-2 gap-3 text-xs mt-3">
+          {extraEntries.map(([key, value]) => (
+            <div key={key}>
+              <p className="text-muted-foreground">{humanizeKey(key)}</p>
+              <p className="font-medium text-foreground mt-0.5 break-words">{safeText(value)}</p>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
 }
 
 function StaffQueueScreen() {
@@ -1436,7 +1477,7 @@ function StaffQueueScreen() {
         <>
           <div className="fixed inset-0 bg-black/30 z-40" onClick={() => setSelectedId(null)} />
           <div className="fixed inset-y-0 right-0 w-full max-w-md bg-card border-l border-border shadow-xl z-50 flex flex-col">
-            <div className="flex items-center justify-between px-5 py-4 border-b border-border">
+            <div className={`flex items-center justify-between px-5 py-4 border-b ${STATUS_ACCENT[selectedTask.status] ?? "bg-muted/40 border-border"}`}>
               <div className="flex items-center gap-2">
                 <span className="text-sm font-semibold text-foreground">{safeText(selectedTask.type) || "Request"}</span>
                 <Badge label={selectedTask.status} variant={selectedTask.status} />
@@ -1446,65 +1487,50 @@ function StaffQueueScreen() {
               </button>
             </div>
 
-            <div className="flex-1 overflow-y-auto px-5 py-4 space-y-5">
-              <div>
-                <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide mb-2">Patient</p>
-                <div className="grid grid-cols-2 gap-3 text-xs">
-                  <div>
-                    <p className="text-muted-foreground">Name</p>
-                    <p className="font-medium text-foreground mt-0.5">{patientName(selectedTask)}</p>
-                  </div>
-                  <div>
-                    <p className="text-muted-foreground">Phone</p>
-                    <p className="font-medium text-foreground mt-0.5 font-mono">{safeText(selectedTask.phone) || "—"}</p>
-                  </div>
+            <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
+              <div className="flex items-center gap-3 pb-4 border-b border-border">
+                <div className="w-10 h-10 rounded-full bg-violet-100 text-violet-700 flex items-center justify-center text-sm font-bold flex-shrink-0">{patientName(selectedTask).charAt(0)}</div>
+                <div>
+                  <p className="text-sm font-semibold text-foreground">{patientName(selectedTask)}</p>
+                  <p className="text-xs text-muted-foreground font-mono">{safeText(selectedTask.phone) || "No phone on file"}</p>
                 </div>
               </div>
 
-              <div>
-                <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide mb-2">Request Details</p>
-                <div className="grid grid-cols-2 gap-3 text-xs">
-                  <div>
-                    <p className="text-muted-foreground">Requested For</p>
-                    <p className="font-medium text-foreground mt-0.5">{formatDateTime(selectedTask.due) || "—"}</p>
+              <div className="grid grid-cols-2 gap-3">
+                <div className="rounded-md border border-border p-3">
+                  <div className="flex items-center gap-1.5 text-muted-foreground mb-1">
+                    <Calendar size={11} />
+                    <p className="text-[10px] font-semibold uppercase tracking-wide">Requested For</p>
                   </div>
-                  <div>
-                    <p className="text-muted-foreground">Submitted</p>
-                    <p className="font-medium text-foreground mt-0.5">{formatDateTime(selectedTask.created_at) || "—"}</p>
+                  <p className="text-xs font-medium text-foreground">{formatDateTime(selectedTask.due) || "—"}</p>
+                </div>
+                <div className="rounded-md border border-border p-3">
+                  <div className="flex items-center gap-1.5 text-muted-foreground mb-1">
+                    <Clock size={11} />
+                    <p className="text-[10px] font-semibold uppercase tracking-wide">Submitted</p>
                   </div>
-                  {selectedTask.priority && (
-                    <div>
-                      <p className="text-muted-foreground">Priority</p>
-                      <p className="mt-0.5"><Badge label={safeText(selectedTask.priority)} variant={safeText(selectedTask.priority)} /></p>
-                    </div>
-                  )}
+                  <p className="text-xs font-medium text-foreground">{formatDateTime(selectedTask.created_at) || "—"}</p>
                 </div>
               </div>
+
+              {selectedTask.priority && (
+                <div className="flex items-center gap-2">
+                  <span className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">Priority</span>
+                  <Badge label={safeText(selectedTask.priority)} variant={safeText(selectedTask.priority)} />
+                </div>
+              )}
 
               {!!safeText(selectedTask.summary) && (
                 <div>
-                  <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide mb-2">Call Summary</p>
+                  <div className="flex items-center gap-1.5 text-muted-foreground mb-2">
+                    <MessageSquare size={11} />
+                    <p className="text-[10px] font-semibold uppercase tracking-wide">Call Summary</p>
+                  </div>
                   <p className="text-xs text-foreground leading-relaxed bg-muted/40 border border-border rounded-md p-3">{safeText(selectedTask.summary)}</p>
                 </div>
               )}
 
-              {(() => {
-                const extraEntries = Object.entries(selectedTask).filter(([key, value]) => !STAFF_TASK_KNOWN_FIELDS.has(key) && value != null && value !== "");
-                if (extraEntries.length === 0) return null;
-                return (
-                  <div>
-                    <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide mb-2">Other Details</p>
-                    <div className="grid grid-cols-2 gap-3 text-xs">
-                      {extraEntries.map(([key, value]) => (
-                        <div key={key}>
-                          <p className="text-muted-foreground">{humanizeKey(key)}</p>
-                          <p className="font-medium text-foreground mt-0.5 break-words">{safeText(value)}</p>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                );
-              })()}
+              <StaffTaskExtraDetails task={selectedTask} />
             </div>
 
             <div className="border-t border-border px-5 py-4 space-y-2">
