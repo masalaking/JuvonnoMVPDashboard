@@ -1318,28 +1318,35 @@ function patientName(task: StaffTask): string {
   return name || "Unknown";
 }
 
-// Fields already surfaced explicitly in the list/detail views - anything else
-// on the task gets shown automatically in the detail panel's "Other Details"
-// section, so a new field an n8n workflow starts sending doesn't just vanish.
-const STAFF_TASK_KNOWN_FIELDS = new Set([
-  "id", "client_id", "patient", "phone", "type", "summary",
-  "priority", "sentiment", "due", "assignee", "status", "created_at",
-  // Bookkeeping/duplicate fields some n8n workflows send alongside the ones
-  // above (same info, different key name, or internal event metadata) -
-  // suppressed from "Other Details" so it doesn't just repeat the summary.
-  "event", "event_version", "action_type", "title", "category",
-  "booking_status", "requires_staff_action", "full_name", "phone_number",
-  "ai_call_summary", "reason",
-]);
-
 const STATUS_ACCENT: Record<string, string> = {
   New: "bg-blue-50 border-blue-100",
   "In Progress": "bg-violet-50 border-violet-100",
   Completed: "bg-emerald-50 border-emerald-100",
 };
 
-function humanizeKey(key: string): string {
-  return key.replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase());
+// n8n sends a lot of overlapping field names for the same concept (e.g.
+// practitioner_name vs practitioner, service_display_name vs service). Each
+// entry here picks the first alias with a real value, so the panel shows one
+// clean row per concept instead of every raw key n8n happens to include.
+// "Appointment Type" is deliberately Visit Type (Initial/Follow-up), not
+// appointment_type - in practice appointment_type just repeats Service.
+const STAFF_TASK_DETAIL_FIELDS: { label: string; icon: any; keys: string[]; format?: (raw: string) => string }[] = [
+  { label: "Practitioner", icon: User, keys: ["practitioner_name", "practitioner"] },
+  { label: "Service", icon: Heart, keys: ["service_display_name", "service"] },
+  { label: "Visit Type", icon: ClipboardList, keys: ["visit_type"] },
+  { label: "Duration", icon: Clock, keys: ["duration_minutes", "duration"], format: raw => /^\d+$/.test(raw) ? `${raw} min` : raw },
+  { label: "Location", icon: Building2, keys: ["location", "branch_name"] },
+  { label: "Appointment ID", icon: FileText, keys: ["appointment_id", "calendar_event_id", "external_event_id"] },
+  { label: "Date of Birth", icon: Calendar, keys: ["patient_date_of_birth", "dob"] },
+  { label: "Patient Status", icon: Info, keys: ["patient_status", "patient_record_status"] },
+];
+
+function getTaskField(task: StaffTask, keys: string[], format?: (raw: string) => string): string {
+  for (const key of keys) {
+    const value = safeText(task[key]);
+    if (value) return format ? format(value) : value;
+  }
+  return "";
 }
 
 function formatDateTime(value: unknown): string {
@@ -1365,35 +1372,6 @@ function formatRelativeTime(value: unknown): string {
   return `${diffDay}d ago`;
 }
 
-// Anything on the task that isn't already shown in the main panel layout.
-// Collapsed by default - it's a fallback for fields a workflow might add
-// later, not something staff need to read on every request.
-function StaffTaskExtraDetails({ task }: { task: StaffTask }) {
-  const [open, setOpen] = useState(false);
-  const extraEntries = Object.entries(task).filter(([key, value]) => !STAFF_TASK_KNOWN_FIELDS.has(key) && value != null && value !== "");
-  if (extraEntries.length === 0) return null;
-
-  return (
-    <div className="border-t border-border pt-3">
-      <button onClick={() => setOpen(o => !o)} className="flex items-center gap-1.5 text-[10px] font-semibold text-muted-foreground uppercase tracking-wide hover:text-foreground transition-colors">
-        <Info size={11} />
-        {open ? "Hide" : "Show"} {extraEntries.length} more detail{extraEntries.length === 1 ? "" : "s"}
-        <ChevronDown size={11} className={`transition-transform ${open ? "rotate-180" : ""}`} />
-      </button>
-      {open && (
-        <div className="grid grid-cols-2 gap-3 text-xs mt-3">
-          {extraEntries.map(([key, value]) => (
-            <div key={key}>
-              <p className="text-muted-foreground">{humanizeKey(key)}</p>
-              <p className="font-medium text-foreground mt-0.5 break-words">{safeText(value)}</p>
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
 function StaffQueueScreen() {
   const { staffTasks, updateTaskStatus, deleteTask } = useDashboard();
   const [filter, setFilter] = useState("All");
@@ -1412,7 +1390,11 @@ function StaffQueueScreen() {
 
   const filters = ["All", "New", "In Progress", "Completed"];
   const visibleTasks = filter === "All" ? staffTasks : staffTasks.filter(t => t.status === filter);
-  const sortedTasks = [...visibleTasks].sort((a, b) => (a.status === "Completed" ? 1 : 0) - (b.status === "Completed" ? 1 : 0));
+  const sortedTasks = [...visibleTasks].sort((a, b) => {
+    const completedDiff = (a.status === "Completed" ? 1 : 0) - (b.status === "Completed" ? 1 : 0);
+    if (completedDiff !== 0) return completedDiff;
+    return new Date(safeText(b.created_at)).getTime() - new Date(safeText(a.created_at)).getTime();
+  });
   const selectedTask = staffTasks.find(t => t.id === selectedId) ?? null;
 
   return (
@@ -1520,6 +1502,26 @@ function StaffQueueScreen() {
                 </div>
               )}
 
+              {(() => {
+                const rows = STAFF_TASK_DETAIL_FIELDS
+                  .map(f => ({ ...f, value: getTaskField(selectedTask, f.keys, f.format) }))
+                  .filter(r => r.value);
+                if (rows.length === 0) return null;
+                return (
+                  <div className="rounded-md border border-border divide-y divide-border">
+                    {rows.map(({ label, icon: Icon, value }) => (
+                      <div key={label} className="flex items-center justify-between px-3 py-2 text-xs">
+                        <div className="flex items-center gap-2 text-muted-foreground">
+                          <Icon size={12} />
+                          <span>{label}</span>
+                        </div>
+                        <span className="font-medium text-foreground">{value}</span>
+                      </div>
+                    ))}
+                  </div>
+                );
+              })()}
+
               {!!safeText(selectedTask.summary) && (
                 <div>
                   <div className="flex items-center gap-1.5 text-muted-foreground mb-2">
@@ -1529,8 +1531,6 @@ function StaffQueueScreen() {
                   <p className="text-xs text-foreground leading-relaxed bg-muted/40 border border-border rounded-md p-3">{safeText(selectedTask.summary)}</p>
                 </div>
               )}
-
-              <StaffTaskExtraDetails task={selectedTask} />
             </div>
 
             <div className="border-t border-border px-5 py-4 space-y-2">
