@@ -2897,6 +2897,19 @@ export default function App() {
       .finally(() => setLoading(false));
   }, [accessToken]);
 
+  // Staff Action Queue needs new requests to show up without a manual
+  // refresh, so poll it quietly in the background (no loading spinner).
+  useEffect(() => {
+    if (!accessToken) return;
+    const interval = setInterval(() => {
+      fetch(`/api/link/${accessToken}/queue/requests`)
+        .then(r => r.ok ? r.json() : null)
+        .then(requests => { if (requests) setStaffTasks(requests); })
+        .catch(() => {});
+    }, 8000);
+    return () => clearInterval(interval);
+  }, [accessToken]);
+
   async function updateTaskStatus(id: string, status: string) {
     if (!accessToken) return;
     const res = await fetch(`/api/link/${accessToken}/queue/requests/${id}`, {
