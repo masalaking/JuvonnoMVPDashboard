@@ -87,7 +87,7 @@ interface DashboardCtx {
   settings: Record<string, unknown>;
   updateTaskStatus: (id: string, status: string) => Promise<void>;
   deleteTask: (id: string) => Promise<void>;
-  saveSection: (section: string, data: Record<string, unknown>) => Promise<void>;
+  saveSection: (section: string, data: Record<string, unknown>) => Promise<boolean>;
   saveBulk: (sections: Record<string, unknown>) => Promise<void>;
   syncRetell: () => Promise<{ ok: boolean; error?: string }>;
 }
@@ -101,7 +101,7 @@ const DashboardContext = createContext<DashboardCtx>({
   settings: {},
   updateTaskStatus: async () => {},
   deleteTask: async () => {},
-  saveSection: async () => {},
+  saveSection: async () => false,
   saveBulk: async () => {},
   syncRetell: async () => ({ ok: false }),
 });
@@ -1658,6 +1658,7 @@ function SettingsScreen() {
   const { tenantInfo, settings, saveSection } = useDashboard();
   const [activeSection, setActiveSection] = useState("Clinic Profile");
   const [saving, setSaving] = useState(false);
+  const [saveResult, setSaveResult] = useState<{ section: string; ok: boolean } | null>(null);
   const [practitioners, setPractitioners] = useState<Practitioner[]>([]);
   const [faqs, setFaqs] = useState<FAQ[]>([]);
   const [draft, setDraft] = useState<Record<DraftKey, Record<string, string>>>({
@@ -1687,22 +1688,30 @@ function SettingsScreen() {
     setDraft(prev => ({ ...prev, [section]: { ...prev[section], [key]: value } }));
   }
 
+  function reportSaveResult(section: string, ok: boolean) {
+    setSaveResult({ section, ok });
+    setTimeout(() => setSaveResult(r => (r?.section === section ? null : r)), ok ? 2500 : 5000);
+  }
+
   async function handleSaveSection(section: DraftKey) {
     setSaving(true);
-    await saveSection(section, draft[section]);
+    const ok = await saveSection(section, draft[section]);
     setSaving(false);
+    reportSaveResult(section, ok);
   }
 
   async function handleSavePractitioners() {
     setSaving(true);
-    await saveSection('practitioners', { list: practitioners });
+    const ok = await saveSection('practitioners', { list: practitioners });
     setSaving(false);
+    reportSaveResult('practitioners', ok);
   }
 
   async function handleSaveFaqs() {
     setSaving(true);
-    await saveSection('faqs', { list: faqs });
+    const ok = await saveSection('faqs', { list: faqs });
     setSaving(false);
+    reportSaveResult('faqs', ok);
   }
 
   function addPractitioner() {
@@ -1778,11 +1787,21 @@ function SettingsScreen() {
     updateDurationCategory(practitionerId, typeId, catId, 'durations', [...set].join(','));
   }
 
-  const SectionSaveBtn = ({ section, label = "Save" }: { section?: DraftKey; label?: string }) => (
-    <button type="button" disabled={saving} onClick={section ? () => handleSaveSection(section) : undefined} className="bg-muted border border-border text-xs font-medium px-3 py-1.5 rounded-md hover:bg-accent disabled:opacity-50">
-      {saving ? "Saving…" : label}
-    </button>
-  );
+  const SectionSaveBtn = ({ section, label = "Save" }: { section?: DraftKey; label?: string }) => {
+    const result = section && saveResult?.section === section ? saveResult : null;
+    return (
+      <div className="flex items-center gap-2">
+        {result && (
+          <span className={`text-xs font-medium ${result.ok ? "text-emerald-600" : "text-destructive"}`}>
+            {result.ok ? "Saved" : "Save failed — try again"}
+          </span>
+        )}
+        <button type="button" disabled={saving} onClick={section ? () => handleSaveSection(section) : undefined} className="bg-muted border border-border text-xs font-medium px-3 py-1.5 rounded-md hover:bg-accent disabled:opacity-50">
+          {saving ? "Saving…" : label}
+        </button>
+      </div>
+    );
+  };
 
   return (
     <div className="p-6 space-y-4">
@@ -1885,6 +1904,11 @@ function SettingsScreen() {
                 <button type="button" onClick={addPractitioner} className="flex items-center gap-1.5 bg-muted border border-border text-xs font-medium px-3 py-2 rounded-md hover:bg-accent transition-colors">
                   <Plus size={12} /> Add Practitioner
                 </button>
+                {saveResult?.section === "practitioners" && (
+                  <span className={`text-xs font-medium ${saveResult.ok ? "text-emerald-600" : "text-destructive"}`}>
+                    {saveResult.ok ? "Saved" : "Save failed — try again"}
+                  </span>
+                )}
                 <button type="button" onClick={handleSavePractitioners} disabled={saving} className="bg-primary text-primary-foreground text-xs font-medium px-4 py-2 rounded-md hover:opacity-90 disabled:opacity-50">
                   {saving ? "Saving…" : "Save Changes"}
                 </button>
@@ -2040,6 +2064,11 @@ function SettingsScreen() {
                 <button type="button" onClick={() => setFaqs(prev => [...prev, { id: crypto.randomUUID(), question: "", answer: "" }])} className="flex items-center gap-1.5 bg-muted border border-border text-xs font-medium px-3 py-2 rounded-md hover:bg-accent transition-colors">
                   <Plus size={12} /> Add FAQ
                 </button>
+                {saveResult?.section === "faqs" && (
+                  <span className={`text-xs font-medium ${saveResult.ok ? "text-emerald-600" : "text-destructive"}`}>
+                    {saveResult.ok ? "Saved" : "Save failed — try again"}
+                  </span>
+                )}
                 <button type="button" onClick={handleSaveFaqs} disabled={saving} className="bg-primary text-primary-foreground text-xs font-medium px-4 py-2 rounded-md hover:opacity-90 disabled:opacity-50">
                   {saving ? "Saving…" : "Save Changes"}
                 </button>
@@ -3080,16 +3109,26 @@ export default function App() {
     if (res.ok) setStaffTasks(prev => prev.filter(t => t.id !== id));
   }
 
-  async function saveSection(section: string, data: Record<string, unknown>) {
-    if (!accessToken) return;
-    const res = await fetch(`/api/link/${accessToken}/settings`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ section, data }),
-    });
-    if (res.ok) {
+  async function saveSection(section: string, data: Record<string, unknown>): Promise<boolean> {
+    if (!accessToken) return false;
+    try {
+      const res = await fetch(`/api/link/${accessToken}/settings`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ section, data }),
+      });
+      if (!res.ok) return false;
       const updated: Record<string, unknown> = await res.json();
-      setSettings(updated);
+      // The response echoes the server's FULL settings, but responses from
+      // different sections' saves can arrive out of order (e.g. this save
+      // and an unrelated section's save fired close together). Only trust
+      // this response for the section we actually just saved - otherwise a
+      // slightly-stale response for another section can silently overwrite
+      // newer local data for a section it never touched.
+      setSettings(prev => ({ ...prev, [section]: updated[section] }));
+      return true;
+    } catch {
+      return false;
     }
   }
 
@@ -3100,7 +3139,15 @@ export default function App() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ sections }),
     });
-    if (res.ok) setSettings(await res.json());
+    if (!res.ok) return;
+    const updated: Record<string, unknown> = await res.json();
+    // Same out-of-order-response protection as saveSection: only trust this
+    // response for the sections actually included in this bulk save.
+    setSettings(prev => {
+      const next = { ...prev };
+      for (const key of Object.keys(sections)) next[key] = updated[key];
+      return next;
+    });
   }
 
   async function syncRetell(): Promise<{ ok: boolean; error?: string }> {
