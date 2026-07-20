@@ -285,6 +285,27 @@ app.get('/api/link/:accessToken/settings', (req, res) => {
   res.json(all[tenant.client_id] ?? {});
 });
 
+// Read-only settings lookup by client_id (no access token) — used by the
+// n8n "Juvonno Settings Backend" workflow's "Get Receptionist Config" chain,
+// so it can read settings directly from this server's synchronous file
+// storage instead of relying on n8n's own workflow static data (which is
+// unreliable for fast read-after-write between separate executions).
+app.get('/api/settings-by-client/:clientId', (req, res) => {
+  const apiKey = req.headers['x-dashboard-api-key'];
+  if (!DASHBOARD_API_KEY || apiKey !== DASHBOARD_API_KEY) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  const all = loadSettings();
+  const existing = all[req.params.clientId];
+  if (!existing) return res.status(404).json({ error: 'No settings found' });
+  res.json({
+    success: true,
+    client_id: req.params.clientId,
+    updated_at: new Date().toISOString(),
+    settings: buildN8nAllSettings(existing),
+  });
+});
+
 // Save all sections at once — body: { sections: { clinic_profile: {...}, practitioners: {...}, ... } }
 // Fires one webhook per section so n8n processes each independently
 app.put('/api/link/:accessToken/settings/bulk', async (req, res) => {
