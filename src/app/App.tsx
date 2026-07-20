@@ -67,7 +67,58 @@ type Transcript = {
   duration?: string;
   preview?: string;
   direction?: "inbound" | "outbound";
+  lines?: { speaker: string; text: string }[];
 };
+
+type AnalyticsPoint = { label: string; calls: number; minutes: number; completed: number; missed: number; avg: number };
+
+// Shape of the Inbound Tracker's "Build Overview Response" node output.
+type OverviewStats = {
+  clientName: string; basePrice: number; clientRatePerMin: number; overageRate: number;
+  minutesUsed: number; minutesIncluded: number; remainingMinutes: number; overageMinutes: number;
+  totalCalls: number; overageUSD: number; monthlyTotal: number; avgCallMin: number;
+  avgCallDisplay: string; billingPeriod: string; billingPct: number; billingPctRaw: number;
+  totalRecordings: number; totalTranscripts: number;
+};
+
+// Shape of one entry from the Inbound Tracker's "Build Invoices Response" node.
+type UsageInvoice = {
+  id: string; invoice_id: string; period: string; amount: string; amountRaw: number;
+  minutes: string; minutesUsed: number; includedMinutes: number; status: string;
+  date: string; dueDate: string; paid: boolean; isOverage: boolean; overageMin: number;
+  overageRate: number; overageCost: number; baseRate: number;
+};
+
+// Adapts the Inbound Tracker n8n workflow's response shapes (see
+// "Build Calls Response" / "Build Transcripts Response" nodes) into this
+// dashboard's existing CallLog/Transcript types.
+function mapInboundCall(raw: Record<string, unknown>): CallLog {
+  return {
+    id: String(raw.call_id ?? raw.id ?? crypto.randomUUID()),
+    time: String(raw.timestamp ?? raw.date ?? ""),
+    caller: String(raw.callerName ?? raw.from ?? "Unknown"),
+    phone: String(raw.from ?? ""),
+    outcome: String(raw.status ?? ""),
+    sentiment: String(raw.sentiment ?? ""),
+    duration: String(raw.durationDisplay ?? raw.duration_display ?? ""),
+    staffAction: false,
+    direction: "inbound",
+  };
+}
+
+function mapInboundTranscript(raw: Record<string, unknown>): Transcript {
+  return {
+    id: String(raw.call_id ?? raw.id ?? crypto.randomUUID()),
+    time: String(raw.timestamp ?? raw.date ?? ""),
+    caller: String(raw.callerName ?? "Unknown"),
+    outcome: String(raw.status ?? ""),
+    sentiment: String(raw.sentiment ?? ""),
+    duration: String(raw.durationDisplay ?? raw.duration_display ?? ""),
+    preview: String(raw.summary ?? ""),
+    direction: "inbound",
+    lines: Array.isArray(raw.transcript) ? raw.transcript as { speaker: string; text: string }[] : [],
+  };
+}
 
 // ── Dashboard context ─────────────────────────────────────────────────────────
 interface TenantInfo {
@@ -83,6 +134,10 @@ interface DashboardCtx {
   tenantInfo: TenantInfo | null;
   staffTasks: StaffTask[];
   callLogs: CallLog[];
+  transcripts: Transcript[];
+  analytics: AnalyticsPoint[];
+  overview: OverviewStats | null;
+  invoices: UsageInvoice[];
   loading: boolean;
   settings: Record<string, unknown>;
   updateTaskStatus: (id: string, status: string) => Promise<void>;
@@ -97,6 +152,10 @@ const DashboardContext = createContext<DashboardCtx>({
   tenantInfo: null,
   staffTasks: [],
   callLogs: [],
+  transcripts: [],
+  analytics: [],
+  overview: null,
+  invoices: [],
   loading: false,
   settings: {},
   updateTaskStatus: async () => {},
@@ -114,8 +173,6 @@ const outcomeData: { name: string; value: number; color: string }[] = [];
 const sentimentData: { name: string; value: number; color: string }[] = [];
 const sentimentOverTime: { day: string; score: number }[] = [];
 const topServices: { service: string; requests: number }[] = [];
-const transcripts: Transcript[] = [];
-const sampleTranscriptLines: { speaker: string; text: string }[] = [];
 
 // ── Small reusable UI ─────────────────────────────────────────────────────────
 function Badge({ label, variant }: { label: string; variant: string }) {
@@ -1015,7 +1072,8 @@ function OutboundRecordingsScreen() { return <RecordingsScreen direction="outbou
 
 // ── Screen: Transcripts ───────────────────────────────────────────────────────
 function TranscriptsScreen({ direction }: { direction: "inbound" | "outbound" }) {
-  const filteredTranscripts = transcripts.filter(t => (t.direction ?? "inbound") === direction);
+  const { transcripts: allTranscripts } = useDashboard();
+  const filteredTranscripts = allTranscripts.filter(t => (t.direction ?? "inbound") === direction);
   const [selected, setSelected] = useState<Transcript | null>(null);
   const [masked, setMasked] = useState(false);
 
@@ -1089,7 +1147,10 @@ function TranscriptsScreen({ direction }: { direction: "inbound" | "outbound" })
             </div>
             {/* Transcript lines */}
             <div className="flex-1 overflow-y-auto p-5 space-y-3">
-              {sampleTranscriptLines.map((line, i) => (
+              {(selected.lines ?? []).length === 0 && (
+                <p className="text-xs text-muted-foreground text-center py-6">No transcript text available for this call.</p>
+              )}
+              {(selected.lines ?? []).map((line, i) => (
                 <div key={i} className={`flex gap-3 ${line.speaker === "Caller" ? "flex-row-reverse" : ""}`}>
                   <div className={`w-6 h-6 rounded-full flex items-center justify-center text-[9px] font-bold flex-shrink-0 ${line.speaker === "Caller" ? "bg-slate-200 text-slate-600" : "bg-violet-100 text-violet-700"}`}>
                     {line.speaker[0]}
@@ -1120,13 +1181,17 @@ function OutboundTranscriptsScreen() { return <TranscriptsScreen direction="outb
 
 // ── Screen: Analytics ─────────────────────────────────────────────────────────
 function AnalyticsScreen({ direction }: { direction: "inbound" | "outbound" }) {
+  const { analytics } = useDashboard();
+  const totalCalls = analytics.reduce((sum, p) => sum + p.calls, 0);
+  const avgDurationMin = analytics.length ? analytics.reduce((sum, p) => sum + p.avg, 0) / analytics.length : 0;
+
   return (
     <div className="p-6 space-y-6">
       <h1 className="text-lg font-semibold text-foreground">{direction === "outbound" ? "Outbound Analytics" : "Inbound Analytics"}</h1>
 
       <div className="grid grid-cols-4 gap-4">
-        <KpiCard label="Total Calls" value="—" icon={PhoneCall} color="purple" />
-        <KpiCard label="Avg Call Duration" value="—" icon={Clock} color="teal" />
+        <KpiCard label="Total Calls" value={totalCalls ? String(totalCalls) : "—"} icon={PhoneCall} color="purple" />
+        <KpiCard label="Avg Call Duration" value={avgDurationMin ? `${avgDurationMin.toFixed(1)} min` : "—"} icon={Clock} color="teal" />
         <KpiCard label="AI Success Rate" value="—" icon={Zap} color="green" />
         <KpiCard label="Revenue Estimate" value="—" icon={ArrowUpRight} color="amber" />
       </div>
@@ -1135,7 +1200,7 @@ function AnalyticsScreen({ direction }: { direction: "inbound" | "outbound" }) {
         <Card className="p-4">
           <h3 className="text-sm font-semibold text-foreground mb-4">Calls by Day</h3>
           <ResponsiveContainer width="100%" height={200}>
-            <BarChart data={callsOverTime}>
+            <BarChart data={analytics.map(p => ({ day: p.label, calls: p.calls }))}>
               <CartesianGrid strokeDasharray="3 3" stroke="#E8EAF6" />
               <XAxis dataKey="day" tick={{ fontSize: 11, fill: SLATE }} axisLine={false} tickLine={false} />
               <YAxis tick={{ fontSize: 11, fill: SLATE }} axisLine={false} tickLine={false} />
@@ -3067,6 +3132,10 @@ export default function App() {
   const [tenantInfo, setTenantInfo] = useState<TenantInfo | null>(null);
   const [staffTasks, setStaffTasks] = useState<StaffTask[]>([]);
   const [callLogs, setCallLogs] = useState<CallLog[]>([]);
+  const [transcripts, setTranscripts] = useState<Transcript[]>([]);
+  const [analytics, setAnalytics] = useState<AnalyticsPoint[]>([]);
+  const [overview, setOverview] = useState<OverviewStats | null>(null);
+  const [invoices, setInvoices] = useState<UsageInvoice[]>([]);
   const [settings, setSettings] = useState<Record<string, unknown>>({});
   const [loading, setLoading] = useState(false);
 
@@ -3077,11 +3146,21 @@ export default function App() {
       fetch(`/api/link/${accessToken}/tenant`).then(r => r.ok ? r.json() : null),
       fetch(`/api/link/${accessToken}/queue/requests`).then(r => r.ok ? r.json() : []),
       fetch(`/api/link/${accessToken}/settings`).then(r => r.ok ? r.json() : {}),
+      fetch(`/api/link/${accessToken}/inbound/calls`).then(r => r.ok ? r.json() : { calls: [] }),
+      fetch(`/api/link/${accessToken}/inbound/transcripts`).then(r => r.ok ? r.json() : { transcripts: [] }),
+      fetch(`/api/link/${accessToken}/inbound/analytics`).then(r => r.ok ? r.json() : []),
+      fetch(`/api/link/${accessToken}/inbound/overview`).then(r => r.ok ? r.json() : null),
+      fetch(`/api/link/${accessToken}/inbound/invoices`).then(r => r.ok ? r.json() : { invoices: [] }),
     ])
-      .then(([tenant, requests, savedSettings]) => {
+      .then(([tenant, requests, savedSettings, callsRes, transcriptsRes, analyticsRes, overviewRes, invoicesRes]) => {
         setTenantInfo(tenant);
         setStaffTasks(requests);
         setSettings(savedSettings ?? {});
+        setCallLogs(Array.isArray(callsRes?.calls) ? callsRes.calls.map(mapInboundCall) : []);
+        setTranscripts(Array.isArray(transcriptsRes?.transcripts) ? transcriptsRes.transcripts.map(mapInboundTranscript) : []);
+        setAnalytics(Array.isArray(analyticsRes) ? analyticsRes : []);
+        setOverview(overviewRes && !overviewRes.error ? overviewRes : null);
+        setInvoices(Array.isArray(invoicesRes?.invoices) ? invoicesRes.invoices : []);
       })
       .catch(() => {})
       .finally(() => setLoading(false));
@@ -3184,7 +3263,7 @@ export default function App() {
   }
 
   return (
-    <DashboardContext.Provider value={{ accessToken, tenantInfo, staffTasks, callLogs, loading, settings, updateTaskStatus, deleteTask, saveSection, saveBulk, syncRetell }}>
+    <DashboardContext.Provider value={{ accessToken, tenantInfo, staffTasks, callLogs, transcripts, analytics, overview, invoices, loading, settings, updateTaskStatus, deleteTask, saveSection, saveBulk, syncRetell }}>
       <div
         className="flex h-screen w-screen overflow-hidden bg-background"
         style={{ fontFamily: "'Inter', sans-serif" }}

@@ -78,6 +78,34 @@ async function callN8n(tenant, event, payload = {}) {
   return json;
 }
 
+// The Inbound Tracker n8n workflow (overview / analytics / calls / transcripts
+// / invoices) uses a different calling convention than callN8n above: separate
+// GET webhooks per path (e.g. /webhook/<client_id>/calls), each expecting a
+// `tenantId` query param, rather than one shared webhook keyed by an `event`
+// field. Each clinic gets its own copy of this workflow imported into the
+// same n8n instance under a path prefix matching its own client_id - so
+// multi-tenancy needs no new config field, just naming each clinic's webhook
+// paths to match its client_id when that clinic's workflow copy is set up.
+const INBOUND_TRACKER_HOST = 'https://n8n.getnapsolutions.com/webhook';
+
+async function callInboundTracker(tenant, path, query = {}) {
+  const url = new URL(`${INBOUND_TRACKER_HOST}/${tenant.client_id}/${path.replace(/^\/+/, '')}`);
+  url.searchParams.set('tenantId', tenant.access_token);
+  for (const [key, value] of Object.entries(query)) {
+    if (value !== undefined && value !== null) url.searchParams.set(key, String(value));
+  }
+  const res = await fetch(url);
+  const text = await res.text();
+  let json;
+  try { json = text ? JSON.parse(text) : {}; } catch { json = { raw: text }; }
+  if (!res.ok) {
+    const err = new Error(json?.error ?? `n8n responded with ${res.status}`);
+    err.status = 502;
+    throw err;
+  }
+  return json;
+}
+
 // Wraps a route handler that talks to n8n so failures come back as a clean
 // 502 instead of an unhandled rejection / stack trace to the client.
 function n8nRoute(handler) {
@@ -422,6 +450,42 @@ app.get('/api/link/:accessToken/call-logs', n8nRoute(async (req, res) => {
   const tenant = findTenant(req.params.accessToken);
   if (!tenant) return res.status(404).json({ error: 'Invalid access token' });
   res.json(await callN8n(tenant, 'call_logs.get', { direction: req.query.direction ?? null }));
+}));
+
+// ── Inbound Tracker endpoints ────────────────────────────────────────────────
+// Proxies to the "Juvonno Inbound Tracker" n8n workflow's own GET webhooks
+// (juvonno/overview, juvonno/analytics, juvonno/calls, juvonno/transcripts,
+// juvonno/invoices), which read call/billing history from Google Sheets.
+// Distinct from callN8n/call-logs above, which use a different (event-based)
+// workflow convention.
+app.get('/api/link/:accessToken/inbound/overview', n8nRoute(async (req, res) => {
+  const tenant = findTenant(req.params.accessToken);
+  if (!tenant) return res.status(404).json({ error: 'Invalid access token' });
+  res.json(await callInboundTracker(tenant, 'overview'));
+}));
+
+app.get('/api/link/:accessToken/inbound/analytics', n8nRoute(async (req, res) => {
+  const tenant = findTenant(req.params.accessToken);
+  if (!tenant) return res.status(404).json({ error: 'Invalid access token' });
+  res.json(await callInboundTracker(tenant, 'analytics', { range: req.query.range ?? 1 }));
+}));
+
+app.get('/api/link/:accessToken/inbound/calls', n8nRoute(async (req, res) => {
+  const tenant = findTenant(req.params.accessToken);
+  if (!tenant) return res.status(404).json({ error: 'Invalid access token' });
+  res.json(await callInboundTracker(tenant, 'calls'));
+}));
+
+app.get('/api/link/:accessToken/inbound/transcripts', n8nRoute(async (req, res) => {
+  const tenant = findTenant(req.params.accessToken);
+  if (!tenant) return res.status(404).json({ error: 'Invalid access token' });
+  res.json(await callInboundTracker(tenant, 'transcripts'));
+}));
+
+app.get('/api/link/:accessToken/inbound/invoices', n8nRoute(async (req, res) => {
+  const tenant = findTenant(req.params.accessToken);
+  if (!tenant) return res.status(404).json({ error: 'Invalid access token' });
+  res.json(await callInboundTracker(tenant, 'invoices'));
 }));
 
 // Serve built frontend
