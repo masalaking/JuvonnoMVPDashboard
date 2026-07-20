@@ -3179,6 +3179,31 @@ export default function App() {
     return () => clearInterval(interval);
   }, [accessToken]);
 
+  // Inbound Tracker data (calls/transcripts/analytics/overview/invoices)
+  // should reflect new calls without a manual refresh too - poll it quietly
+  // in the background, same pattern as the Staff Action Queue above.
+  useEffect(() => {
+    if (!accessToken) return;
+    const interval = setInterval(() => {
+      Promise.all([
+        fetch(`/api/link/${accessToken}/inbound/calls`).then(r => r.ok ? r.json() : null),
+        fetch(`/api/link/${accessToken}/inbound/transcripts`).then(r => r.ok ? r.json() : null),
+        fetch(`/api/link/${accessToken}/inbound/analytics`).then(r => r.ok ? r.json() : null),
+        fetch(`/api/link/${accessToken}/inbound/overview`).then(r => r.ok ? r.json() : null),
+        fetch(`/api/link/${accessToken}/inbound/invoices`).then(r => r.ok ? r.json() : null),
+      ])
+        .then(([callsRes, transcriptsRes, analyticsRes, overviewRes, invoicesRes]) => {
+          if (Array.isArray(callsRes?.calls)) setCallLogs(callsRes.calls.map(mapInboundCall));
+          if (Array.isArray(transcriptsRes?.transcripts)) setTranscripts(transcriptsRes.transcripts.map(mapInboundTranscript));
+          if (Array.isArray(analyticsRes)) setAnalytics(analyticsRes);
+          if (overviewRes && !overviewRes.error) setOverview(overviewRes);
+          if (Array.isArray(invoicesRes?.invoices)) setInvoices(invoicesRes.invoices);
+        })
+        .catch(() => {});
+    }, 20000);
+    return () => clearInterval(interval);
+  }, [accessToken]);
+
   async function updateTaskStatus(id: string, status: string) {
     if (!accessToken) return;
     const res = await fetch(`/api/link/${accessToken}/queue/requests/${id}`, {
