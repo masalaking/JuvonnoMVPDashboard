@@ -216,7 +216,6 @@ const navItems = [
   { id: "outbound-transcripts", label: "Transcripts", icon: FileText, group: "Outbound" },
   { id: "outbound-recordings", label: "Recordings", icon: Mic, group: "Outbound" },
   { id: "outbound-analytics", label: "Analytics", icon: BarChart2, group: "Outbound" },
-  { id: "outbound-settings", label: "Settings", icon: Settings, group: "Outbound" },
 
   { id: "payment-recovery", label: "Payment Recovery", icon: TrendingUp, group: "Billing" },
   { id: "billing", label: "Billing & Usage", icon: CreditCard, group: "Billing" },
@@ -3014,7 +3013,6 @@ const SCREENS: Record<string, React.FC> = {
   "outbound-transcripts": OutboundTranscriptsScreen,
   "outbound-recordings": OutboundRecordingsScreen,
   "outbound-analytics": OutboundAnalyticsScreen,
-  "outbound-settings": SettingsScreen,
   "payment-recovery": PaymentRecoveryScreen,
   "billing": BillingScreen,
 };
