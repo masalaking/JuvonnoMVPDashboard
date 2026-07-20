@@ -1,4 +1,4 @@
-import { useState, useEffect, createContext, useContext } from "react";
+import { useState, useEffect, useRef, createContext, useContext } from "react";
 import {
   LayoutDashboard, Bot, PhoneCall, FileText, Mic, BarChart2, TrendingUp,
   ClipboardList, Heart, Settings, CreditCard, ChevronDown,
@@ -1671,7 +1671,17 @@ function SettingsScreen() {
     "FAQs / Knowledge Base", "SMS Follow-Ups",
   ];
 
+  // Only populate draft/practitioners/faqs from `settings` ONCE, the first
+  // time real data arrives. Re-running this on every settings change (e.g.
+  // whenever ANY section gets saved) would silently overwrite unsaved local
+  // edits in OTHER sections with stale server data - a real, reproducible
+  // data-loss bug, not just a theoretical one. After this initial load,
+  // local state is the source of truth until the user explicitly saves.
+  const settingsLoadedRef = useRef(false);
   useEffect(() => {
+    if (settingsLoadedRef.current) return;
+    if (Object.keys(settings).length === 0) return;
+    settingsLoadedRef.current = true;
     setDraft({
       clinic_profile: (settings.clinic_profile ?? {}) as Record<string, string>,
       clinic_hours: normalizeClinicHours((settings.clinic_hours ?? {}) as Record<string, string>),
