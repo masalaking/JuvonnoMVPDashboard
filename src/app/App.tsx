@@ -3023,7 +3023,10 @@ function PaymentRecoveryScreen() {
   const [successMsg, setSuccessMsg] = useState("");
 
   const fmt = (iso?: string) => iso ? new Date(iso).toLocaleDateString("en-CA", { month:"short", day:"numeric" }) : "—";
-  const fmtAmt = (n: number) => `$${n.toFixed(2)}`;
+  // Billing data comes from an n8n webhook that isn't configured for every
+  // tenant (empty n8n_webhook_url) - amount_due can legitimately be missing
+  // rather than a real number, so this must not assume it's always defined.
+  const fmtAmt = (n: number | undefined | null) => n != null && !isNaN(n) ? `$${n.toFixed(2)}` : "—";
   const VARS = ["{{patient_first_name}}","{{invoice_number}}","{{amount_due}}","{{due_date}}","{{payment_link}}","{{clinic_phone}}"];
 
   const showSuccess = (msg: string) => { setSuccessMsg(msg); setTimeout(() => setSuccessMsg(""), 3000); };
