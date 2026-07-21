@@ -1728,13 +1728,26 @@ interface FAQ { id: string; question: string; answer: string; }
 
 type DraftKey = 'clinic_profile' | 'clinic_hours' | 'transfer_escalation' | 'sms_follow_ups';
 
+// Visual metadata only - the internal section key strings below (used in
+// every `activeSection === "..."` check) are unchanged, so none of the
+// existing save/data logic is touched by this redesign.
+const SETTINGS_SECTION_META: Record<string, { icon: any; subtitle: string; optional?: boolean }> = {
+  "Clinic Profile": { icon: Building2, subtitle: "The contact and location details Grace shares with patients." },
+  "Clinic Hours": { icon: Clock, subtitle: "When patients can call, visit, or request appointments." },
+  "Practitioners": { icon: Users, subtitle: "Who patients can book with and which appointment types are available." },
+  "Transfer & Escalation": { icon: PhoneOutgoing, subtitle: "When Grace should involve your team and where calls should go." },
+  "FAQs / Knowledge Base": { icon: MessageSquare, subtitle: "Trusted clinic answers Grace can use during conversations." },
+  "SMS Follow-Ups": { icon: Send, subtitle: "Patient messages sent after booking and appointment events.", optional: true },
+};
+
 function SettingsScreen() {
   const { tenantInfo, settings, saveSection } = useDashboard();
-  const [activeSection, setActiveSection] = useState("Clinic Profile");
+  const [activeSection, setActiveSection] = useState("Overview");
   const [saving, setSaving] = useState(false);
   const [saveResult, setSaveResult] = useState<{ section: string; ok: boolean } | null>(null);
   const [practitioners, setPractitioners] = useState<Practitioner[]>([]);
   const [faqs, setFaqs] = useState<FAQ[]>([]);
+  const [faqSearch, setFaqSearch] = useState("");
   const [draft, setDraft] = useState<Record<DraftKey, Record<string, string>>>({
     clinic_profile: {}, clinic_hours: {}, transfer_escalation: {}, sms_follow_ups: {},
   });
@@ -1797,6 +1810,48 @@ function SettingsScreen() {
     setSaving(false);
     reportSaveResult('faqs', ok);
   }
+
+  // Read-only, derived from the same draft/practitioners/faqs state already
+  // in memory - purely for the nav status dots and Overview checklist. Does
+  // not affect what gets saved or how.
+  const sectionComplete: Record<string, boolean> = {
+    "Clinic Profile": Boolean(draft.clinic_profile.clinic_name && draft.clinic_profile.phone_number && draft.clinic_profile.address),
+    "Clinic Hours": Object.keys(draft.clinic_hours).some(k => k.startsWith("open_")),
+    "Practitioners": practitioners.length > 0 && practitioners.every(p => p.name && p.staff_num),
+    "Transfer & Escalation": Boolean(draft.transfer_escalation.transfer_number),
+    "FAQs / Knowledge Base": faqs.length > 0,
+    "SMS Follow-Ups": true,
+  };
+  const requiredSections = sections.filter(s => !SETTINGS_SECTION_META[s]?.optional);
+  const completedCount = requiredSections.filter(s => sectionComplete[s]).length;
+  const setupComplete = completedCount === requiredSections.length;
+  const firstIncompleteSection = requiredSections.find(s => !sectionComplete[s]) ?? null;
+
+  // Dispatches to whichever save handler the currently active section
+  // actually uses - same three handlers as before, just called from one
+  // sticky bar instead of three separate per-section buttons.
+  function saveActiveSection() {
+    if (activeSection === "Practitioners") return handleSavePractitioners();
+    if (activeSection === "FAQs / Knowledge Base") return handleSaveFaqs();
+    if ((sections as string[]).includes(activeSection) && activeSection !== "Practitioners" && activeSection !== "FAQs / Knowledge Base") {
+      const keyMap: Record<string, DraftKey> = {
+        "Clinic Profile": "clinic_profile",
+        "Clinic Hours": "clinic_hours",
+        "Transfer & Escalation": "transfer_escalation",
+        "SMS Follow-Ups": "sms_follow_ups",
+      };
+      const key = keyMap[activeSection];
+      if (key) return handleSaveSection(key);
+    }
+    return Promise.resolve();
+  }
+  const activeSectionSaveResult = saveResult && (
+    saveResult.section === "practitioners" && activeSection === "Practitioners" ? saveResult :
+    saveResult.section === "faqs" && activeSection === "FAQs / Knowledge Base" ? saveResult :
+    ["clinic_profile", "clinic_hours", "transfer_escalation", "sms_follow_ups"].includes(saveResult.section) &&
+      saveResult.section === ({ "Clinic Profile": "clinic_profile", "Clinic Hours": "clinic_hours", "Transfer & Escalation": "transfer_escalation", "SMS Follow-Ups": "sms_follow_ups" } as Record<string, string>)[activeSection]
+      ? saveResult : null
+  );
 
   function addPractitioner() {
     setPractitioners(prev => [...prev, {
@@ -1871,70 +1926,140 @@ function SettingsScreen() {
     updateDurationCategory(practitionerId, typeId, catId, 'durations', [...set].join(','));
   }
 
-  const SectionSaveBtn = ({ section, label = "Save" }: { section?: DraftKey; label?: string }) => {
-    const result = section && saveResult?.section === section ? saveResult : null;
-    return (
-      <div className="flex items-center gap-2">
-        {result && (
-          <span className={`text-xs font-medium ${result.ok ? "text-emerald-600" : "text-destructive"}`}>
-            {result.ok ? "Saved" : "Save failed — try again"}
-          </span>
-        )}
-        <button type="button" disabled={saving} onClick={section ? () => handleSaveSection(section) : undefined} className="bg-muted border border-border text-xs font-medium px-3 py-1.5 rounded-md hover:bg-accent disabled:opacity-50">
-          {saving ? "Saving…" : label}
-        </button>
-      </div>
-    );
-  };
-
   return (
-    <div className="p-6 space-y-4">
+    <div className="flex flex-col h-full">
+      <div className="flex-1 overflow-y-auto p-6 space-y-5 pb-24">
+        {/* Page header */}
+        <div className="flex items-start justify-between">
+          <div>
+            <p className="text-[10px] font-semibold text-primary uppercase tracking-wide mb-1">Clinic Configuration</p>
+            <h1 className="text-xl font-semibold text-foreground tracking-tight">Clinic setup</h1>
+            <p className="text-xs text-muted-foreground mt-0.5">Configure the information and rules {tenantInfo?.receptionist_name || "your AI receptionist"} uses to support your patients.</p>
+          </div>
+          <span className={`text-xs font-medium px-2.5 py-1 rounded-full ${setupComplete ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}`}>
+            {setupComplete ? "Ready" : "Needs attention"}
+          </span>
+        </div>
+
       <div className="flex gap-6">
       {/* Settings nav */}
-      <div className="w-52 flex-shrink-0">
+      <div className="w-56 flex-shrink-0">
         <Card className="overflow-hidden">
           <div className="px-3 py-2 border-b border-border bg-muted/40">
             <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">Settings</p>
           </div>
           <nav className="p-1.5 space-y-0.5">
-            {sections.map((s) => (
-              <button
-                key={s}
-                type="button"
-                onClick={() => setActiveSection(s)}
-                className={`w-full text-left px-3 py-2 rounded-md text-xs transition-colors ${activeSection === s ? "bg-primary/10 text-primary font-semibold" : "text-foreground hover:bg-muted"}`}
-              >
-                {s}
-              </button>
-            ))}
+            <button
+              type="button"
+              onClick={() => setActiveSection("Overview")}
+              className={`w-full flex items-center gap-2.5 text-left px-3 py-2 rounded-md text-xs transition-colors border-l-[3px] ${activeSection === "Overview" ? "bg-primary/10 text-primary font-semibold border-primary" : "text-foreground hover:bg-muted border-transparent"}`}
+            >
+              <LayoutDashboard size={13} />
+              <span className="flex-1">Setup Overview</span>
+            </button>
+            <div className="h-px bg-border my-1" />
+            {sections.map((s) => {
+              const meta = SETTINGS_SECTION_META[s];
+              const Icon = meta?.icon ?? Settings;
+              const complete = sectionComplete[s];
+              return (
+                <button
+                  key={s}
+                  type="button"
+                  onClick={() => setActiveSection(s)}
+                  className={`w-full flex items-center gap-2.5 text-left px-3 py-2 rounded-md text-xs transition-colors border-l-[3px] ${activeSection === s ? "bg-primary/10 text-primary font-semibold border-primary" : "text-foreground hover:bg-muted border-transparent"}`}
+                >
+                  <Icon size={13} className="flex-shrink-0" />
+                  <span className="flex-1">{s}</span>
+                  {meta?.optional ? (
+                    <span className="text-[9px] text-muted-foreground">Optional</span>
+                  ) : complete ? (
+                    <CheckCircle2 size={12} className="text-emerald-500 flex-shrink-0" />
+                  ) : (
+                    <Circle size={12} className="text-muted-foreground/40 flex-shrink-0" />
+                  )}
+                </button>
+              );
+            })}
           </nav>
         </Card>
       </div>
 
       {/* Settings form */}
-      <div className="flex-1">
+      <div className="flex-1 min-w-0">
+        {activeSection === "Overview" && (
+          <div className="space-y-5">
+            <div>
+              <h2 className="text-base font-semibold text-foreground">Setup Overview</h2>
+              <p className="text-xs text-muted-foreground mt-0.5">Where things stand across every setup section.</p>
+            </div>
+            <Card className="p-5 space-y-3">
+              <div className="flex items-center justify-between">
+                <p className="text-sm font-semibold text-foreground">{completedCount} of {requiredSections.length} sections complete</p>
+                <span className="text-xs font-medium text-muted-foreground">{Math.round((completedCount / requiredSections.length) * 100)}%</span>
+              </div>
+              <div className="h-2 bg-muted rounded-full overflow-hidden">
+                <div className="h-full bg-primary rounded-full transition-all" style={{ width: `${(completedCount / requiredSections.length) * 100}%` }} />
+              </div>
+              {firstIncompleteSection ? (
+                <button type="button" onClick={() => setActiveSection(firstIncompleteSection)} className="flex items-center gap-1.5 text-xs font-medium text-primary hover:underline">
+                  Continue setup: {firstIncompleteSection} <ChevronRight size={12} />
+                </button>
+              ) : (
+                <p className="text-xs text-emerald-600 font-medium flex items-center gap-1.5"><CheckCircle2 size={12} /> All required sections are complete.</p>
+              )}
+            </Card>
+            <Card className="overflow-hidden">
+              <div className="px-4 py-2.5 border-b border-border bg-muted/40">
+                <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">Readiness Checklist</p>
+              </div>
+              <div className="divide-y divide-border">
+                {sections.map(s => {
+                  const meta = SETTINGS_SECTION_META[s];
+                  const complete = sectionComplete[s];
+                  return (
+                    <button
+                      key={s}
+                      type="button"
+                      onClick={() => setActiveSection(s)}
+                      className="w-full flex items-center justify-between px-4 py-3 text-left hover:bg-muted/30 transition-colors"
+                    >
+                      <div>
+                        <p className="text-xs font-medium text-foreground">{s}</p>
+                        <p className="text-[10px] text-muted-foreground mt-0.5">{meta?.subtitle}</p>
+                      </div>
+                      {meta?.optional ? (
+                        <span className="text-[10px] text-muted-foreground flex-shrink-0">Optional</span>
+                      ) : complete ? (
+                        <span className="text-[10px] text-emerald-600 font-medium flex items-center gap-1 flex-shrink-0"><CheckCircle2 size={11} /> Complete</span>
+                      ) : (
+                        <span className="text-[10px] text-amber-600 font-medium flex items-center gap-1 flex-shrink-0"><AlertCircle size={11} /> Needs attention</span>
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+            </Card>
+          </div>
+        )}
         {activeSection === "Clinic Profile" && (
           <div className="space-y-5">
-            <div className="flex items-center justify-between">
+            <div>
               <h2 className="text-base font-semibold text-foreground">Clinic Profile</h2>
-              <SectionSaveBtn section="clinic_profile" />
+              <p className="text-xs text-muted-foreground mt-0.5">{SETTINGS_SECTION_META["Clinic Profile"].subtitle}</p>
             </div>
-            <Card className="p-5">
+            <Card className="p-5 space-y-4">
+              <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">Clinic Identity</p>
               <div className="grid grid-cols-2 gap-4">
-                {([
-                  ["Clinic Name", "clinic_name", tenantInfo?.clinic_name ?? "", "text"],
-                  ["Phone Number", "phone_number", "", "tel"],
-                  ["SMS Number", "sms_number", "", "tel"],
-                  ["Email", "email", "", "email"],
-                  ["Website", "website", "", "url"],
-                  ["Main Contact", "main_contact", tenantInfo?.receptionist_name ?? "", "text"],
-                ] as [string, string, string, string][]).map(([label, key, fallback, type]) => (
-                  <div key={key} className="space-y-1.5">
-                    <label className="text-xs font-medium text-foreground">{label}</label>
-                    <input type={type} value={draft.clinic_profile[key] ?? fallback} onChange={e => setField('clinic_profile', key, e.target.value)} className="w-full bg-input-background border border-border rounded-md px-3 py-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring" />
-                  </div>
-                ))}
                 <div className="space-y-1.5">
+                  <label className="text-xs font-medium text-foreground">Clinic Name</label>
+                  <input value={draft.clinic_profile.clinic_name ?? tenantInfo?.clinic_name ?? ""} onChange={e => setField('clinic_profile', 'clinic_name', e.target.value)} className="w-full bg-input-background border border-border rounded-md px-3 py-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring" />
+                </div>
+                <div className="space-y-1.5">
+                  <label className="text-xs font-medium text-foreground">Website</label>
+                  <input type="url" value={draft.clinic_profile.website ?? ""} onChange={e => setField('clinic_profile', 'website', e.target.value)} className="w-full bg-input-background border border-border rounded-md px-3 py-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring" />
+                </div>
+                <div className="col-span-2 space-y-1.5">
                   <label className="text-xs font-medium text-foreground">Timezone</label>
                   <select value={draft.clinic_profile.timezone ?? "America/Vancouver (PST/PDT)"} onChange={e => setField('clinic_profile', 'timezone', e.target.value)} className="w-full bg-input-background border border-border rounded-md px-3 py-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring">
                     <option>America/Vancouver (PST/PDT)</option>
@@ -1945,10 +2070,31 @@ function SettingsScreen() {
                     <option>America/Los_Angeles (PST/PDT)</option>
                   </select>
                 </div>
-                <div className="col-span-2 space-y-1.5">
-                  <label className="text-xs font-medium text-foreground">Address</label>
-                  <input value={draft.clinic_profile.address ?? ""} onChange={e => setField('clinic_profile', 'address', e.target.value)} className="w-full bg-input-background border border-border rounded-md px-3 py-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring" />
-                </div>
+              </div>
+            </Card>
+
+            <Card className="p-5 space-y-4">
+              <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">Contact Details</p>
+              <div className="grid grid-cols-2 gap-4">
+                {([
+                  ["Phone Number", "phone_number", "", "tel"],
+                  ["SMS Number", "sms_number", "", "tel"],
+                  ["Email", "email", "", "email"],
+                  ["Main Contact", "main_contact", tenantInfo?.receptionist_name ?? "", "text"],
+                ] as [string, string, string, string][]).map(([label, key, fallback, type]) => (
+                  <div key={key} className="space-y-1.5">
+                    <label className="text-xs font-medium text-foreground">{label}</label>
+                    <input type={type} value={draft.clinic_profile[key] ?? fallback} onChange={e => setField('clinic_profile', key, e.target.value)} className="w-full bg-input-background border border-border rounded-md px-3 py-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring" />
+                  </div>
+                ))}
+              </div>
+            </Card>
+
+            <Card className="p-5 space-y-4">
+              <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">Location</p>
+              <div className="space-y-1.5">
+                <label className="text-xs font-medium text-foreground">Address</label>
+                <input value={draft.clinic_profile.address ?? ""} onChange={e => setField('clinic_profile', 'address', e.target.value)} placeholder="100 King Street West, Toronto, ON" className="w-full bg-input-background border border-border rounded-md px-3 py-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring" />
               </div>
             </Card>
           </div>
@@ -1956,9 +2102,9 @@ function SettingsScreen() {
 
         {activeSection === "Clinic Hours" && (
           <div className="space-y-5">
-            <div className="flex items-center justify-between">
+            <div>
               <h2 className="text-base font-semibold text-foreground">Clinic Hours</h2>
-              <SectionSaveBtn section="clinic_hours" />
+              <p className="text-xs text-muted-foreground mt-0.5">{SETTINGS_SECTION_META["Clinic Hours"].subtitle}</p>
             </div>
             <Card className="p-5 space-y-3">
               {["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"].map((day, i) => {
@@ -1983,20 +2129,13 @@ function SettingsScreen() {
         {activeSection === "Practitioners" && (
           <div className="space-y-5">
             <div className="flex items-center justify-between">
-              <h2 className="text-base font-semibold text-foreground">Practitioners</h2>
-              <div className="flex items-center gap-2">
-                <button type="button" onClick={addPractitioner} className="flex items-center gap-1.5 bg-muted border border-border text-xs font-medium px-3 py-2 rounded-md hover:bg-accent transition-colors">
-                  <Plus size={12} /> Add Practitioner
-                </button>
-                {saveResult?.section === "practitioners" && (
-                  <span className={`text-xs font-medium ${saveResult.ok ? "text-emerald-600" : "text-destructive"}`}>
-                    {saveResult.ok ? "Saved" : "Save failed — try again"}
-                  </span>
-                )}
-                <button type="button" onClick={handleSavePractitioners} disabled={saving} className="bg-primary text-primary-foreground text-xs font-medium px-4 py-2 rounded-md hover:opacity-90 disabled:opacity-50">
-                  {saving ? "Saving…" : "Save Changes"}
-                </button>
+              <div>
+                <h2 className="text-base font-semibold text-foreground">Practitioners</h2>
+                <p className="text-xs text-muted-foreground mt-0.5">{SETTINGS_SECTION_META["Practitioners"].subtitle}</p>
               </div>
+              <button type="button" onClick={addPractitioner} className="flex items-center gap-1.5 bg-muted border border-border text-xs font-medium px-3 py-2 rounded-md hover:bg-accent transition-colors">
+                <Plus size={12} /> Add Practitioner
+              </button>
             </div>
 
             {practitioners.length === 0 ? (
@@ -2099,9 +2238,9 @@ function SettingsScreen() {
 
         {activeSection === "Transfer & Escalation" && (
           <div className="space-y-5">
-            <div className="flex items-center justify-between">
+            <div>
               <h2 className="text-base font-semibold text-foreground">Transfer & Escalation</h2>
-              <SectionSaveBtn section="transfer_escalation" label="Save" />
+              <p className="text-xs text-muted-foreground mt-0.5">{SETTINGS_SECTION_META["Transfer & Escalation"].subtitle}</p>
             </div>
             <Card className="p-5 space-y-4">
               <div className="grid grid-cols-2 gap-4">
@@ -2116,11 +2255,53 @@ function SettingsScreen() {
                   <p className="text-[10px] text-muted-foreground">Optional — leave blank to use the same number.</p>
                 </div>
               </div>
-              <div className="space-y-1.5">
-                <label className="text-xs font-medium text-foreground">Escalation Triggers</label>
-                <textarea rows={3} value={draft.transfer_escalation.escalation_triggers ?? ""} onChange={e => setField('transfer_escalation', 'escalation_triggers', e.target.value)} placeholder={"Caller asks to speak to a human\nCaller mentions an emergency or urgent situation\nCaller is upset or frustrated\nCaller has a complaint"} className="w-full bg-input-background border border-border rounded-md px-3 py-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring resize-none" />
-                <p className="text-[10px] text-muted-foreground">One condition per line. The AI will transfer the call when any of these occur.</p>
-              </div>
+              {(() => {
+                // Structured toggle rows for the common triggers, serialized
+                // as newline-separated lines into the SAME escalation_triggers
+                // string field the backend already expects - no schema change.
+                const TRIGGER_TEMPLATES = [
+                  "Caller asks to speak to a human",
+                  "Caller mentions an emergency or urgent situation",
+                  "Caller is upset or frustrated",
+                  "Caller has a complaint",
+                ];
+                const currentLines = (draft.transfer_escalation.escalation_triggers ?? "").split("\n").map(l => l.trim()).filter(Boolean);
+                const customLines = currentLines.filter(l => !TRIGGER_TEMPLATES.includes(l));
+
+                function toggleTrigger(template: string) {
+                  const has = currentLines.includes(template);
+                  const next = has ? currentLines.filter(l => l !== template) : [...currentLines, template];
+                  setField('transfer_escalation', 'escalation_triggers', next.join("\n"));
+                }
+                function setCustomLines(text: string) {
+                  const templateLines = TRIGGER_TEMPLATES.filter(t => currentLines.includes(t));
+                  const next = [...templateLines, ...text.split("\n").map(l => l.trim()).filter(Boolean)];
+                  setField('transfer_escalation', 'escalation_triggers', next.join("\n"));
+                }
+
+                return (
+                  <div className="space-y-2">
+                    <label className="text-xs font-medium text-foreground">Transfer Rules</label>
+                    <p className="text-[10px] text-muted-foreground -mt-1">Grace transfers the call when any enabled rule matches.</p>
+                    <div className="rounded-md border border-border divide-y divide-border">
+                      {TRIGGER_TEMPLATES.map(template => (
+                        <label key={template} className="flex items-center gap-2.5 px-3 py-2 text-xs text-foreground cursor-pointer hover:bg-muted/30">
+                          <input type="checkbox" checked={currentLines.includes(template)} onChange={() => toggleTrigger(template)} className="rounded" />
+                          {template}
+                        </label>
+                      ))}
+                    </div>
+                    <label className="text-xs font-medium text-foreground block pt-1">Custom Rules</label>
+                    <textarea
+                      rows={2}
+                      value={customLines.join("\n")}
+                      onChange={e => setCustomLines(e.target.value)}
+                      placeholder="One custom condition per line"
+                      className="w-full bg-input-background border border-border rounded-md px-3 py-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring resize-none"
+                    />
+                  </div>
+                );
+              })()}
               <div className="space-y-1.5">
                 <label className="text-xs font-medium text-foreground">Hold / Transfer Message</label>
                 <textarea rows={2} value={draft.transfer_escalation.hold_message ?? ""} onChange={e => setField('transfer_escalation', 'hold_message', e.target.value)} placeholder="Please hold while I transfer you to a member of our team." className="w-full bg-input-background border border-border rounded-md px-3 py-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring resize-none" />
@@ -2143,22 +2324,14 @@ function SettingsScreen() {
         {activeSection === "FAQs / Knowledge Base" && (
           <div className="space-y-5">
             <div className="flex items-center justify-between">
-              <h2 className="text-base font-semibold text-foreground">FAQs / Knowledge Base</h2>
-              <div className="flex items-center gap-2">
-                <button type="button" onClick={() => setFaqs(prev => [...prev, { id: crypto.randomUUID(), question: "", answer: "" }])} className="flex items-center gap-1.5 bg-muted border border-border text-xs font-medium px-3 py-2 rounded-md hover:bg-accent transition-colors">
-                  <Plus size={12} /> Add FAQ
-                </button>
-                {saveResult?.section === "faqs" && (
-                  <span className={`text-xs font-medium ${saveResult.ok ? "text-emerald-600" : "text-destructive"}`}>
-                    {saveResult.ok ? "Saved" : "Save failed — try again"}
-                  </span>
-                )}
-                <button type="button" onClick={handleSaveFaqs} disabled={saving} className="bg-primary text-primary-foreground text-xs font-medium px-4 py-2 rounded-md hover:opacity-90 disabled:opacity-50">
-                  {saving ? "Saving…" : "Save Changes"}
-                </button>
+              <div>
+                <h2 className="text-base font-semibold text-foreground">FAQs / Knowledge Base</h2>
+                <p className="text-xs text-muted-foreground mt-0.5">{SETTINGS_SECTION_META["FAQs / Knowledge Base"].subtitle}</p>
               </div>
+              <button type="button" onClick={() => setFaqs(prev => [...prev, { id: crypto.randomUUID(), question: "", answer: "" }])} className="flex items-center gap-1.5 bg-muted border border-border text-xs font-medium px-3 py-2 rounded-md hover:bg-accent transition-colors">
+                <Plus size={12} /> Add FAQ
+              </button>
             </div>
-            <p className="text-xs text-muted-foreground -mt-2">Add questions and answers the AI receptionist should know. It will use these to respond to callers.</p>
             {faqs.length === 0 ? (
               <Card className="p-10 flex flex-col items-center justify-center gap-3 text-center">
                 <HelpCircle size={28} className="text-muted-foreground/30" />
@@ -2170,7 +2343,29 @@ function SettingsScreen() {
               </Card>
             ) : (
               <div className="space-y-3">
-                {faqs.map((faq, i) => (
+                <div className="relative">
+                  <Search size={13} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
+                  <input
+                    value={faqSearch}
+                    onChange={e => setFaqSearch(e.target.value)}
+                    placeholder="Search questions and answers…"
+                    className="w-full bg-input-background border border-border rounded-md pl-8 pr-3 py-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+                  />
+                </div>
+                {faqs.filter(f =>
+                  !faqSearch.trim() ||
+                  f.question.toLowerCase().includes(faqSearch.trim().toLowerCase()) ||
+                  f.answer.toLowerCase().includes(faqSearch.trim().toLowerCase())
+                ).length === 0 && (
+                  <p className="text-xs text-muted-foreground text-center py-6">No FAQs match "{faqSearch}".</p>
+                )}
+                {faqs.filter(f =>
+                  !faqSearch.trim() ||
+                  f.question.toLowerCase().includes(faqSearch.trim().toLowerCase()) ||
+                  f.answer.toLowerCase().includes(faqSearch.trim().toLowerCase())
+                ).map((faq) => {
+                  const i = faqs.findIndex(f => f.id === faq.id);
+                  return (
                   <Card key={faq.id} className="p-4 space-y-3">
                     <div className="flex items-center justify-between">
                       <span className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">FAQ #{i + 1}</span>
@@ -2187,7 +2382,8 @@ function SettingsScreen() {
                       <textarea value={faq.answer} onChange={e => setFaqs(prev => prev.map(f => f.id === faq.id ? { ...f, answer: e.target.value } : f))} rows={2} placeholder="We're open Monday to Friday, 8am to 6pm, and Saturday 8am to 2pm." className="w-full bg-input-background border border-border rounded-md px-3 py-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring resize-none" />
                     </div>
                   </Card>
-                ))}
+                  );
+                })}
               </div>
             )}
           </div>
@@ -2204,9 +2400,9 @@ function SettingsScreen() {
           ] as [string, string, string][];
           return (
             <div className="space-y-5">
-              <div className="flex items-center justify-between">
+              <div>
                 <h2 className="text-base font-semibold text-foreground">SMS Follow-Ups</h2>
-                <SectionSaveBtn section="sms_follow_ups" label="Save" />
+                <p className="text-xs text-muted-foreground mt-0.5">{SETTINGS_SECTION_META["SMS Follow-Ups"].subtitle}</p>
               </div>
               <p className="text-xs text-muted-foreground -mt-2">Customize the SMS sent for each event. Use <span className="font-mono bg-muted px-1 rounded">{"{patient_name}"}</span>, <span className="font-mono bg-muted px-1 rounded">{"{date}"}</span>, <span className="font-mono bg-muted px-1 rounded">{"{time}"}</span>, <span className="font-mono bg-muted px-1 rounded">{"{clinic_name}"}</span> as placeholders.</p>
               <div className="space-y-3">
@@ -2229,7 +2425,69 @@ function SettingsScreen() {
           );
         })()}
       </div>
+
+      {/* Context rail */}
+      {activeSection !== "Overview" && (
+        <div className="w-72 flex-shrink-0 space-y-4">
+          {activeSection === "Clinic Profile" && (
+            <Card className="p-4 space-y-2">
+              <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">As Grace Will Say It</p>
+              <p className="text-xs text-foreground leading-relaxed bg-muted/40 border border-border rounded-md p-3 italic">
+                "You've reached {draft.clinic_profile.clinic_name || tenantInfo?.clinic_name || "the clinic"}{draft.clinic_profile.address ? ` at ${draft.clinic_profile.address}` : ""}. How can I help you today?"
+              </p>
+            </Card>
+          )}
+          {activeSection === "Transfer & Escalation" && (
+            <Card className="p-4 space-y-2">
+              <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">Receptionist Behavior</p>
+              <p className="text-xs text-foreground leading-relaxed">
+                {draft.transfer_escalation.transfer_number
+                  ? `Grace transfers to ${draft.transfer_escalation.transfer_number} when a caller needs a person.`
+                  : "Add a transfer number so Grace has somewhere to send callers who need a person."}
+              </p>
+            </Card>
+          )}
+          <Card className="p-4 space-y-2">
+            <div className="flex items-center gap-1.5 text-muted-foreground">
+              <Info size={11} />
+              <p className="text-[10px] font-semibold uppercase tracking-wide">Tip</p>
+            </div>
+            <p className="text-xs text-muted-foreground leading-relaxed">
+              {activeSection === "Clinic Profile" && "The address and phone number here are what Grace reads back to callers, so keep them exactly as patients would expect to hear them."}
+              {activeSection === "Clinic Hours" && "Hours drive Grace's after-hours behavior automatically — no separate toggle needed once these are set."}
+              {activeSection === "Practitioners" && "Add common variations of each practitioner's name so Grace can match callers who use only a first name or surname."}
+              {activeSection === "Transfer & Escalation" && "Keep the transfer number staffed during clinic hours — Grace will route urgent callers there immediately."}
+              {activeSection === "FAQs / Knowledge Base" && "Keep answers short and specific. Grace reads these back nearly verbatim during calls."}
+              {activeSection === "SMS Follow-Ups" && "Test each message template with real variable values before enabling it for patients."}
+            </p>
+          </Card>
+        </div>
+      )}
       </div>
+      </div>
+
+      {/* Sticky save bar - hidden on the Overview tab, since there's nothing to save there */}
+      {activeSection !== "Overview" && (
+        <div className="flex-shrink-0 border-t border-border bg-card px-6 py-3 flex items-center justify-between">
+          <div className="text-xs">
+            {activeSectionSaveResult ? (
+              <span className={`font-medium ${activeSectionSaveResult.ok ? "text-emerald-600" : "text-destructive"}`}>
+                {activeSectionSaveResult.ok ? "Changes saved" : "Save failed — try again"}
+              </span>
+            ) : (
+              <span className="text-muted-foreground">Editing {activeSection}</span>
+            )}
+          </div>
+          <button
+            type="button"
+            disabled={saving}
+            onClick={saveActiveSection}
+            className="bg-primary text-primary-foreground text-xs font-semibold px-5 py-2 rounded-md hover:opacity-90 disabled:opacity-50 transition-opacity"
+          >
+            {saving ? "Saving…" : "Save changes"}
+          </button>
+        </div>
+      )}
     </div>
   );
 }
