@@ -14,7 +14,7 @@ import {
 import {
   LineChart, Line, BarChart, Bar, PieChart, Pie, Cell,
   XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer,
-  AreaChart, Area
+  AreaChart, Area, LabelList
 } from "recharts";
 
 // ── Palette helpers ──────────────────────────────────────────────────────────
@@ -177,9 +177,6 @@ const DashboardContext = createContext<DashboardCtx>({
 
 function useDashboard() { return useContext(DashboardContext); }
 
-// ── Chart/static placeholders (populated when analytics endpoints are added) ──
-const sentimentOverTime: { day: string; score: number }[] = [];
-const topServices: { service: string; requests: number }[] = [];
 
 // ── Small reusable UI ─────────────────────────────────────────────────────────
 function Badge({ label, variant }: { label: string; variant: string }) {
@@ -1058,115 +1055,97 @@ function InboundTranscriptsScreen() { return <TranscriptsScreen direction="inbou
 function OutboundTranscriptsScreen() { return <TranscriptsScreen direction="outbound" />; }
 
 // ── Screen: Analytics ─────────────────────────────────────────────────────────
+const ANALYTICS_RANGE_LABELS = ["Hourly", "Daily", "Weekly", "2 Months", "3 Months", "6 Months", "Yearly", "All Time"];
+
 function AnalyticsScreen({ direction }: { direction: "inbound" | "outbound" }) {
-  const { analytics } = useDashboard();
-  const totalCalls = analytics.reduce((sum, p) => sum + p.calls, 0);
-  const avgDurationMin = analytics.length ? analytics.reduce((sum, p) => sum + p.avg, 0) / analytics.length : 0;
+  // Inbound is wired to the real Inbound Tracker n8n workflow's analytics
+  // webhook, with its own range selector (matching Build Analytics Response's
+  // range param). Outbound has no tracker workflow yet, so it deliberately
+  // shows an empty state instead of quietly reusing inbound's numbers - the
+  // old version of this screen showed identical data for both directions.
+  const { accessToken } = useDashboard();
+  const [range, setRange] = useState(1);
+  const [refreshTick, setRefreshTick] = useState(0);
+  const [data, setData] = useState<AnalyticsPoint[]>([]);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    if (direction !== "inbound" || !accessToken) { setData([]); return; }
+    setLoading(true);
+    fetch(`/api/link/${accessToken}/inbound/analytics?range=${range}`)
+      .then(r => r.ok ? r.json() : [])
+      .then(res => setData(Array.isArray(res) ? res : []))
+      .catch(() => setData([]))
+      .finally(() => setLoading(false));
+  }, [accessToken, direction, range, refreshTick]);
+
+  const totalCalls = data.reduce((sum, p) => sum + p.calls, 0);
+  const totalMinutes = data.reduce((sum, p) => sum + p.minutes, 0);
+  const completedCalls = data.reduce((sum, p) => sum + p.completed, 0);
 
   return (
     <div className="p-6 space-y-6">
-      <h1 className="text-lg font-semibold text-foreground">{direction === "outbound" ? "Outbound Analytics" : "Inbound Analytics"}</h1>
-
-      <div className="grid grid-cols-4 gap-4">
-        <KpiCard label="Total Calls" value={totalCalls ? String(totalCalls) : "—"} icon={PhoneCall} color="purple" />
-        <KpiCard label="Avg Call Duration" value={avgDurationMin ? `${avgDurationMin.toFixed(1)} min` : "—"} icon={Clock} color="teal" />
-        <KpiCard label="AI Success Rate" value="—" icon={Zap} color="green" />
-        <KpiCard label="Revenue Estimate" value="—" icon={ArrowUpRight} color="amber" />
-      </div>
-
-      <div className="grid grid-cols-2 gap-4">
-        <Card className="p-4">
-          <h3 className="text-sm font-semibold text-foreground mb-4">Calls by Day</h3>
-          <ResponsiveContainer width="100%" height={200}>
-            <BarChart data={analytics.map(p => ({ day: p.label, calls: p.calls }))}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#E8EAF6" />
-              <XAxis dataKey="day" tick={{ fontSize: 11, fill: SLATE }} axisLine={false} tickLine={false} />
-              <YAxis tick={{ fontSize: 11, fill: SLATE }} axisLine={false} tickLine={false} />
-              <Tooltip contentStyle={{ fontSize: 12, borderRadius: 6 }} />
-              <Bar dataKey="calls" fill={PURPLE} radius={[4, 4, 0, 0]} />
-            </BarChart>
-          </ResponsiveContainer>
-        </Card>
-        <Card className="p-4">
-          <h3 className="text-sm font-semibold text-foreground mb-4">Top Services Requested</h3>
-          <ResponsiveContainer width="100%" height={200}>
-            <BarChart data={topServices} layout="vertical">
-              <CartesianGrid strokeDasharray="3 3" stroke="#E8EAF6" />
-              <XAxis type="number" tick={{ fontSize: 11, fill: SLATE }} axisLine={false} tickLine={false} />
-              <YAxis type="category" dataKey="service" tick={{ fontSize: 11, fill: SLATE }} axisLine={false} tickLine={false} width={100} />
-              <Tooltip contentStyle={{ fontSize: 12, borderRadius: 6 }} />
-              <Bar dataKey="requests" fill={TEAL} radius={[0, 4, 4, 0]} />
-            </BarChart>
-          </ResponsiveContainer>
-        </Card>
-        <Card className="p-4">
-          <h3 className="text-sm font-semibold text-foreground mb-4">Sentiment Score Over Time</h3>
-          <ResponsiveContainer width="100%" height={200}>
-            <LineChart data={sentimentOverTime}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#E8EAF6" />
-              <XAxis dataKey="day" tick={{ fontSize: 11, fill: SLATE }} axisLine={false} tickLine={false} />
-              <YAxis domain={[3, 5]} tick={{ fontSize: 11, fill: SLATE }} axisLine={false} tickLine={false} />
-              <Tooltip contentStyle={{ fontSize: 12, borderRadius: 6 }} />
-              <Line type="monotone" dataKey="score" stroke={GREEN} strokeWidth={2} dot={{ fill: GREEN, r: 3 }} />
-            </LineChart>
-          </ResponsiveContainer>
-        </Card>
-        <Card className="p-4">
-          <h3 className="text-sm font-semibold text-foreground mb-4">AI Success Rate Over Time</h3>
-          <ResponsiveContainer width="100%" height={200}>
-            <AreaChart data={[
-              // TODO: Fetch from /api/link/:accessToken/analytics (real data from call logs)
-              { day: "Mon", rate: 94 }, { day: "Tue", rate: 97 }, { day: "Wed", rate: 95 },
-              { day: "Thu", rate: 96 }, { day: "Fri", rate: 98 }, { day: "Sat", rate: 96 }, { day: "Sun", rate: 97 }
-            ]}>
-              <defs>
-                <linearGradient id="rateGrad" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="5%" stopColor={INDIGO} stopOpacity={0.2} />
-                  <stop offset="95%" stopColor={INDIGO} stopOpacity={0} />
-                </linearGradient>
-              </defs>
-              <CartesianGrid strokeDasharray="3 3" stroke="#E8EAF6" />
-              <XAxis dataKey="day" tick={{ fontSize: 11, fill: SLATE }} axisLine={false} tickLine={false} />
-              <YAxis domain={[90, 100]} tick={{ fontSize: 11, fill: SLATE }} axisLine={false} tickLine={false} />
-              <Tooltip contentStyle={{ fontSize: 12, borderRadius: 6 }} />
-              <Area type="monotone" dataKey="rate" stroke={INDIGO} strokeWidth={2} fill="url(#rateGrad)" />
-            </AreaChart>
-          </ResponsiveContainer>
-        </Card>
-      </div>
-
-      {/* Failed booking reasons */}
-      <Card>
-        <div className="px-4 py-3 border-b border-border">
-          <h3 className="text-sm font-semibold text-foreground">Failed Booking Reasons</h3>
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-lg font-semibold bg-gradient-to-r from-violet-600 to-teal-500 bg-clip-text text-transparent">
+            {direction === "outbound" ? "Outbound Analytics" : "Inbound Analytics"}
+          </h1>
+          <p className="text-xs text-muted-foreground">{direction === "outbound" ? "Outbound call volume and trends over time." : "Inbound call volume and trends over time."}</p>
         </div>
-        <table className="w-full text-xs">
-          <thead>
-            <tr className="border-b border-border bg-muted/40">
-              {["Reason", "Count", "% of Failures", "Most Affected Service", "Trend"].map(h => (
-                <th key={h} className="text-left px-4 py-2.5 text-muted-foreground font-medium">{h}</th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {/* TODO: Fetch from /api/link/:accessToken/analytics/booking-failures (real data from call logs) */}
-            {[
-              ["API Timeout / Juvonno Error", "5", "41.7%", "Physiotherapy", "+2"],
-              ["No Availability Found", "4", "33.3%", "Chiropractic", "0"],
-              ["Patient Verification Failed", "2", "16.7%", "Massage Therapy", "-1"],
-              ["Invalid Service Requested", "1", "8.3%", "Pelvic Physio", "0"],
-            ].map(([reason, count, pct, svc, trend]) => (
-              <tr key={reason} className="border-b border-border last:border-0 hover:bg-muted/30 transition-colors">
-                <td className="px-4 py-2.5 font-medium text-foreground">{reason}</td>
-                <td className="px-4 py-2.5 font-mono text-foreground">{count}</td>
-                <td className="px-4 py-2.5 text-muted-foreground">{pct}</td>
-                <td className="px-4 py-2.5 text-muted-foreground">{svc}</td>
-                <td className="px-4 py-2.5"><span className={Number(trend) > 0 ? "text-red-500" : Number(trend) < 0 ? "text-emerald-500" : "text-muted-foreground"}>{trend === "0" ? "—" : trend}</span></td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+        {direction === "inbound" && (
+          <button
+            onClick={() => setRefreshTick(t => t + 1)}
+            disabled={loading}
+            className="flex items-center gap-2 bg-gradient-to-r from-violet-600 to-teal-500 text-white text-sm font-medium px-4 py-2 rounded-md hover:opacity-90 transition-opacity disabled:opacity-50"
+          >
+            <RefreshCw size={13} className={loading ? "animate-spin" : ""} /> Refresh
+          </button>
+        )}
+      </div>
+
+      <Card className="p-5">
+        <div className="flex items-center justify-between mb-4">
+          <div>
+            <h3 className="text-sm font-semibold text-foreground">Call Volume</h3>
+            <p className="text-xs text-muted-foreground">Calls over time — select a range</p>
+          </div>
+          <select
+            value={range}
+            onChange={e => setRange(Number(e.target.value))}
+            disabled={direction === "outbound"}
+            className="text-xs font-medium border border-border rounded-md px-2.5 py-1.5 bg-card disabled:opacity-50 focus:outline-none focus:ring-1 focus:ring-ring"
+          >
+            {ANALYTICS_RANGE_LABELS.map((l, i) => <option key={i} value={i}>{l}</option>)}
+          </select>
+        </div>
+
+        {direction === "outbound" ? (
+          <p className="text-xs text-muted-foreground text-center py-16">No outbound tracker connected yet.</p>
+        ) : data.length === 0 ? (
+          <p className="text-xs text-muted-foreground text-center py-16">{loading ? "Loading…" : "No calls in this range."}</p>
+        ) : (
+          <div className="overflow-x-auto">
+            <div style={{ minWidth: Math.max(600, data.length * 48) }}>
+              <ResponsiveContainer width="100%" height={220}>
+                <BarChart data={data}>
+                  <XAxis dataKey="label" tick={{ fontSize: 10, fill: SLATE }} axisLine={false} tickLine={false} />
+                  <YAxis hide />
+                  <Tooltip contentStyle={{ fontSize: 12, borderRadius: 6, border: "1px solid #E8EAF6" }} />
+                  <Bar dataKey="calls" fill={PURPLE} radius={[6, 6, 6, 6]}>
+                    <LabelList dataKey="calls" position="top" style={{ fontSize: 11, fill: SLATE, fontWeight: 600 }} />
+                  </Bar>
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+          </div>
+        )}
       </Card>
+
+      <div className="grid grid-cols-3 gap-4">
+        <KpiCard label="Total Calls (Range)" value={direction === "inbound" && data.length ? String(totalCalls) : "—"} icon={PhoneCall} color="purple" />
+        <KpiCard label="Total Minutes (Range)" value={direction === "inbound" && data.length ? `${totalMinutes.toFixed(1)}m` : "—"} icon={Clock} color="teal" />
+        <KpiCard label="Completed Calls" value={direction === "inbound" && data.length ? String(completedCalls) : "—"} icon={CheckCircle2} color="green" />
+      </div>
     </div>
   );
 }
@@ -1260,6 +1239,44 @@ function patientName(task: StaffTask): string {
   return name || "Unknown";
 }
 
+// Never infer "new patient" from visit_type alone - an existing patient can
+// still book an Initial visit for a different service. patient_record_status
+// / patient_status are the only fields that actually mean "never seen before".
+// These are the direct structured fields from the n8n booking payload, not
+// something parsed out of the free-text call summary.
+function getPatientFlags(task: StaffTask) {
+  const patientRecordStatus = safeText(task.patient_record_status);
+  const patientStatus = safeText(task.patient_status);
+  const visitType = safeText(task.visit_type);
+  const gender = safeText(task.patient_gender);
+  const dob = safeText(task.patient_date_of_birth);
+  const phone = safeText(task.patient_phone ?? task.phone);
+  const name = safeText(task.patient_name) || patientName(task);
+
+  const isFirstTimePatient =
+    patientRecordStatus.toLowerCase() === "new patient" ||
+    patientStatus.toLowerCase().startsWith("new patient");
+
+  const isFirstTimeVisit = visitType.toLowerCase() === "initial";
+
+  const hasExplicitGender =
+    Boolean(gender) && !["unknown", "null", "undefined"].includes(gender.toLowerCase());
+
+  const newPatientIntakeComplete = isFirstTimePatient && Boolean(dob) && hasExplicitGender;
+
+  const title = isFirstTimePatient
+    ? `New Patient Appointment Booked - ${name}`
+    : `Appointment Booked - ${name}`;
+
+  const firstVisitLabel = isFirstTimePatient
+    ? "First-time patient"
+    : isFirstTimeVisit
+      ? "Existing patient, initial visit"
+      : "Existing patient, follow-up visit";
+
+  return { isFirstTimePatient, isFirstTimeVisit, hasExplicitGender, newPatientIntakeComplete, dob, gender, phone, title, firstVisitLabel, visitType };
+}
+
 const STATUS_ACCENT: Record<string, string> = {
   New: "bg-blue-50 border-blue-100",
   "In Progress": "bg-violet-50 border-violet-100",
@@ -1272,15 +1289,16 @@ const STATUS_ACCENT: Record<string, string> = {
 // clean row per concept instead of every raw key n8n happens to include.
 // "Appointment Type" is deliberately Visit Type (Initial/Follow-up), not
 // appointment_type - in practice appointment_type just repeats Service.
+// Date of Birth and Patient Status are deliberately NOT here - DOB is
+// sensitive and gated behind the New Patient Intake section below, and
+// Patient Status is now surfaced as the New/Existing Patient badge instead
+// of a plain text row.
 const STAFF_TASK_DETAIL_FIELDS: { label: string; icon: any; keys: string[]; format?: (raw: string) => string }[] = [
   { label: "Practitioner", icon: User, keys: ["practitioner_name", "practitioner"] },
   { label: "Service", icon: Heart, keys: ["service_display_name", "service"] },
-  { label: "Visit Type", icon: ClipboardList, keys: ["visit_type"] },
   { label: "Duration", icon: Clock, keys: ["duration_minutes", "duration"], format: raw => /^\d+$/.test(raw) ? `${raw} min` : raw },
   { label: "Location", icon: Building2, keys: ["location", "branch_name"] },
   { label: "Appointment ID", icon: FileText, keys: ["appointment_id", "calendar_event_id", "external_event_id"] },
-  { label: "Date of Birth", icon: Calendar, keys: ["patient_date_of_birth", "dob"] },
-  { label: "Patient Status", icon: Info, keys: ["patient_status", "patient_record_status"] },
 ];
 
 function getTaskField(task: StaffTask, keys: string[], format?: (raw: string) => string): string {
@@ -1319,6 +1337,9 @@ function StaffQueueScreen() {
   const [filter, setFilter] = useState("All");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [confirmingId, setConfirmingId] = useState<string | null>(null);
+  // DOB/gender are sensitive - require an explicit click to reveal them each
+  // time a different request is opened, rather than showing them by default.
+  const [revealSensitiveId, setRevealSensitiveId] = useState<string | null>(null);
 
   function handleDelete(id: string) {
     if (confirmingId === id) {
@@ -1372,38 +1393,48 @@ function StaffQueueScreen() {
               </tr>
             </thead>
             <tbody>
-              {sortedTasks.map((task) => (
-                <tr
-                  key={task.id}
-                  onClick={() => setSelectedId(task.id)}
-                  className={`border-b border-border last:border-0 hover:bg-muted/30 transition-colors cursor-pointer ${task.status === "Completed" ? "opacity-60" : ""}`}
-                >
-                  <td className="px-4 py-3 text-foreground">{safeText(task.type) || "—"}</td>
-                  <td className="px-4 py-3">
-                    <div className="flex items-center gap-2">
-                      <div className="w-5 h-5 rounded-full bg-violet-100 text-violet-700 flex items-center justify-center text-[9px] font-bold flex-shrink-0">{patientName(task).charAt(0)}</div>
-                      <span className="font-medium text-foreground">{patientName(task)}</span>
-                    </div>
-                  </td>
-                  <td className="px-4 py-3 font-mono text-muted-foreground">{safeText(task.phone) || "—"}</td>
-                  <td className="px-4 py-3 text-muted-foreground">{formatDateTime(task.due) || "—"}</td>
-                  <td className="px-4 py-3 text-muted-foreground">{formatRelativeTime(task.created_at) || "—"}</td>
-                  <td className="px-4 py-3"><Badge label={task.status} variant={task.status} /></td>
-                  <td className="px-4 py-3 text-muted-foreground"><ChevronRight size={14} /></td>
-                </tr>
-              ))}
+              {sortedTasks.map((task) => {
+                const hasPatientInfo = Boolean(safeText(task.patient_record_status) || safeText(task.patient_status));
+                const flags = hasPatientInfo ? getPatientFlags(task) : null;
+                return (
+                  <tr
+                    key={task.id}
+                    onClick={() => setSelectedId(task.id)}
+                    className={`border-b border-border last:border-0 hover:bg-muted/30 transition-colors cursor-pointer ${task.status === "Completed" ? "opacity-60" : ""}`}
+                  >
+                    <td className="px-4 py-3 text-foreground">{flags ? flags.title : (safeText(task.type) || "—")}</td>
+                    <td className="px-4 py-3">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <div className="w-5 h-5 rounded-full bg-violet-100 text-violet-700 flex items-center justify-center text-[9px] font-bold flex-shrink-0">{patientName(task).charAt(0)}</div>
+                        <span className="font-medium text-foreground">{patientName(task)}</span>
+                        {flags && <Badge label={flags.isFirstTimePatient ? "New Patient" : "Existing Patient"} variant={flags.isFirstTimePatient ? "New" : "Neutral"} />}
+                        {flags?.visitType && <Badge label={flags.isFirstTimeVisit ? "Initial Visit" : "Follow-up"} variant={flags.isFirstTimeVisit ? "In Progress" : "Neutral"} />}
+                      </div>
+                    </td>
+                    <td className="px-4 py-3 font-mono text-muted-foreground">{safeText(task.phone) || "—"}</td>
+                    <td className="px-4 py-3 text-muted-foreground">{formatDateTime(task.due) || "—"}</td>
+                    <td className="px-4 py-3 text-muted-foreground">{formatRelativeTime(task.created_at) || "—"}</td>
+                    <td className="px-4 py-3"><Badge label={task.status} variant={task.status} /></td>
+                    <td className="px-4 py-3 text-muted-foreground"><ChevronRight size={14} /></td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         )}
       </Card>
 
-      {selectedTask && (
+      {selectedTask && (() => {
+        const hasPatientInfo = Boolean(safeText(selectedTask.patient_record_status) || safeText(selectedTask.patient_status));
+        const flags = hasPatientInfo ? getPatientFlags(selectedTask) : null;
+        const revealed = revealSensitiveId === selectedTask.id;
+        return (
         <>
           <div className="fixed inset-0 bg-black/30 z-40" onClick={() => setSelectedId(null)} />
           <div className="fixed inset-y-0 right-0 w-full max-w-md bg-card border-l border-border shadow-xl z-50 flex flex-col">
             <div className={`flex items-center justify-between px-5 py-4 border-b ${STATUS_ACCENT[selectedTask.status] ?? "bg-muted/40 border-border"}`}>
               <div className="flex items-center gap-2">
-                <span className="text-sm font-semibold text-foreground">{safeText(selectedTask.type) || "Request"}</span>
+                <span className="text-sm font-semibold text-foreground">{flags ? flags.title : (safeText(selectedTask.type) || "Request")}</span>
                 <Badge label={selectedTask.status} variant={selectedTask.status} />
               </div>
               <button onClick={() => setSelectedId(null)} className="p-1 text-muted-foreground hover:text-foreground transition-colors">
@@ -1414,11 +1445,55 @@ function StaffQueueScreen() {
             <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
               <div className="flex items-center gap-3 pb-4 border-b border-border">
                 <div className="w-10 h-10 rounded-full bg-violet-100 text-violet-700 flex items-center justify-center text-sm font-bold flex-shrink-0">{patientName(selectedTask).charAt(0)}</div>
-                <div>
+                <div className="flex-1">
                   <p className="text-sm font-semibold text-foreground">{patientName(selectedTask)}</p>
                   <p className="text-xs text-muted-foreground font-mono">{safeText(selectedTask.phone) || "No phone on file"}</p>
                 </div>
               </div>
+
+              {flags && (
+                <div>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <Badge label={flags.isFirstTimePatient ? "New Patient" : "Existing Patient"} variant={flags.isFirstTimePatient ? "New" : "Neutral"} />
+                    {flags.visitType && <Badge label={flags.isFirstTimeVisit ? "Initial Visit" : "Follow-up"} variant={flags.isFirstTimeVisit ? "In Progress" : "Neutral"} />}
+                  </div>
+                  <p className="text-xs text-muted-foreground mt-1.5">{flags.firstVisitLabel}</p>
+                </div>
+              )}
+
+              {flags?.isFirstTimePatient && (
+                <div className="rounded-md border border-border p-3 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">New Patient Intake</p>
+                    <button
+                      onClick={() => setRevealSensitiveId(revealed ? null : selectedTask.id)}
+                      className="flex items-center gap-1 text-[10px] font-medium text-primary hover:underline"
+                    >
+                      {revealed ? <><EyeOff size={10} /> Hide</> : <><Eye size={10} /> Show</>}
+                    </button>
+                  </div>
+                  <div className="grid grid-cols-2 gap-3 text-xs">
+                    <div>
+                      <p className="text-muted-foreground">Date of Birth</p>
+                      <p className="font-medium text-foreground mt-0.5 font-mono">{revealed ? (flags.dob || "—") : "••••••••"}</p>
+                    </div>
+                    <div>
+                      <p className="text-muted-foreground">Gender</p>
+                      <p className="font-medium text-foreground mt-0.5">{revealed ? (flags.gender || "—") : "••••"}</p>
+                    </div>
+                    <div>
+                      <p className="text-muted-foreground">Phone Number</p>
+                      <p className="font-medium text-foreground mt-0.5 font-mono">{revealed ? (flags.phone || "—") : "••••••••••"}</p>
+                    </div>
+                    <div>
+                      <p className="text-muted-foreground">Intake Status</p>
+                      <p className={`font-medium mt-0.5 ${flags.newPatientIntakeComplete ? "text-emerald-600" : "text-amber-600"}`}>
+                        {flags.newPatientIntakeComplete ? "Complete" : "Missing information"}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              )}
 
               <div className="grid grid-cols-2 gap-3">
                 <div className="rounded-md border border-border p-3">
@@ -1495,7 +1570,8 @@ function StaffQueueScreen() {
             </div>
           </div>
         </>
-      )}
+        );
+      })()}
     </div>
   );
 }
@@ -1505,6 +1581,31 @@ function RecordingsScreen({ direction }: { direction: "inbound" | "outbound" }) 
   const { callLogs: allCallLogs } = useDashboard();
   const callLogs = allCallLogs.filter(c => (c.direction ?? "inbound") === direction);
   const [playing, setPlaying] = useState<number | string | null>(null);
+  const [progress, setProgress] = useState(0); // seconds
+  const [audioDuration, setAudioDuration] = useState(0);
+  const [dismissed, setDismissed] = useState<Set<string | number>>(new Set());
+  const audioRef = useRef<HTMLAudioElement>(null);
+  const playingCall = callLogs.find(c => c.id === playing) ?? null;
+  const visibleLogs = callLogs.filter(c => !dismissed.has(c.id));
+
+  function togglePlay(c: CallLog) {
+    if (!c.recordingUrl) return;
+    if (playing === c.id) {
+      audioRef.current?.pause();
+      setPlaying(null);
+    } else {
+      setPlaying(c.id);
+      setProgress(0);
+      // Wait a tick for the <audio> src to update before playing.
+      setTimeout(() => audioRef.current?.play(), 0);
+    }
+  }
+
+  function formatTime(sec: number) {
+    const m = Math.floor(sec / 60);
+    const s = Math.floor(sec % 60);
+    return `${m}:${String(s).padStart(2, "0")}`;
+  }
 
   return (
     <div className="p-6 space-y-4">
@@ -1531,29 +1632,45 @@ function RecordingsScreen({ direction }: { direction: "inbound" | "outbound" }) 
             </tr>
           </thead>
           <tbody>
-            {callLogs.length === 0 ? (
+            {visibleLogs.length === 0 ? (
               <tr><td colSpan={9} className="px-4 py-10 text-center text-muted-foreground">No {direction} recordings yet.</td></tr>
-            ) : callLogs.map((c) => (
+            ) : visibleLogs.map((c) => (
               <tr key={c.id} className="border-b border-border last:border-0 hover:bg-muted/30 transition-colors">
                 <td className="px-4 py-3 font-mono text-muted-foreground whitespace-nowrap">{c.time}</td>
                 <td className="px-4 py-3 font-medium text-foreground">{c.caller}</td>
                 <td className="px-4 py-3 text-muted-foreground">{c.service}</td>
                 <td className="px-4 py-3"><Badge label={c.outcome ?? ""} variant={c.outcome ?? ""} /></td>
-                <td className="px-4 py-3"><Badge label={c.sentiment ?? ""} variant={c.sentiment ?? ""} /></td>
+                <td className="px-4 py-3">{c.sentiment ? <Badge label={c.sentiment} variant={c.sentiment} /> : <span className="text-muted-foreground">—</span>}</td>
                 <td className="px-4 py-3 font-mono text-muted-foreground">{c.duration}</td>
                 <td className="px-4 py-3"><span className="text-emerald-600 flex items-center gap-1"><CheckCircle2 size={11} /> Consented</span></td>
                 <td className="px-4 py-3 text-muted-foreground">90 days</td>
                 <td className="px-4 py-3">
                   <div className="flex items-center gap-1">
                     <button
-                      onClick={() => setPlaying(playing === c.id ? null : c.id)}
-                      className={`p-1.5 rounded-md transition-colors ${playing === c.id ? "bg-primary text-white" : "hover:bg-muted text-muted-foreground"}`}
+                      onClick={() => togglePlay(c)}
+                      disabled={!c.recordingUrl}
+                      title={c.recordingUrl ? "Play" : "No recording available"}
+                      className={`p-1.5 rounded-md transition-colors disabled:opacity-30 disabled:cursor-not-allowed ${playing === c.id ? "bg-primary text-white" : "hover:bg-muted text-muted-foreground"}`}
                     >
                       {playing === c.id ? <Pause size={11} /> : <Play size={11} />}
                     </button>
-                    <button className="p-1.5 rounded-md hover:bg-muted text-muted-foreground transition-colors"><Download size={11} /></button>
-                    <button className="p-1.5 rounded-md hover:bg-muted text-muted-foreground transition-colors"><Flag size={11} /></button>
-                    <button className="p-1.5 rounded-md hover:bg-red-50 text-muted-foreground hover:text-red-500 transition-colors"><Trash2 size={11} /></button>
+                    <a
+                      href={c.recordingUrl || undefined}
+                      download
+                      target="_blank"
+                      rel="noreferrer"
+                      title={c.recordingUrl ? "Download" : "No recording available"}
+                      className={`p-1.5 rounded-md transition-colors ${c.recordingUrl ? "hover:bg-muted text-muted-foreground" : "opacity-30 pointer-events-none"}`}
+                    >
+                      <Download size={11} />
+                    </a>
+                    <button
+                      onClick={() => setDismissed(prev => new Set(prev).add(c.id))}
+                      title="Remove from this list"
+                      className="p-1.5 rounded-md hover:bg-red-50 text-muted-foreground hover:text-red-500 transition-colors"
+                    >
+                      <Trash2 size={11} />
+                    </button>
                   </div>
                 </td>
               </tr>
@@ -1562,26 +1679,40 @@ function RecordingsScreen({ direction }: { direction: "inbound" | "outbound" }) 
         </table>
       </Card>
 
-      {playing && (
+      {playingCall && (
         <Card className="p-4">
+          <audio
+            ref={audioRef}
+            src={playingCall.recordingUrl}
+            autoPlay
+            onTimeUpdate={e => setProgress(e.currentTarget.currentTime)}
+            onLoadedMetadata={e => setAudioDuration(e.currentTarget.duration)}
+            onEnded={() => { setPlaying(null); setProgress(0); }}
+          />
           <div className="flex items-center gap-4">
-            <button onClick={() => setPlaying(null)} className="w-9 h-9 bg-primary rounded-full flex items-center justify-center flex-shrink-0">
+            <button onClick={() => togglePlay(playingCall)} className="w-9 h-9 bg-primary rounded-full flex items-center justify-center flex-shrink-0">
               <Pause size={14} className="text-white" />
             </button>
             <div className="flex-1">
-              <p className="text-xs font-semibold text-foreground mb-2">{callLogs.find(c => c.id === playing)?.caller} · {callLogs.find(c => c.id === playing)?.service}</p>
-              <div className="h-2 bg-muted rounded-full overflow-hidden cursor-pointer">
-                <div className="h-full w-2/5 bg-primary rounded-full transition-all" />
+              <p className="text-xs font-semibold text-foreground mb-2">{playingCall.caller} · {playingCall.service}</p>
+              <div
+                className="h-2 bg-muted rounded-full overflow-hidden cursor-pointer"
+                onClick={e => {
+                  if (!audioRef.current || !audioDuration) return;
+                  const rect = e.currentTarget.getBoundingClientRect();
+                  const ratio = (e.clientX - rect.left) / rect.width;
+                  audioRef.current.currentTime = ratio * audioDuration;
+                }}
+              >
+                <div className="h-full bg-primary rounded-full transition-all" style={{ width: `${audioDuration ? (progress / audioDuration) * 100 : 0}%` }} />
               </div>
               <div className="flex justify-between text-[10px] text-muted-foreground mt-1">
-                <span>1:18</span><span>{callLogs.find(c => c.id === playing)?.duration}</span>
+                <span>{formatTime(progress)}</span><span>{audioDuration ? formatTime(audioDuration) : playingCall.duration}</span>
               </div>
             </div>
-            <div className="flex items-center gap-2">
-              <Volume2 size={14} className="text-muted-foreground" />
-              <div className="w-20 h-1.5 bg-muted rounded-full"><div className="h-full w-3/4 bg-muted-foreground rounded-full" /></div>
-            </div>
-            <button className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors"><Download size={12} /> Download</button>
+            <a href={playingCall.recordingUrl} download target="_blank" rel="noreferrer" className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors">
+              <Download size={12} /> Download
+            </a>
           </div>
         </Card>
       )}
