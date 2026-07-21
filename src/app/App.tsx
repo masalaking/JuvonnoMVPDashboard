@@ -2249,14 +2249,17 @@ function SettingsScreen() {
 
 // ── Screen: Billing & Usage ───────────────────────────────────────────────────
 function BillingScreen() {
-  const { overview, analytics } = useDashboard();
+  const { invoices } = useDashboard();
+  // Build Invoices Response already sorts newest period first.
+  const latest = invoices[0] ?? null;
+  const billingPct = latest ? Math.min(100, (latest.minutesUsed / latest.includedMinutes) * 100) : 0;
 
   return (
     <div className="p-6 space-y-6">
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-lg font-semibold text-foreground">Billing & Usage</h1>
-          <p className="text-xs text-muted-foreground">Billing cycle: {overview?.billingPeriod ?? "—"}</p>
+          <p className="text-xs text-muted-foreground">Billing cycle: {latest?.period ?? "—"}</p>
         </div>
         <button className="flex items-center gap-2 bg-muted border border-border text-xs font-medium px-3 py-1.5 rounded-md hover:bg-accent transition-colors">
           <Download size={12} /> Download Invoice
@@ -2264,30 +2267,41 @@ function BillingScreen() {
       </div>
 
       <div className="grid grid-cols-4 gap-4">
-        <KpiCard label="Current Plan" value={overview ? `$${overview.basePrice.toFixed(0)}/mo` : "—"} sub={overview ? `${overview.minutesIncluded.toLocaleString()} min included` : "—"} icon={Star} color="purple" />
-        <KpiCard label="Minutes Used" value={overview ? `${overview.minutesUsed} / ${overview.minutesIncluded}` : "—"} sub="of plan included" icon={Clock} color="amber" />
-        <KpiCard label="Calls Handled" value={overview ? String(overview.totalCalls) : "—"} sub="This cycle" icon={PhoneCall} color="teal" />
-        <KpiCard label="Est. Overage" value={overview ? `$${overview.overageUSD.toFixed(2)}` : "—"} sub={overview ? `${overview.overageMinutes} min over` : "vs plan limits"} icon={CreditCard} color="green" />
-        <KpiCard label="SMS Sent" value="—" sub="Confirmations + follow-ups" icon={MessageSquare} color="indigo" />
-        <KpiCard label="Estimated Invoice" value={overview ? `$${overview.monthlyTotal.toFixed(2)}` : "—"} sub="Current cycle" icon={CreditCard} color="purple" />
-        <KpiCard label="Revenue Booked by AI" value="—" sub="Est. at $120 avg visit" icon={ArrowUpRight} color="green" />
-        <KpiCard label="Admin Hours Saved" value="—" sub="Est. at 8 min/call" icon={Clock} color="teal" />
+        <KpiCard label="Current Plan" value={latest ? `$${latest.baseRate.toFixed(0)}/mo` : "—"} sub={latest ? `${latest.includedMinutes.toLocaleString()} min included` : "—"} icon={Star} color="purple" />
+        <KpiCard label="Minutes Used" value={latest ? `${latest.minutesUsed} / ${latest.includedMinutes}` : "—"} sub="of plan included" icon={Clock} color="amber" />
+        <KpiCard label="Est. Overage" value={latest ? `$${latest.overageCost.toFixed(2)}` : "—"} sub={latest ? `${latest.overageMin} min over` : "vs plan limits"} icon={CreditCard} color={latest?.isOverage ? "red" : "green"} />
+        <KpiCard label="Latest Invoice" value={latest?.amount ?? "—"} sub={latest ? (latest.paid ? "Paid" : latest.status) : "Current cycle"} icon={CreditCard} color="purple" />
       </div>
 
       <div className="grid grid-cols-2 gap-4">
-        <Card className="p-4">
-          <h3 className="text-sm font-semibold text-foreground mb-4">Usage Over Time</h3>
-          <ResponsiveContainer width="100%" height={200}>
-            <BarChart data={analytics}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#E8EAF6" />
-              <XAxis dataKey="label" tick={{ fontSize: 11, fill: SLATE }} axisLine={false} tickLine={false} />
-              <YAxis tick={{ fontSize: 11, fill: SLATE }} axisLine={false} tickLine={false} />
-              <Tooltip contentStyle={{ fontSize: 12, borderRadius: 6 }} />
-              <Legend iconType="circle" iconSize={8} wrapperStyle={{ fontSize: 11 }} />
-              <Bar dataKey="minutes" fill={PURPLE} radius={[4, 4, 0, 0]} name="Minutes" />
-              <Bar dataKey="calls" fill={TEAL} radius={[4, 4, 0, 0]} name="Calls" />
-            </BarChart>
-          </ResponsiveContainer>
+        <Card className="overflow-hidden">
+          <div className="px-4 py-3 border-b border-border">
+            <h3 className="text-sm font-semibold text-foreground">Invoice History</h3>
+          </div>
+          {invoices.length === 0 ? (
+            <p className="text-xs text-muted-foreground py-10 text-center">No invoices yet.</p>
+          ) : (
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="border-b border-border bg-muted/40">
+                  {["Period", "Amount", "Minutes", "Status", "Due"].map(h => (
+                    <th key={h} className="text-left px-4 py-2 text-muted-foreground font-medium">{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {invoices.map((inv) => (
+                  <tr key={inv.id} className="border-b border-border last:border-0 hover:bg-muted/30 transition-colors">
+                    <td className="px-4 py-2.5 font-medium text-foreground">{inv.period}</td>
+                    <td className="px-4 py-2.5 font-mono text-foreground">{inv.amount}</td>
+                    <td className="px-4 py-2.5 font-mono text-muted-foreground">{inv.minutes}</td>
+                    <td className="px-4 py-2.5"><Badge label={inv.paid ? "Paid" : inv.status} variant={inv.paid ? "Paid" : inv.status} /></td>
+                    <td className="px-4 py-2.5 font-mono text-muted-foreground">{inv.dueDate || "—"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
         </Card>
         <Card className="p-4">
           <h3 className="text-sm font-semibold text-foreground mb-3">Plan Details</h3>
@@ -2295,25 +2309,25 @@ function BillingScreen() {
             <div>
               <div className="flex justify-between text-xs mb-1.5">
                 <span className="text-muted-foreground">AI Minutes Used</span>
-                <span className="font-semibold text-foreground font-mono">{overview ? `${overview.minutesUsed} / ${overview.minutesIncluded}` : "—"}</span>
+                <span className="font-semibold text-foreground font-mono">{latest ? `${latest.minutesUsed} / ${latest.includedMinutes}` : "—"}</span>
               </div>
               <div className="h-2.5 bg-muted rounded-full overflow-hidden">
-                <div className="h-full bg-amber-400 rounded-full" style={{ width: `${Math.min(100, overview?.billingPct ?? 0)}%` }} />
+                <div className="h-full bg-amber-400 rounded-full" style={{ width: `${billingPct}%` }} />
               </div>
-              {overview && overview.billingPctRaw >= 80 && (
+              {latest && billingPct >= 80 && (
                 <p className="text-[10px] text-amber-600 mt-1 font-medium">
-                  ⚠ {overview.billingPctRaw >= 100 ? "Over plan limit." : "Approaching plan limit."} {Math.max(0, overview.remainingMinutes)} minutes remaining.
+                  ⚠ {latest.isOverage ? "Over plan limit." : "Approaching plan limit."} {Math.max(0, latest.includedMinutes - latest.minutesUsed)} minutes remaining.
                 </p>
               )}
             </div>
             <div className="pt-2 space-y-2 text-xs">
               {[
-                ["Included Minutes", overview ? `${overview.minutesIncluded.toLocaleString()}/mo` : "—"],
-                ["Overage Rate", overview ? `$${overview.overageRate.toFixed(2)}/min` : "—"],
-                ["Rate per Minute", overview ? `$${overview.clientRatePerMin.toFixed(2)}/min` : "—"],
-                ["Recordings", overview ? String(overview.totalRecordings) : "—"],
-                ["Transcripts", overview ? String(overview.totalTranscripts) : "—"],
-                ["Avg Call Length", overview?.avgCallDisplay ?? "—"],
+                ["Included Minutes", latest ? `${latest.includedMinutes.toLocaleString()}/mo` : "—"],
+                ["Overage Rate", latest ? `$${latest.overageRate.toFixed(2)}/min` : "—"],
+                ["Overage Minutes", latest ? String(latest.overageMin) : "—"],
+                ["Invoice Status", latest ? (latest.paid ? "Paid" : latest.status) : "—"],
+                ["Generated", latest?.date || "—"],
+                ["Due Date", latest?.dueDate || "—"],
               ].map(([k, v]) => (
                 <div key={k} className="flex justify-between py-1.5 border-b border-border last:border-0">
                   <span className="text-muted-foreground">{k}</span>
