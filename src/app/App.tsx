@@ -168,9 +168,6 @@ const DashboardContext = createContext<DashboardCtx>({
 function useDashboard() { return useContext(DashboardContext); }
 
 // ── Chart/static placeholders (populated when analytics endpoints are added) ──
-const callsOverTime: { day: string; calls: number; bookings: number }[] = [];
-const outcomeData: { name: string; value: number; color: string }[] = [];
-const sentimentData: { name: string; value: number; color: string }[] = [];
 const sentimentOverTime: { day: string; score: number }[] = [];
 const topServices: { service: string; requests: number }[] = [];
 
@@ -408,7 +405,30 @@ function TopBar() {
 
 // ── Screen: Overview ─────────────────────────────────────────────────────────
 function OverviewScreen() {
-  const { callLogs, tenantInfo } = useDashboard();
+  const { callLogs, tenantInfo, overview, staffTasks } = useDashboard();
+  // Cancellation/Reschedule requests aren't tracked by the Inbound Tracker's
+  // billing sheet - the Staff Action Queue is the only place they're actually
+  // recorded, so derive those two counts from there instead of leaving them
+  // blank when the data genuinely exists elsewhere.
+  const cancellationCount = staffTasks.filter(t => String(t.type ?? "").toLowerCase().includes("cancel")).length;
+  const rescheduleCount = staffTasks.filter(t => String(t.type ?? "").toLowerCase().includes("reschedul")).length;
+
+  // Outcome/sentiment breakdowns come straight from real call logs rather
+  // than the old permanently-empty placeholder arrays, so the pies actually
+  // reflect what's in the sheet instead of always rendering blank.
+  const outcomeCounts = new Map<string, number>();
+  const sentimentCounts = new Map<string, number>();
+  for (const c of callLogs) {
+    const outcome = c.outcome || "Unknown";
+    const sentiment = c.sentiment || "Unknown";
+    outcomeCounts.set(outcome, (outcomeCounts.get(outcome) ?? 0) + 1);
+    sentimentCounts.set(sentiment, (sentimentCounts.get(sentiment) ?? 0) + 1);
+  }
+  const outcomeColors = [PURPLE, TEAL, "#f59e0b", "#ef4444", "#94a3b8"];
+  const sentimentColors: Record<string, string> = { Positive: "#10b981", Neutral: "#94a3b8", Negative: "#f97316", Frustrated: "#ef4444", Unknown: "#cbd5e1" };
+  const liveOutcomeData = [...outcomeCounts.entries()].map(([name, value], i) => ({ name, value, color: outcomeColors[i % outcomeColors.length] }));
+  const liveSentimentData = [...sentimentCounts.entries()].map(([name, value]) => ({ name, value, color: sentimentColors[name] ?? "#cbd5e1" }));
+
   return (
     <div className="p-6 space-y-6">
       <div className="flex items-center justify-between">
@@ -423,14 +443,14 @@ function OverviewScreen() {
 
       {/* KPI Grid */}
       <div className="grid grid-cols-4 gap-4">
-        <KpiCard label="Total Calls Handled" value="—" sub="This week" icon={PhoneCall} color="purple" />
+        <KpiCard label="Total Calls Handled" value={overview ? String(overview.totalCalls) : "—"} sub={overview?.billingPeriod ?? "This billing period"} icon={PhoneCall} color="purple" />
         <KpiCard label="Bookings Created" value="—" sub="Via AI" icon={CheckCircle2} color="teal" />
         <KpiCard label="Missed Calls Recovered" value="—" sub="Converted to bookings" icon={RefreshCw} color="green" />
         <KpiCard label="Transfers to Staff" value="—" sub="Transfer rate" icon={ArrowUpRight} color="amber" />
         <KpiCard label="Appointment Lookups" value="—" sub="Existing patients" icon={Search} color="indigo" />
         <KpiCard label="Availability Checks" value="—" sub="Unique queries" icon={Calendar} color="purple" />
-        <KpiCard label="Cancellation Requests" value="—" sub="Staff notified" icon={XCircle} color="amber" />
-        <KpiCard label="Reschedule Requests" value="—" sub="Staff notified" icon={Clock} color="amber" />
+        <KpiCard label="Cancellation Requests" value={String(cancellationCount)} sub="Staff notified" icon={XCircle} color="amber" />
+        <KpiCard label="Reschedule Requests" value={String(rescheduleCount)} sub="Staff notified" icon={Clock} color="amber" />
         <KpiCard label="Avg Sentiment Score" value="—" sub="Out of 5" icon={Heart} color="green" />
         <KpiCard label="Est. Revenue Booked" value="—" sub="At avg $120/visit" icon={ArrowUpRight} color="teal" />
         <KpiCard label="Admin Hours Saved" value="—" sub="Est. @ 8 min/call" icon={Clock} color="purple" />
@@ -440,9 +460,9 @@ function OverviewScreen() {
       {/* Charts Row */}
       <div className="grid grid-cols-2 gap-4">
         <Card className="p-4">
-          <h3 className="text-sm font-semibold text-foreground mb-4">Calls & Bookings Over Time</h3>
+          <h3 className="text-sm font-semibold text-foreground mb-4">Calls & Completed Over Time</h3>
           <ResponsiveContainer width="100%" height={200}>
-            <AreaChart data={callsOverTime}>
+            <AreaChart data={analytics}>
               <defs>
                 <linearGradient id="callGrad" x1="0" y1="0" x2="0" y2="1">
                   <stop offset="5%" stopColor={PURPLE} stopOpacity={0.15} />
@@ -454,12 +474,12 @@ function OverviewScreen() {
                 </linearGradient>
               </defs>
               <CartesianGrid strokeDasharray="3 3" stroke="#E8EAF6" />
-              <XAxis dataKey="day" tick={{ fontSize: 11, fill: SLATE }} axisLine={false} tickLine={false} />
+              <XAxis dataKey="label" tick={{ fontSize: 11, fill: SLATE }} axisLine={false} tickLine={false} />
               <YAxis tick={{ fontSize: 11, fill: SLATE }} axisLine={false} tickLine={false} />
               <Tooltip contentStyle={{ fontSize: 12, borderRadius: 6, border: "1px solid #E8EAF6" }} />
               <Legend iconType="circle" iconSize={8} wrapperStyle={{ fontSize: 11 }} />
               <Area type="monotone" dataKey="calls" stroke={PURPLE} strokeWidth={2} fill="url(#callGrad)" name="Calls" />
-              <Area type="monotone" dataKey="bookings" stroke={TEAL} strokeWidth={2} fill="url(#bookGrad)" name="Bookings" />
+              <Area type="monotone" dataKey="completed" stroke={TEAL} strokeWidth={2} fill="url(#bookGrad)" name="Completed" />
             </AreaChart>
           </ResponsiveContainer>
         </Card>
@@ -468,14 +488,15 @@ function OverviewScreen() {
           <div className="flex items-center gap-6">
             <ResponsiveContainer width={160} height={160}>
               <PieChart>
-                <Pie data={outcomeData} cx="50%" cy="50%" innerRadius={45} outerRadius={72} dataKey="value" strokeWidth={0}>
-                  {outcomeData.map((d, i) => <Cell key={i} fill={d.color} />)}
+                <Pie data={liveOutcomeData} cx="50%" cy="50%" innerRadius={45} outerRadius={72} dataKey="value" strokeWidth={0}>
+                  {liveOutcomeData.map((d, i) => <Cell key={i} fill={d.color} />)}
                 </Pie>
                 <Tooltip contentStyle={{ fontSize: 11, borderRadius: 6 }} />
               </PieChart>
             </ResponsiveContainer>
             <div className="flex flex-col gap-2 flex-1">
-              {outcomeData.map((d) => (
+              {liveOutcomeData.length === 0 && <p className="text-xs text-muted-foreground">No calls yet.</p>}
+              {liveOutcomeData.map((d) => (
                 <div key={d.name} className="flex items-center justify-between gap-2">
                   <div className="flex items-center gap-2">
                     <span className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ background: d.color }} />
@@ -492,14 +513,14 @@ function OverviewScreen() {
       {/* Charts Row 2 */}
       <div className="grid grid-cols-2 gap-4">
         <Card className="p-4">
-          <h3 className="text-sm font-semibold text-foreground mb-4">Bookings by Day</h3>
+          <h3 className="text-sm font-semibold text-foreground mb-4">Calls by Period</h3>
           <ResponsiveContainer width="100%" height={160}>
-            <BarChart data={callsOverTime}>
+            <BarChart data={analytics}>
               <CartesianGrid strokeDasharray="3 3" stroke="#E8EAF6" />
-              <XAxis dataKey="day" tick={{ fontSize: 11, fill: SLATE }} axisLine={false} tickLine={false} />
+              <XAxis dataKey="label" tick={{ fontSize: 11, fill: SLATE }} axisLine={false} tickLine={false} />
               <YAxis tick={{ fontSize: 11, fill: SLATE }} axisLine={false} tickLine={false} />
               <Tooltip contentStyle={{ fontSize: 12, borderRadius: 6 }} />
-              <Bar dataKey="bookings" fill={TEAL} radius={[4, 4, 0, 0]} />
+              <Bar dataKey="calls" fill={TEAL} radius={[4, 4, 0, 0]} />
             </BarChart>
           </ResponsiveContainer>
         </Card>
@@ -508,14 +529,15 @@ function OverviewScreen() {
           <div className="flex items-center gap-6">
             <ResponsiveContainer width={160} height={160}>
               <PieChart>
-                <Pie data={sentimentData} cx="50%" cy="50%" innerRadius={45} outerRadius={72} dataKey="value" strokeWidth={0}>
-                  {sentimentData.map((d, i) => <Cell key={i} fill={d.color} />)}
+                <Pie data={liveSentimentData} cx="50%" cy="50%" innerRadius={45} outerRadius={72} dataKey="value" strokeWidth={0}>
+                  {liveSentimentData.map((d, i) => <Cell key={i} fill={d.color} />)}
                 </Pie>
                 <Tooltip contentStyle={{ fontSize: 11, borderRadius: 6 }} />
               </PieChart>
             </ResponsiveContainer>
             <div className="flex flex-col gap-2 flex-1">
-              {sentimentData.map((d) => (
+              {liveSentimentData.length === 0 && <p className="text-xs text-muted-foreground">No calls yet.</p>}
+              {liveSentimentData.map((d) => (
                 <div key={d.name} className="flex items-center justify-between gap-2">
                   <div className="flex items-center gap-2">
                     <span className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ background: d.color }} />
@@ -2227,19 +2249,14 @@ function SettingsScreen() {
 
 // ── Screen: Billing & Usage ───────────────────────────────────────────────────
 function BillingScreen() {
-  const usageData = [
-    { week: "W1", minutes: 210, calls: 72 },
-    { week: "W2", minutes: 248, calls: 89 },
-    { week: "W3", minutes: 195, calls: 68 },
-    { week: "W4", minutes: 312, calls: 104 },
-  ];
+  const { overview, analytics } = useDashboard();
 
   return (
     <div className="p-6 space-y-6">
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-lg font-semibold text-foreground">Billing & Usage</h1>
-          <p className="text-xs text-muted-foreground">Billing cycle: June 1 – June 30, 2024</p>
+          <p className="text-xs text-muted-foreground">Billing cycle: {overview?.billingPeriod ?? "—"}</p>
         </div>
         <button className="flex items-center gap-2 bg-muted border border-border text-xs font-medium px-3 py-1.5 rounded-md hover:bg-accent transition-colors">
           <Download size={12} /> Download Invoice
@@ -2247,23 +2264,23 @@ function BillingScreen() {
       </div>
 
       <div className="grid grid-cols-4 gap-4">
-        <KpiCard label="Current Plan" value="Growth" sub="$299/mo · Renews Jul 1" icon={Star} color="purple" />
-        <KpiCard label="Minutes Used" value="—" sub="of plan included" icon={Clock} color="amber" />
-        <KpiCard label="Calls Handled" value="—" sub="This cycle" icon={PhoneCall} color="teal" />
-        <KpiCard label="Est. Overage" value="—" sub="vs plan limits" icon={CreditCard} color="green" />
+        <KpiCard label="Current Plan" value={overview ? `$${overview.basePrice.toFixed(0)}/mo` : "—"} sub={overview ? `${overview.minutesIncluded.toLocaleString()} min included` : "—"} icon={Star} color="purple" />
+        <KpiCard label="Minutes Used" value={overview ? `${overview.minutesUsed} / ${overview.minutesIncluded}` : "—"} sub="of plan included" icon={Clock} color="amber" />
+        <KpiCard label="Calls Handled" value={overview ? String(overview.totalCalls) : "—"} sub="This cycle" icon={PhoneCall} color="teal" />
+        <KpiCard label="Est. Overage" value={overview ? `$${overview.overageUSD.toFixed(2)}` : "—"} sub={overview ? `${overview.overageMinutes} min over` : "vs plan limits"} icon={CreditCard} color="green" />
         <KpiCard label="SMS Sent" value="—" sub="Confirmations + follow-ups" icon={MessageSquare} color="indigo" />
-        <KpiCard label="Estimated Invoice" value="—" sub="Current cycle" icon={CreditCard} color="purple" />
+        <KpiCard label="Estimated Invoice" value={overview ? `$${overview.monthlyTotal.toFixed(2)}` : "—"} sub="Current cycle" icon={CreditCard} color="purple" />
         <KpiCard label="Revenue Booked by AI" value="—" sub="Est. at $120 avg visit" icon={ArrowUpRight} color="green" />
         <KpiCard label="Admin Hours Saved" value="—" sub="Est. at 8 min/call" icon={Clock} color="teal" />
       </div>
 
       <div className="grid grid-cols-2 gap-4">
         <Card className="p-4">
-          <h3 className="text-sm font-semibold text-foreground mb-4">Usage Over Time (June)</h3>
+          <h3 className="text-sm font-semibold text-foreground mb-4">Usage Over Time</h3>
           <ResponsiveContainer width="100%" height={200}>
-            <BarChart data={usageData}>
+            <BarChart data={analytics}>
               <CartesianGrid strokeDasharray="3 3" stroke="#E8EAF6" />
-              <XAxis dataKey="week" tick={{ fontSize: 11, fill: SLATE }} axisLine={false} tickLine={false} />
+              <XAxis dataKey="label" tick={{ fontSize: 11, fill: SLATE }} axisLine={false} tickLine={false} />
               <YAxis tick={{ fontSize: 11, fill: SLATE }} axisLine={false} tickLine={false} />
               <Tooltip contentStyle={{ fontSize: 12, borderRadius: 6 }} />
               <Legend iconType="circle" iconSize={8} wrapperStyle={{ fontSize: 11 }} />
@@ -2278,29 +2295,25 @@ function BillingScreen() {
             <div>
               <div className="flex justify-between text-xs mb-1.5">
                 <span className="text-muted-foreground">AI Minutes Used</span>
-                <span className="font-semibold text-foreground font-mono">965 / 1,000</span>
+                <span className="font-semibold text-foreground font-mono">{overview ? `${overview.minutesUsed} / ${overview.minutesIncluded}` : "—"}</span>
               </div>
               <div className="h-2.5 bg-muted rounded-full overflow-hidden">
-                <div className="h-full bg-amber-400 rounded-full" style={{ width: "96.5%" }} />
+                <div className="h-full bg-amber-400 rounded-full" style={{ width: `${Math.min(100, overview?.billingPct ?? 0)}%` }} />
               </div>
-              <p className="text-[10px] text-amber-600 mt-1 font-medium">⚠ Approaching plan limit. 35 minutes remaining.</p>
-            </div>
-            <div>
-              <div className="flex justify-between text-xs mb-1.5">
-                <span className="text-muted-foreground">SMS Usage</span>
-                <span className="font-semibold text-foreground font-mono">284 / 500</span>
-              </div>
-              <div className="h-2.5 bg-muted rounded-full overflow-hidden">
-                <div className="h-full bg-teal-400 rounded-full" style={{ width: "56.8%" }} />
-              </div>
+              {overview && overview.billingPctRaw >= 80 && (
+                <p className="text-[10px] text-amber-600 mt-1 font-medium">
+                  ⚠ {overview.billingPctRaw >= 100 ? "Over plan limit." : "Approaching plan limit."} {Math.max(0, overview.remainingMinutes)} minutes remaining.
+                </p>
+              )}
             </div>
             <div className="pt-2 space-y-2 text-xs">
               {[
-                ["Plan", "Growth"],
-                ["Included Minutes", "1,000/mo"],
-                ["Included SMS", "500/mo"],
-                ["Overage Rate", "$0.08/min"],
-                ["Billing Date", "July 1, 2024"],
+                ["Included Minutes", overview ? `${overview.minutesIncluded.toLocaleString()}/mo` : "—"],
+                ["Overage Rate", overview ? `$${overview.overageRate.toFixed(2)}/min` : "—"],
+                ["Rate per Minute", overview ? `$${overview.clientRatePerMin.toFixed(2)}/min` : "—"],
+                ["Recordings", overview ? String(overview.totalRecordings) : "—"],
+                ["Transcripts", overview ? String(overview.totalTranscripts) : "—"],
+                ["Avg Call Length", overview?.avgCallDisplay ?? "—"],
               ].map(([k, v]) => (
                 <div key={k} className="flex justify-between py-1.5 border-b border-border last:border-0">
                   <span className="text-muted-foreground">{k}</span>
