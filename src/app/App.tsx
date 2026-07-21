@@ -405,7 +405,7 @@ function TopBar() {
 
 // ── Screen: Overview ─────────────────────────────────────────────────────────
 function OverviewScreen() {
-  const { callLogs, tenantInfo, overview, staffTasks } = useDashboard();
+  const { callLogs, tenantInfo, overview, staffTasks, analytics } = useDashboard();
   // Cancellation/Reschedule requests aren't tracked by the Inbound Tracker's
   // billing sheet - the Staff Action Queue is the only place they're actually
   // recorded, so derive those two counts from there instead of leaving them
