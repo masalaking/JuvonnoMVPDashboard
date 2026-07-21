@@ -1748,6 +1748,31 @@ function SettingsScreen() {
   const [practitioners, setPractitioners] = useState<Practitioner[]>([]);
   const [faqs, setFaqs] = useState<FAQ[]>([]);
   const [faqSearch, setFaqSearch] = useState("");
+  // Practitioner cards default to collapsed summaries so the section doesn't
+  // read as one long expanded form - expanding one is purely a UI toggle,
+  // it doesn't affect what's in `practitioners` or what gets saved.
+  const [expandedPractitionerId, setExpandedPractitionerId] = useState<string | null>(null);
+  // One textarea ref per SMS template key, so variable pills can insert at
+  // the current cursor position instead of always appending to the end.
+  const smsTextareaRefs = useRef<Record<string, HTMLTextAreaElement | null>>({});
+
+  function insertSmsVariable(key: string, fallback: string, token: string) {
+    const el = smsTextareaRefs.current[key];
+    const current = draft.sms_follow_ups[`${key}_message`] ?? fallback;
+    if (!el) {
+      setField('sms_follow_ups', `${key}_message`, current + token);
+      return;
+    }
+    const start = el.selectionStart ?? current.length;
+    const end = el.selectionEnd ?? current.length;
+    const next = current.slice(0, start) + token + current.slice(end);
+    setField('sms_follow_ups', `${key}_message`, next);
+    setTimeout(() => {
+      el.focus();
+      const caret = start + token.length;
+      el.setSelectionRange(caret, caret);
+    }, 0);
+  }
   const [draft, setDraft] = useState<Record<DraftKey, Record<string, string>>>({
     clinic_profile: {}, clinic_hours: {}, transfer_escalation: {}, sms_follow_ups: {},
   });
@@ -1783,6 +1808,37 @@ function SettingsScreen() {
 
   function setField(section: DraftKey, key: string, value: string) {
     setDraft(prev => ({ ...prev, [section]: { ...prev[section], [key]: value } }));
+  }
+
+  const WEEK_DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+
+  // Batch actions write into the exact same open_/start_/end_<Day> keys the
+  // day rows already use - no new fields, just fewer clicks to set them.
+  function copyDayToDays(sourceDay: string, targetDays: string[]) {
+    setDraft(prev => {
+      const hours = { ...prev.clinic_hours };
+      const openVal = hours[`open_${sourceDay}`] ?? "true";
+      const startVal = hours[`start_${sourceDay}`] ?? "";
+      const endVal = hours[`end_${sourceDay}`] ?? "";
+      for (const day of targetDays) {
+        hours[`open_${day}`] = openVal;
+        hours[`start_${day}`] = startVal;
+        hours[`end_${day}`] = endVal;
+      }
+      return { ...prev, clinic_hours: hours };
+    });
+  }
+
+  function clearAllHours() {
+    setDraft(prev => {
+      const hours = { ...prev.clinic_hours };
+      for (const day of WEEK_DAYS) {
+        hours[`open_${day}`] = "false";
+        hours[`start_${day}`] = "";
+        hours[`end_${day}`] = "";
+      }
+      return { ...prev, clinic_hours: hours };
+    });
   }
 
   function reportSaveResult(section: string, ok: boolean) {
@@ -1853,11 +1909,36 @@ function SettingsScreen() {
       ? saveResult : null
   );
 
+  // Purely for the sticky bar's "Unsaved changes" vs "All changes saved" text
+  // - compares current in-memory draft against the last-loaded `settings`
+  // snapshot from context. Doesn't affect what gets saved or how.
+  const isActiveSectionDirty = (() => {
+    if (activeSection === "Practitioners") {
+      const saved = (settings.practitioners as { list?: Practitioner[] })?.list ?? [];
+      return JSON.stringify(practitioners) !== JSON.stringify(saved);
+    }
+    if (activeSection === "FAQs / Knowledge Base") {
+      const saved = (settings.faqs as { list?: FAQ[] })?.list ?? [];
+      return JSON.stringify(faqs) !== JSON.stringify(saved);
+    }
+    const keyMap: Record<string, DraftKey> = {
+      "Clinic Profile": "clinic_profile",
+      "Clinic Hours": "clinic_hours",
+      "Transfer & Escalation": "transfer_escalation",
+      "SMS Follow-Ups": "sms_follow_ups",
+    };
+    const key = keyMap[activeSection];
+    if (!key) return false;
+    return JSON.stringify(draft[key]) !== JSON.stringify(settings[key] ?? {});
+  })();
+
   function addPractitioner() {
+    const id = crypto.randomUUID();
     setPractitioners(prev => [...prev, {
-      id: crypto.randomUUID(), name: "", keywords: "", staff_num: "",
+      id, name: "", keywords: "", staff_num: "",
       appointment_types: [newAppointmentType()],
     }]);
+    setExpandedPractitionerId(id);
   }
 
   function removePractitioner(id: string) {
@@ -2102,12 +2183,25 @@ function SettingsScreen() {
 
         {activeSection === "Clinic Hours" && (
           <div className="space-y-5">
-            <div>
-              <h2 className="text-base font-semibold text-foreground">Clinic Hours</h2>
-              <p className="text-xs text-muted-foreground mt-0.5">{SETTINGS_SECTION_META["Clinic Hours"].subtitle}</p>
+            <div className="flex items-center justify-between">
+              <div>
+                <h2 className="text-base font-semibold text-foreground">Clinic Hours</h2>
+                <p className="text-xs text-muted-foreground mt-0.5">{SETTINGS_SECTION_META["Clinic Hours"].subtitle}</p>
+              </div>
+              <div className="flex items-center gap-2">
+                <button type="button" onClick={() => copyDayToDays("Monday", ["Tuesday", "Wednesday", "Thursday", "Friday"])} className="text-[10px] font-medium text-muted-foreground hover:text-foreground border border-border rounded-md px-2.5 py-1.5 hover:bg-muted transition-colors">
+                  Copy Monday to weekdays
+                </button>
+                <button type="button" onClick={() => copyDayToDays("Monday", WEEK_DAYS.slice(1))} className="text-[10px] font-medium text-muted-foreground hover:text-foreground border border-border rounded-md px-2.5 py-1.5 hover:bg-muted transition-colors">
+                  Apply to all days
+                </button>
+                <button type="button" onClick={clearAllHours} className="text-[10px] font-medium text-muted-foreground hover:text-destructive border border-border rounded-md px-2.5 py-1.5 hover:bg-red-50 transition-colors">
+                  Clear all hours
+                </button>
+              </div>
             </div>
             <Card className="p-5 space-y-3">
-              {["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"].map((day, i) => {
+              {WEEK_DAYS.map((day, i) => {
                 const isOpen = draft.clinic_hours[`open_${day}`] !== undefined ? parseBoolean(draft.clinic_hours[`open_${day}`]) : i < 6;
                 const startVal = draft.clinic_hours[`start_${day}`] ?? (i < 6 ? "08:00" : "");
                 const endVal = draft.clinic_hours[`end_${day}`] ?? (i < 5 ? "18:00" : i === 5 ? "14:00" : "");
@@ -2152,14 +2246,66 @@ function SettingsScreen() {
                 {practitioners.map((p, i) => {
                   const durations = ["15", "30", "45", "60", "75", "90"];
                   const types = p.appointment_types ?? [];
+                  const isExpanded = expandedPractitionerId === p.id;
+                  const isComplete = Boolean(p.name && p.staff_num && types.length > 0);
+                  const serviceCount = types.filter(t => t.service_name).length;
+                  const staffNumDuplicate = Boolean(p.staff_num) && practitioners.some(other => other.id !== p.id && other.staff_num === p.staff_num);
+
+                  if (!isExpanded) {
+                    return (
+                      <Card key={p.id} className="p-3">
+                        <div className="w-full flex items-center gap-3 text-left">
+                          <button
+                            type="button"
+                            onClick={() => setExpandedPractitionerId(p.id)}
+                            className="flex-1 min-w-0 flex items-center gap-3 text-left"
+                          >
+                            <div className="w-9 h-9 rounded-full bg-violet-100 text-violet-700 flex items-center justify-center text-xs font-bold flex-shrink-0">
+                              {(p.name || "?").charAt(0).toUpperCase()}
+                            </div>
+                            <div className="flex-1 min-w-0">
+                              <p className="text-xs font-semibold text-foreground truncate">{p.name || `Practitioner #${i + 1}`}</p>
+                              <p className="text-[10px] text-muted-foreground">
+                                {p.staff_num ? `Staff #${p.staff_num}` : "No staff number"} · {serviceCount} service{serviceCount === 1 ? "" : "s"}
+                              </p>
+                            </div>
+                            {staffNumDuplicate && (
+                              <span className="flex items-center gap-1 text-[9px] font-medium text-red-700 bg-red-50 px-1.5 py-0.5 rounded flex-shrink-0">
+                                <AlertTriangle size={9} /> Duplicate staff #
+                              </span>
+                            )}
+                            {isComplete ? (
+                              <CheckCircle2 size={14} className="text-emerald-500 flex-shrink-0" />
+                            ) : (
+                              <span className="text-[9px] font-medium text-amber-600 bg-amber-50 px-1.5 py-0.5 rounded flex-shrink-0">Incomplete</span>
+                            )}
+                            <span className="text-[10px] font-medium text-primary flex-shrink-0">Edit</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => removePractitioner(p.id)}
+                            className="text-muted-foreground hover:text-destructive transition-colors flex-shrink-0"
+                          >
+                            <X size={13} />
+                          </button>
+                        </div>
+                      </Card>
+                    );
+                  }
+
                   return (
                     <Card key={p.id} className="p-4 space-y-3">
                       {/* Header */}
                       <div className="flex items-center justify-between">
                         <span className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">Practitioner #{i + 1}</span>
-                        <button type="button" onClick={() => removePractitioner(p.id)} className="text-muted-foreground hover:text-destructive transition-colors">
-                          <X size={13} />
-                        </button>
+                        <div className="flex items-center gap-3">
+                          <button type="button" onClick={() => setExpandedPractitionerId(null)} className="text-[10px] font-medium text-muted-foreground hover:text-foreground transition-colors">
+                            Collapse
+                          </button>
+                          <button type="button" onClick={() => removePractitioner(p.id)} className="text-muted-foreground hover:text-destructive transition-colors">
+                            <X size={13} />
+                          </button>
+                        </div>
                       </div>
                       {/* Name + ID */}
                       <div className="grid grid-cols-2 gap-3">
@@ -2169,7 +2315,15 @@ function SettingsScreen() {
                         </div>
                         <div className="space-y-1.5">
                           <label className="text-xs font-medium text-foreground">Staff Number</label>
-                          <input value={p.staff_num} onChange={e => updatePractitioner(p.id, 'staff_num', e.target.value)} placeholder="1122" className="w-full bg-input-background border border-border rounded-md px-3 py-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring font-mono" />
+                          <input
+                            value={p.staff_num}
+                            onChange={e => updatePractitioner(p.id, 'staff_num', e.target.value)}
+                            placeholder="1122"
+                            className={`w-full bg-input-background border rounded-md px-3 py-2 text-xs text-foreground focus:outline-none focus:ring-1 font-mono ${staffNumDuplicate ? "border-red-300 focus:ring-red-300" : "border-border focus:ring-ring"}`}
+                          />
+                          {staffNumDuplicate && (
+                            <p className="text-[10px] text-destructive">Another practitioner already uses this staff number.</p>
+                          )}
                         </div>
                       </div>
                       {/* Name keywords */}
@@ -2365,10 +2519,19 @@ function SettingsScreen() {
                   f.answer.toLowerCase().includes(faqSearch.trim().toLowerCase())
                 ).map((faq) => {
                   const i = faqs.findIndex(f => f.id === faq.id);
+                  const normalizedQ = faq.question.trim().toLowerCase();
+                  const isDuplicate = Boolean(normalizedQ) && faqs.some(f => f.id !== faq.id && f.question.trim().toLowerCase() === normalizedQ);
                   return (
-                  <Card key={faq.id} className="p-4 space-y-3">
+                  <Card key={faq.id} className={`p-4 space-y-3 ${isDuplicate ? "border-amber-300" : ""}`}>
                     <div className="flex items-center justify-between">
-                      <span className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">FAQ #{i + 1}</span>
+                      <div className="flex items-center gap-2">
+                        <span className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">FAQ #{i + 1}</span>
+                        {isDuplicate && (
+                          <span className="flex items-center gap-1 text-[9px] font-medium text-amber-700 bg-amber-50 px-1.5 py-0.5 rounded">
+                            <AlertTriangle size={9} /> Duplicate question
+                          </span>
+                        )}
+                      </div>
                       <button type="button" onClick={() => setFaqs(prev => prev.filter(f => f.id !== faq.id))} className="text-muted-foreground hover:text-destructive transition-colors">
                         <X size={13} />
                       </button>
@@ -2406,20 +2569,69 @@ function SettingsScreen() {
               </div>
               <p className="text-xs text-muted-foreground -mt-2">Customize the SMS sent for each event. Use <span className="font-mono bg-muted px-1 rounded">{"{patient_name}"}</span>, <span className="font-mono bg-muted px-1 rounded">{"{date}"}</span>, <span className="font-mono bg-muted px-1 rounded">{"{time}"}</span>, <span className="font-mono bg-muted px-1 rounded">{"{clinic_name}"}</span> as placeholders.</p>
               <div className="space-y-3">
-                {templates.map(([key, label, fallback]) => (
-                  <Card key={key} className="p-4 space-y-3">
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-2.5">
-                        <label className="flex items-center gap-2 cursor-pointer">
-                          <input type="checkbox" checked={draft.sms_follow_ups[`${key}_enabled`] !== 'false'} onChange={e => setField('sms_follow_ups', `${key}_enabled`, e.target.checked ? 'true' : 'false')} className="rounded" />
-                          <span className="text-xs font-semibold text-foreground">{label}</span>
-                        </label>
+                {templates.map(([key, label, fallback]) => {
+                  const enabled = draft.sms_follow_ups[`${key}_enabled`] !== 'false';
+                  const message = draft.sms_follow_ups[`${key}_message`] ?? fallback;
+                  const segments = Math.max(1, Math.ceil(message.length / 160));
+                  const previewText = message
+                    .replace(/\{patient_name\}/g, "Sarah")
+                    .replace(/\{clinic_name\}/g, tenantInfo?.clinic_name || "the clinic")
+                    .replace(/\{date\}/g, "Jul 24")
+                    .replace(/\{time\}/g, "2:00 PM");
+                  return (
+                    <Card key={key} className="p-4">
+                      <div className="grid grid-cols-3 gap-4">
+                        <div className="col-span-2 space-y-3">
+                          <div className="flex items-center justify-between">
+                            <label className="flex items-center gap-2 cursor-pointer">
+                              <input type="checkbox" checked={enabled} onChange={e => setField('sms_follow_ups', `${key}_enabled`, e.target.checked ? 'true' : 'false')} className="rounded" />
+                              <span className="text-xs font-semibold text-foreground">{label}</span>
+                              <span className={`text-[9px] font-medium px-1.5 py-0.5 rounded ${enabled ? "bg-emerald-50 text-emerald-700" : "bg-muted text-muted-foreground"}`}>
+                                {enabled ? "Enabled" : "Paused"}
+                              </span>
+                            </label>
+                            <span className="text-[10px] text-muted-foreground">{message.length} chars · {segments} segment{segments === 1 ? "" : "s"}</span>
+                          </div>
+                          <textarea
+                            ref={el => { smsTextareaRefs.current[key] = el; }}
+                            rows={3}
+                            value={message}
+                            onChange={e => setField('sms_follow_ups', `${key}_message`, e.target.value)}
+                            className="w-full bg-input-background border border-border rounded-md px-3 py-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring resize-none"
+                          />
+                          <div className="flex items-center justify-between">
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              {[
+                                ["Patient Name", "{patient_name}"],
+                                ["Clinic Name", "{clinic_name}"],
+                                ["Date", "{date}"],
+                                ["Time", "{time}"],
+                              ].map(([varLabel, token]) => (
+                                <button
+                                  key={token}
+                                  type="button"
+                                  onClick={() => insertSmsVariable(key, fallback, token)}
+                                  className="text-[9px] font-medium text-primary bg-primary/10 hover:bg-primary/20 px-2 py-1 rounded-full transition-colors"
+                                >
+                                  + {varLabel}
+                                </button>
+                              ))}
+                            </div>
+                            <button type="button" onClick={() => setField('sms_follow_ups', `${key}_message`, fallback)} className="text-[10px] font-medium text-muted-foreground hover:text-foreground transition-colors flex-shrink-0">
+                              Restore default
+                            </button>
+                          </div>
+                        </div>
+                        <div className="bg-muted/40 rounded-md p-3 flex flex-col justify-center">
+                          <p className="text-[9px] font-semibold text-muted-foreground uppercase tracking-wide mb-1.5">Preview</p>
+                          <div className="bg-primary text-primary-foreground text-[11px] leading-relaxed rounded-2xl rounded-bl-sm px-3 py-2 max-w-[90%]">
+                            {previewText}
+                          </div>
+                        </div>
                       </div>
-                      <span className="text-[10px] text-muted-foreground">{(draft.sms_follow_ups[`${key}_message`] ?? fallback).length} chars</span>
-                    </div>
-                    <textarea rows={2} value={draft.sms_follow_ups[`${key}_message`] ?? fallback} onChange={e => setField('sms_follow_ups', `${key}_message`, e.target.value)} className="w-full bg-input-background border border-border rounded-md px-3 py-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring resize-none" />
-                  </Card>
-                ))}
+                    </Card>
+                  );
+                })}
               </div>
             </div>
           );
@@ -2474,13 +2686,15 @@ function SettingsScreen() {
               <span className={`font-medium ${activeSectionSaveResult.ok ? "text-emerald-600" : "text-destructive"}`}>
                 {activeSectionSaveResult.ok ? "Changes saved" : "Save failed — try again"}
               </span>
+            ) : isActiveSectionDirty ? (
+              <span className="font-medium text-amber-600">Unsaved changes in {activeSection}</span>
             ) : (
-              <span className="text-muted-foreground">Editing {activeSection}</span>
+              <span className="text-muted-foreground">All changes saved</span>
             )}
           </div>
           <button
             type="button"
-            disabled={saving}
+            disabled={saving || !isActiveSectionDirty}
             onClick={saveActiveSection}
             className="bg-primary text-primary-foreground text-xs font-semibold px-5 py-2 rounded-md hover:opacity-90 disabled:opacity-50 transition-opacity"
           >
