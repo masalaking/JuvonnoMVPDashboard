@@ -55,6 +55,8 @@ interface CallLog {
   duration?: string;
   staffAction?: boolean;
   direction?: "inbound" | "outbound";
+  recordingUrl?: string;
+  summary?: string;
 }
 
 type Transcript = {
@@ -103,6 +105,8 @@ function mapInboundCall(raw: Record<string, unknown>): CallLog {
     duration: String(raw.durationDisplay ?? raw.duration_display ?? ""),
     staffAction: false,
     direction: "inbound",
+    recordingUrl: String(raw.recordingUrl ?? raw.recording_url ?? ""),
+    summary: String(raw.summary ?? ""),
   };
 }
 
@@ -412,10 +416,10 @@ function TopBar() {
 // reused for both Inbound and Outbound, so adding outbound didn't mean
 // duplicating four cards' worth of JSX with a different variable name.
 function OverviewKpiRow({ stats }: { stats: OverviewStats | null }) {
-  const pct = stats ? Math.min(100, Math.round((stats.minutesUsed / stats.minutesIncluded) * 100)) : 0;
+  const pct = stats && stats.minutesIncluded > 0 ? Math.min(100, (stats.minutesUsed / stats.minutesIncluded) * 100) : 0;
   return (
     <div className="grid grid-cols-4 gap-4">
-      <KpiCard label="Minutes Used" value={stats ? `${stats.minutesUsed} / ${stats.minutesIncluded}` : "—"} sub={stats ? `${pct}% of plan` : "—"} icon={Clock} color="amber" />
+      <KpiCard label="Minutes Used" value={stats ? `${stats.minutesUsed.toFixed(2)} / ${stats.minutesIncluded}` : "—"} sub={stats ? `${pct.toFixed(2)}% of plan` : "—"} icon={Clock} color="amber" />
       <KpiCard label="Total Calls" value={stats ? String(stats.totalCalls) : "—"} sub={stats?.billingPeriod ?? "—"} icon={PhoneCall} color="purple" />
       <KpiCard label="Overage Cost" value={stats ? `$${stats.overageUSD.toFixed(2)}` : "—"} sub={stats ? `${stats.overageMinutes} min over` : "—"} icon={CreditCard} color={stats && stats.overageMinutes > 0 ? "red" : "green"} />
       <KpiCard label="Avg Call Duration" value={stats?.avgCallDisplay ?? "—"} sub="Per call" icon={Zap} color="teal" />
@@ -433,7 +437,6 @@ function OverviewScreen() {
 
   const combinedUsed = (overview?.minutesUsed ?? 0) + (outboundOverview?.minutesUsed ?? 0);
   const combinedIncluded = (overview?.minutesIncluded ?? 0) + (outboundOverview?.minutesIncluded ?? 0);
-  const combinedPct = combinedIncluded > 0 ? Math.min(100, Math.round((combinedUsed / combinedIncluded) * 100)) : 0;
   const inboundShare = combinedIncluded > 0 ? Math.min(100, ((overview?.minutesUsed ?? 0) / combinedIncluded) * 100) : 0;
   const outboundShare = combinedIncluded > 0 ? Math.min(100 - inboundShare, ((outboundOverview?.minutesUsed ?? 0) / combinedIncluded) * 100) : 0;
 
@@ -460,7 +463,7 @@ function OverviewScreen() {
             <p className="text-xs text-muted-foreground mt-0.5">{overview?.billingPeriod ?? "—"} · Inbound + Outbound</p>
           </div>
           <p className="text-2xl font-semibold text-foreground font-mono">
-            {combinedIncluded > 0 ? combinedUsed.toFixed(1) : "—"}
+            {combinedIncluded > 0 ? combinedUsed.toFixed(2) : "—"}
             <span className="text-sm text-muted-foreground font-normal"> / {combinedIncluded > 0 ? combinedIncluded : "—"} min</span>
           </p>
         </div>
@@ -469,8 +472,8 @@ function OverviewScreen() {
           <div className="h-full bg-teal-500" style={{ width: `${outboundShare}%` }} />
         </div>
         <div className="flex items-center gap-4 mt-2 text-[11px] text-muted-foreground">
-          <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-primary" /> Inbound — {overview ? `${overview.minutesUsed} / ${overview.minutesIncluded}` : "—"} min</span>
-          <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-teal-500" /> Outbound — {outboundOverview ? `${outboundOverview.minutesUsed} / ${outboundOverview.minutesIncluded}` : "—"} min</span>
+          <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-primary" /> Inbound — {overview ? `${overview.minutesUsed.toFixed(2)} / ${overview.minutesIncluded}` : "—"} min</span>
+          <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-teal-500" /> Outbound — {outboundOverview ? `${outboundOverview.minutesUsed.toFixed(2)} / ${outboundOverview.minutesIncluded}` : "—"} min</span>
         </div>
       </Card>
 
@@ -814,17 +817,17 @@ function OutboundAgentScreen() {
 
 // ── Screen: Call Logs ─────────────────────────────────────────────────────────
 function CallLogsScreen({ direction }: { direction: "inbound" | "outbound" }) {
-  const { callLogs: allCallLogs } = useDashboard();
+  const { callLogs: allCallLogs, transcripts: allTranscripts } = useDashboard();
   const callLogs = allCallLogs.filter(c => (c.direction ?? "inbound") === direction);
   const [selectedCall, setSelectedCall] = useState<CallLog | null>(null);
+  // The calls endpoint doesn't carry full conversation text - the transcripts
+  // endpoint does, keyed by the same call id - so look it up there for the modal.
+  const selectedTranscript = selectedCall ? allTranscripts.find(t => String(t.id) === String(selectedCall.id)) : null;
 
   return (
     <div className="p-6 space-y-4 h-full">
       <div className="flex items-center justify-between">
         <h1 className="text-lg font-semibold text-foreground">{direction === "outbound" ? "Outbound Call Logs" : "Inbound Call Logs"}</h1>
-        <button className="flex items-center gap-2 bg-muted border border-border text-sm font-medium px-3 py-1.5 rounded-md hover:bg-accent transition-colors">
-          <Download size={13} /> Export CSV
-        </button>
       </div>
 
       {/* Filters */}
@@ -850,119 +853,105 @@ function CallLogsScreen({ direction }: { direction: "inbound" | "outbound" }) {
         </div>
       </Card>
 
-      <div className="grid grid-cols-4 gap-4">
-        {/* Table */}
-        <div className="col-span-3">
-          <Card>
-            <div className="overflow-x-auto">
-              <table className="w-full text-xs">
-                <thead>
-                  <tr className="border-b border-border bg-muted/40">
-                    {["Date/Time", "Caller", "Phone", "Type", "Service", "Provider", "Outcome", "Sentiment", "Duration", ""].map(h => (
-                      <th key={h} className="text-left px-3 py-2.5 text-muted-foreground font-medium whitespace-nowrap">{h}</th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {callLogs.length === 0 ? (
-                    <tr><td colSpan={10} className="px-3 py-10 text-center text-muted-foreground">
-                      No {direction} calls yet.
-                    </td></tr>
-                  ) : callLogs.map((c) => (
-                    <tr
-                      key={c.id}
-                      onClick={() => setSelectedCall(c)}
-                      className={`border-b border-border last:border-0 hover:bg-muted/30 cursor-pointer transition-colors ${selectedCall?.id === c.id ? "bg-violet-50" : ""}`}
-                    >
-                      <td className="px-3 py-2.5 font-mono text-muted-foreground whitespace-nowrap">{c.time}</td>
-                      <td className="px-3 py-2.5 font-medium text-foreground whitespace-nowrap">{c.caller}</td>
-                      <td className="px-3 py-2.5 font-mono text-muted-foreground">{c.phone}</td>
-                      <td className="px-3 py-2.5 text-muted-foreground">{c.type}</td>
-                      <td className="px-3 py-2.5 text-foreground whitespace-nowrap">{c.service}</td>
-                      <td className="px-3 py-2.5 text-muted-foreground whitespace-nowrap">{c.provider?.split(" ").slice(-1)[0]}</td>
-                      <td className="px-3 py-2.5"><Badge label={c.outcome ?? ""} variant={c.outcome ?? ""} /></td>
-                      <td className="px-3 py-2.5"><Badge label={c.sentiment ?? ""} variant={c.sentiment ?? ""} /></td>
-                      <td className="px-3 py-2.5 font-mono text-muted-foreground">{c.duration}</td>
-                      <td className="px-3 py-2.5">
-                        <div className="flex gap-1">
-                          <button className="p-1 hover:text-primary transition-colors" title="Recording"><Volume2 size={12} /></button>
-                          <button className="p-1 hover:text-primary transition-colors" title="Transcript"><FileText size={12} /></button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </Card>
-        </div>
-
-        {/* Call Detail Panel */}
-        <div>
-          {selectedCall ? (
-            <Card className="p-4 space-y-3 sticky top-0">
-              <div className="flex items-center justify-between">
-                <h3 className="text-sm font-semibold text-foreground">Call Detail</h3>
-                <button onClick={() => setSelectedCall(null)} className="p-1 hover:bg-muted rounded"><X size={13} /></button>
-              </div>
-              <div className="space-y-2 text-xs">
-                <div className="flex items-center gap-2">
-                  <div className="w-8 h-8 rounded-full bg-violet-100 flex items-center justify-center text-violet-700 font-semibold text-sm">{selectedCall.caller?.[0]}</div>
-                  <div>
-                    <p className="font-semibold text-foreground">{selectedCall.caller}</p>
-                    <p className="text-muted-foreground font-mono">{selectedCall.phone}</p>
-                  </div>
-                </div>
-                {[
-                  ["Date/Time", selectedCall.time],
-                  ["Duration", selectedCall.duration],
-                  ["Type", selectedCall.type],
-                  ["Service", selectedCall.service],
-                  ["Provider", selectedCall.provider],
-                ].map(([k, v]) => (
-                  <div key={k} className="flex justify-between py-1.5 border-b border-border last:border-0">
-                    <span className="text-muted-foreground">{k}</span>
-                    <span className="font-medium text-foreground text-right">{v}</span>
-                  </div>
+      <Card>
+        <div className="overflow-x-auto">
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="border-b border-border bg-muted/40">
+                {["Date/Time", "Caller", "Phone", "Outcome", "Sentiment", "Duration", ""].map(h => (
+                  <th key={h} className="text-left px-3 py-2.5 text-muted-foreground font-medium whitespace-nowrap">{h}</th>
                 ))}
-                <div className="flex justify-between py-1.5 border-b border-border">
-                  <span className="text-muted-foreground">Outcome</span>
-                  <Badge label={selectedCall.outcome ?? ""} variant={selectedCall.outcome ?? ""} />
-                </div>
-                <div className="flex justify-between py-1.5">
-                  <span className="text-muted-foreground">Sentiment</span>
-                  <Badge label={selectedCall.sentiment ?? ""} variant={selectedCall.sentiment ?? ""} />
-                </div>
-              </div>
-              {/* Mock audio player */}
-              <div className="bg-muted rounded-lg p-3 flex items-center gap-3">
-                <button className="w-7 h-7 bg-primary rounded-full flex items-center justify-center flex-shrink-0">
-                  <Play size={11} className="text-white ml-0.5" />
-                </button>
-                <div className="flex-1">
-                  <div className="h-1 bg-border rounded-full overflow-hidden">
-                    <div className="h-full w-1/3 bg-primary rounded-full" />
-                  </div>
-                  <div className="flex justify-between text-[10px] text-muted-foreground mt-1">
-                    <span>1:08</span><span>{selectedCall.duration}</span>
-                  </div>
-                </div>
-              </div>
-              <div className="grid grid-cols-2 gap-2 pt-1">
-                <button className="bg-primary text-primary-foreground text-xs py-1.5 rounded-md hover:opacity-90">Mark Reviewed</button>
-                <button className="bg-muted border border-border text-xs py-1.5 rounded-md hover:bg-accent transition-colors">Create Task</button>
-                <button className="bg-muted border border-border text-xs py-1.5 rounded-md hover:bg-accent transition-colors">Flag Issue</button>
-                <button className="bg-teal-50 text-teal-700 border border-teal-200 text-xs py-1.5 rounded-md hover:bg-teal-100 transition-colors">Send Follow-up</button>
-              </div>
-            </Card>
-          ) : (
-            <Card className="p-6 flex flex-col items-center justify-center gap-2 text-center h-48">
-              <PhoneCall size={24} className="text-muted-foreground/40" />
-              <p className="text-xs text-muted-foreground">Select a call to view details</p>
-            </Card>
-          )}
+              </tr>
+            </thead>
+            <tbody>
+              {callLogs.length === 0 ? (
+                <tr><td colSpan={7} className="px-3 py-10 text-center text-muted-foreground">
+                  No {direction} calls yet.
+                </td></tr>
+              ) : callLogs.map((c) => (
+                <tr
+                  key={c.id}
+                  onClick={() => setSelectedCall(c)}
+                  className="border-b border-border last:border-0 hover:bg-muted/30 cursor-pointer transition-colors"
+                >
+                  <td className="px-3 py-2.5 font-mono text-muted-foreground whitespace-nowrap">{c.time}</td>
+                  <td className="px-3 py-2.5 font-medium text-foreground whitespace-nowrap">{c.caller}</td>
+                  <td className="px-3 py-2.5 font-mono text-muted-foreground">{c.phone}</td>
+                  <td className="px-3 py-2.5"><Badge label={c.outcome ?? ""} variant={c.outcome ?? ""} /></td>
+                  <td className="px-3 py-2.5"><Badge label={c.sentiment ?? ""} variant={c.sentiment ?? ""} /></td>
+                  <td className="px-3 py-2.5 font-mono text-muted-foreground">{c.duration}</td>
+                  <td className="px-3 py-2.5">
+                    <div className="flex gap-1">
+                      <Volume2 size={12} className={c.recordingUrl ? "text-foreground" : "text-muted-foreground/30"} />
+                      <FileText size={12} className="text-foreground" />
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </div>
-      </div>
+      </Card>
+
+      {selectedCall && (
+        <>
+          <div className="fixed inset-0 bg-black/30 z-40 flex items-center justify-center p-6" onClick={() => setSelectedCall(null)}>
+            <div className="bg-card rounded-lg shadow-xl w-full max-w-lg max-h-[85vh] flex flex-col" onClick={e => e.stopPropagation()}>
+              <div className="px-5 py-4 border-b border-border flex items-start justify-between flex-shrink-0">
+                <div>
+                  <p className="text-sm font-semibold text-foreground">{selectedCall.time}</p>
+                  <div className="flex items-center gap-2 mt-1">
+                    <span className="text-xs text-muted-foreground">{selectedCall.duration}</span>
+                    {selectedCall.sentiment && <Badge label={selectedCall.sentiment} variant={selectedCall.sentiment} />}
+                  </div>
+                </div>
+                <button onClick={() => setSelectedCall(null)} className="flex items-center gap-1.5 text-xs font-medium border border-border px-2.5 py-1.5 rounded-md hover:bg-muted transition-colors">
+                  <X size={12} /> Close
+                </button>
+              </div>
+              <div className="flex-1 overflow-y-auto p-5 space-y-5">
+                {selectedCall.summary && (
+                  <div>
+                    <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide mb-2">Summary</p>
+                    <p className="text-xs text-foreground leading-relaxed bg-muted/40 border border-border rounded-md p-3">{selectedCall.summary}</p>
+                  </div>
+                )}
+
+                {selectedCall.recordingUrl ? (
+                  <a href={selectedCall.recordingUrl} target="_blank" rel="noreferrer" className="flex items-center gap-1.5 text-xs text-primary font-medium hover:underline">
+                    <Play size={12} /> Open Recording
+                  </a>
+                ) : (
+                  <p className="text-xs text-muted-foreground">No recording available for this call.</p>
+                )}
+
+                <div>
+                  <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide mb-2">Conversation</p>
+                  {(selectedTranscript?.lines ?? []).length === 0 ? (
+                    <p className="text-xs text-muted-foreground text-center py-6">No transcript text available for this call.</p>
+                  ) : (
+                    <div className="space-y-3">
+                      {selectedTranscript!.lines!.map((line, i) => (
+                        <div key={i} className={`flex gap-3 ${line.speaker === "Caller" ? "flex-row-reverse" : ""}`}>
+                          <div className={`w-6 h-6 rounded-full flex items-center justify-center text-[9px] font-bold flex-shrink-0 ${line.speaker === "Caller" ? "bg-slate-200 text-slate-600" : "bg-violet-100 text-violet-700"}`}>
+                            {line.speaker[0]}
+                          </div>
+                          <div className={`max-w-md ${line.speaker === "Caller" ? "items-end" : "items-start"} flex flex-col gap-0.5`}>
+                            <span className="text-[10px] text-muted-foreground">{line.speaker}</span>
+                            <div className={`text-xs px-3 py-2 rounded-lg ${line.speaker === "Caller" ? "bg-muted text-foreground" : "bg-violet-100 text-violet-900"}`}>
+                              {line.text}
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+        </>
+      )}
     </div>
   );
 }
@@ -977,24 +966,11 @@ function TranscriptsScreen({ direction }: { direction: "inbound" | "outbound" })
   const { transcripts: allTranscripts } = useDashboard();
   const filteredTranscripts = allTranscripts.filter(t => (t.direction ?? "inbound") === direction);
   const [selected, setSelected] = useState<Transcript | null>(null);
-  const [masked, setMasked] = useState(false);
 
   return (
     <div className="p-6 h-full flex flex-col gap-4">
       <div className="flex items-center justify-between">
         <h1 className="text-lg font-semibold text-foreground">{direction === "outbound" ? "Outbound Transcripts" : "Inbound Transcripts"}</h1>
-        <div className="flex items-center gap-2">
-          <label className="flex items-center gap-2 text-xs text-foreground cursor-pointer">
-            {masked ? <EyeOff size={13} className="text-muted-foreground" /> : <Eye size={13} className="text-muted-foreground" />}
-            Mask Sensitive Info
-            <div onClick={() => setMasked(!masked)} className={`w-8 h-4 rounded-full transition-colors cursor-pointer ${masked ? "bg-primary" : "bg-switch-background"} flex items-center px-0.5`}>
-              <div className={`w-3 h-3 bg-white rounded-full shadow transition-transform ${masked ? "translate-x-4" : "translate-x-0"}`} />
-            </div>
-          </label>
-          <button className="flex items-center gap-2 bg-muted border border-border text-xs font-medium px-3 py-1.5 rounded-md hover:bg-accent transition-colors">
-            <Download size={12} /> Export
-          </button>
-        </div>
       </div>
 
       <div className="flex gap-4 flex-1 min-h-0">
@@ -1060,7 +1036,7 @@ function TranscriptsScreen({ direction }: { direction: "inbound" | "outbound" })
                   <div className={`max-w-md ${line.speaker === "Caller" ? "items-end" : "items-start"} flex flex-col gap-0.5`}>
                     <span className="text-[10px] text-muted-foreground">{line.speaker}</span>
                     <div className={`text-xs px-3 py-2 rounded-lg ${line.speaker === "Caller" ? "bg-muted text-foreground" : "bg-violet-100 text-violet-900"}`}>
-                      {masked && line.speaker === "Caller" ? line.text.replace(/\b(March|1990|\d{3}-\d{4})\b/g, "████") : line.text}
+                      {line.text}
                     </div>
                   </div>
                 </div>
