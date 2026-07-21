@@ -1758,6 +1758,10 @@ function SettingsScreen() {
   // read as one long expanded form - expanding one is purely a UI toggle,
   // it doesn't affect what's in `practitioners` or what gets saved.
   const [expandedPractitionerId, setExpandedPractitionerId] = useState<string | null>(null);
+  // Purely a visual step tab (matches the 3-step reference design) - steps 2
+  // and 3 both reveal the same Services block since service + duration data
+  // live together in one appointment_type, not two separate saved sections.
+  const [practitionerStep, setPractitionerStep] = useState<Record<string, number>>({});
   // One textarea ref per SMS template key, so variable pills can insert at
   // the current cursor position instead of always appending to the end.
   const smsTextareaRefs = useRef<Record<string, HTMLTextAreaElement | null>>({});
@@ -2300,95 +2304,142 @@ function SettingsScreen() {
                     );
                   }
 
+                  const step = practitionerStep[p.id] ?? 1;
+                  const STEPS = [
+                    { n: 1, label: "Practitioner details" },
+                    { n: 2, label: "Services" },
+                    { n: 3, label: "Appointment lengths" },
+                  ];
+
                   return (
-                    <Card key={p.id} className="p-4 space-y-3">
+                    <Card key={p.id} className="p-6 space-y-5">
                       {/* Header */}
                       <div className="flex items-center justify-between">
-                        <span className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">Practitioner #{i + 1}</span>
+                        <div>
+                          <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">Practitioner #{i + 1}</p>
+                          <h3 className="text-base font-semibold text-foreground mt-0.5">{p.name || "New practitioner"}</h3>
+                        </div>
                         <div className="flex items-center gap-3">
                           <button type="button" onClick={() => setExpandedPractitionerId(null)} className="text-[10px] font-medium text-muted-foreground hover:text-foreground transition-colors">
                             Collapse
                           </button>
                           <button type="button" onClick={() => removePractitioner(p.id)} aria-label={`Remove ${p.name || `practitioner #${i + 1}`}`} className="text-muted-foreground hover:text-destructive transition-colors">
-                            <X size={13} />
+                            <Trash2 size={15} />
                           </button>
                         </div>
                       </div>
-                      {/* Name + ID */}
-                      <div className="grid grid-cols-2 gap-3">
-                        <div className="space-y-1.5">
-                          <label className="text-xs font-medium text-foreground">Name</label>
-                          <input value={p.name} onChange={e => updatePractitioner(p.id, 'name', e.target.value)} placeholder="Dr. Sarah Chen" className="w-full bg-input-background border border-border rounded-md px-3 py-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring" />
-                        </div>
-                        <div className="space-y-1.5">
-                          <label className="text-xs font-medium text-foreground">Staff Number</label>
-                          <input
-                            value={p.staff_num}
-                            onChange={e => updatePractitioner(p.id, 'staff_num', e.target.value)}
-                            placeholder="1122"
-                            className={`w-full bg-input-background border rounded-md px-3 py-2 text-xs text-foreground focus:outline-none focus:ring-1 font-mono ${staffNumDuplicate ? "border-red-300 focus:ring-red-300" : "border-border focus:ring-ring"}`}
-                          />
-                          {staffNumDuplicate && (
-                            <p className="text-[10px] text-destructive">Another practitioner already uses this staff number.</p>
-                          )}
-                        </div>
-                      </div>
-                      {/* Name keywords */}
-                      <div className="space-y-1.5">
-                        <label className="text-xs font-medium text-foreground">Name Keywords</label>
-                        <input value={p.keywords} onChange={e => updatePractitioner(p.id, 'keywords', e.target.value)} placeholder="Erika, Dr. Bishop, Bishop" className="w-full bg-input-background border border-border rounded-md px-3 py-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring" />
-                        <p className="text-[10px] text-muted-foreground">Aliases the AI uses to match callers asking for this person by name.</p>
-                      </div>
-                      {/* Service types */}
-                      <div className="border-t border-border pt-3 space-y-2">
-                        <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">Service Types & Appointment Durations</p>
-                        {types.map((t, ti) => (
-                          <div key={t.id} className="bg-muted/40 border border-border rounded-md p-3 space-y-2">
-                            {/* Service name + keywords */}
-                            <div className="flex items-start gap-2">
-                              <div className="flex-1 space-y-1.5">
-                                <input value={t.service_name} onChange={e => updateAppointmentTypeField(p.id, t.id, 'service_name', e.target.value)} placeholder={`Service type #${ti + 1} (e.g. Chiropractic)`} className="w-full bg-input-background border border-border rounded-md px-3 py-1.5 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring font-medium" />
-                                <input value={t.keywords ?? ""} onChange={e => updateAppointmentTypeField(p.id, t.id, 'keywords', e.target.value)} placeholder="Service keywords (e.g. chiro, chiropractor, adjustment)" className="w-full bg-input-background border border-border rounded-md px-3 py-1.5 text-[10px] text-foreground focus:outline-none focus:ring-1 focus:ring-ring text-muted-foreground" />
-                              </div>
-                              {types.length > 1 && (
-                                <button type="button" onClick={() => removeAppointmentType(p.id, t.id)} aria-label={`Remove service type ${t.service_name || `#${ti + 1}`}`} className="text-muted-foreground hover:text-destructive transition-colors shrink-0 mt-1.5">
-                                  <X size={12} />
-                                </button>
-                              )}
-                            </div>
-                            {/* Duration categories */}
-                            <div className="space-y-1.5 pl-1">
-                              {(t.duration_categories ?? []).map(c => {
-                                const selected = new Set((c.durations ?? '').split(',').map(s => s.trim()).filter(Boolean));
-                                return (
-                                  <div key={c.id} className="flex flex-wrap items-center gap-2">
-                                    <input value={c.label} onChange={e => updateDurationCategory(p.id, t.id, c.id, 'label', e.target.value)} placeholder="e.g. Initial, Follow-up, Cleaning" className="w-28 shrink-0 bg-input-background border border-border rounded px-2 py-1 text-[10px] text-foreground focus:outline-none focus:ring-1 focus:ring-ring" />
-                                    <div className="flex flex-wrap gap-1.5">
-                                      {durations.map(d => (
-                                        <label key={d} className="flex items-center gap-1 text-[10px] text-foreground cursor-pointer select-none">
-                                          <input type="checkbox" checked={selected.has(d)} onChange={() => toggleDuration(p.id, t.id, c.id, d, c.durations)} className="rounded" />
-                                          {d}
-                                        </label>
-                                      ))}
-                                    </div>
-                                    {(t.duration_categories ?? []).length > 1 && (
-                                      <button type="button" onClick={() => removeDurationCategory(p.id, t.id, c.id)} aria-label={`Remove duration category ${c.label || ""}`} className="text-muted-foreground hover:text-destructive transition-colors ml-auto">
-                                        <X size={10} />
-                                      </button>
-                                    )}
-                                  </div>
-                                );
-                              })}
-                              <button type="button" onClick={() => addDurationCategory(p.id, t.id)} className="flex items-center gap-1 text-[10px] text-muted-foreground hover:text-foreground transition-colors pt-0.5">
-                                <Plus size={9} /> Add duration type
-                              </button>
-                            </div>
+
+                      {/* Step tabs */}
+                      <div className="flex items-center gap-2 flex-wrap">
+                        {STEPS.map((s, si) => (
+                          <div key={s.n} className="flex items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={() => setPractitionerStep(prev => ({ ...prev, [p.id]: s.n }))}
+                              className="flex items-center gap-1.5"
+                            >
+                              <span className={`w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold flex-shrink-0 ${step === s.n ? "bg-primary text-white" : "bg-muted text-muted-foreground"}`}>
+                                {s.n}
+                              </span>
+                              <span className={`text-xs font-medium ${step === s.n ? "text-primary" : "text-muted-foreground"}`}>{s.label}</span>
+                            </button>
+                            {si < STEPS.length - 1 && <ChevronRight size={13} className="text-muted-foreground/50" />}
                           </div>
                         ))}
-                        <button type="button" onClick={() => addAppointmentType(p.id)} className="flex items-center gap-1.5 text-[10px] font-medium text-muted-foreground hover:text-foreground transition-colors pt-0.5">
-                          <Plus size={10} /> Add Service Type
-                        </button>
                       </div>
+
+                      {step === 1 && (
+                        <div className="space-y-4">
+                          <div className="grid grid-cols-2 gap-4">
+                            <div className="space-y-1.5">
+                              <label className="text-xs font-medium text-foreground">Display name</label>
+                              <input value={p.name} onChange={e => updatePractitioner(p.id, 'name', e.target.value)} placeholder="Dr. Sarah Chen" className="w-full bg-input-background border border-border rounded-full px-4 py-2.5 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring" />
+                            </div>
+                            <div className="space-y-1.5">
+                              <label className="text-xs font-medium text-foreground">Juvonno staff number</label>
+                              <input
+                                value={p.staff_num}
+                                onChange={e => updatePractitioner(p.id, 'staff_num', e.target.value)}
+                                placeholder="1122"
+                                className={`w-full bg-input-background border rounded-full px-4 py-2.5 text-xs text-foreground focus:outline-none focus:ring-1 font-mono ${staffNumDuplicate ? "border-red-300 focus:ring-red-300" : "border-border focus:ring-ring"}`}
+                              />
+                              {staffNumDuplicate && (
+                                <p className="text-[10px] text-destructive">Another practitioner already uses this staff number.</p>
+                              )}
+                            </div>
+                          </div>
+                          <div className="space-y-1.5">
+                            <label className="text-xs font-medium text-foreground">Names patients may use</label>
+                            <input value={p.keywords} onChange={e => updatePractitioner(p.id, 'keywords', e.target.value)} placeholder="Sarah, Dr. Chen, Chen" className="w-full bg-input-background border border-border rounded-full px-4 py-2.5 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring" />
+                            <p className="text-[10px] text-muted-foreground">Separate aliases with commas so the receptionist can match patient requests correctly.</p>
+                          </div>
+                        </div>
+                      )}
+
+                      {(step === 2 || step === 3) && (
+                        <div className="border-t border-border pt-4 space-y-3">
+                          <div>
+                            <p className="text-sm font-semibold text-foreground">Services and appointment lengths</p>
+                            <p className="text-[10px] text-muted-foreground mt-0.5">Tell the receptionist what this practitioner provides and which times it can offer.</p>
+                          </div>
+                          {types.map((t, ti) => (
+                            <div key={t.id} className="bg-card border border-border rounded-lg p-4 space-y-3">
+                              {/* Service name + keywords */}
+                              <div className="flex items-start gap-3">
+                                <div className="flex-1 grid grid-cols-2 gap-3">
+                                  <div className="space-y-1">
+                                    <label className="text-xs font-medium text-foreground">Service {ti + 1}</label>
+                                    <input value={t.service_name} onChange={e => updateAppointmentTypeField(p.id, t.id, 'service_name', e.target.value)} placeholder="e.g. Chiropractic" className="w-full bg-input-background border border-border rounded-full px-4 py-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring font-medium" />
+                                  </div>
+                                  <div className="space-y-1">
+                                    <label className="text-xs font-medium text-foreground">Patient keywords</label>
+                                    <input value={t.keywords ?? ""} onChange={e => updateAppointmentTypeField(p.id, t.id, 'keywords', e.target.value)} placeholder="chiro, adjustment" className="w-full bg-input-background border border-border rounded-full px-4 py-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring text-muted-foreground" />
+                                  </div>
+                                </div>
+                                {types.length > 1 && (
+                                  <button type="button" onClick={() => removeAppointmentType(p.id, t.id)} aria-label={`Remove service type ${t.service_name || `#${ti + 1}`}`} className="text-muted-foreground hover:text-destructive transition-colors shrink-0 mt-6">
+                                    <X size={13} />
+                                  </button>
+                                )}
+                              </div>
+                              {/* Duration categories */}
+                              <div className="space-y-2.5">
+                                {(t.duration_categories ?? []).map(c => {
+                                  const selected = new Set((c.durations ?? '').split(',').map(s => s.trim()).filter(Boolean));
+                                  return (
+                                    <div key={c.id} className="flex items-center gap-3 bg-muted/30 border border-border rounded-lg p-3">
+                                      <input value={c.label} onChange={e => updateDurationCategory(p.id, t.id, c.id, 'label', e.target.value)} placeholder="e.g. Initial, Follow-up" className="w-28 shrink-0 bg-transparent text-xs font-medium text-foreground focus:outline-none" />
+                                      <div className="flex flex-wrap gap-1.5 flex-1">
+                                        {durations.map(d => (
+                                          <button
+                                            type="button"
+                                            key={d}
+                                            onClick={() => toggleDuration(p.id, t.id, c.id, d, c.durations)}
+                                            className={`px-3 py-1.5 rounded-full text-xs font-medium transition-colors ${selected.has(d) ? "bg-primary text-white" : "bg-card border border-border text-foreground hover:bg-muted"}`}
+                                          >
+                                            {d} min
+                                          </button>
+                                        ))}
+                                      </div>
+                                      {(t.duration_categories ?? []).length > 1 && (
+                                        <button type="button" onClick={() => removeDurationCategory(p.id, t.id, c.id)} aria-label={`Remove duration category ${c.label || ""}`} className="text-muted-foreground hover:text-destructive transition-colors flex-shrink-0">
+                                          <X size={12} />
+                                        </button>
+                                      )}
+                                    </div>
+                                  );
+                                })}
+                                <button type="button" onClick={() => addDurationCategory(p.id, t.id)} className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors pt-0.5">
+                                  <Plus size={11} /> Add duration type
+                                </button>
+                              </div>
+                            </div>
+                          ))}
+                          <button type="button" onClick={() => addAppointmentType(p.id)} className="flex items-center gap-1.5 text-xs font-medium text-primary hover:underline pt-1">
+                            <Plus size={13} /> Add appointment type
+                          </button>
+                        </div>
+                      )}
                     </Card>
                   );
                 })}
