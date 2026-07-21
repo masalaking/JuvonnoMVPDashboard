@@ -137,6 +137,9 @@ interface DashboardCtx {
   transcripts: Transcript[];
   analytics: AnalyticsPoint[];
   overview: OverviewStats | null;
+  outboundOverview: OverviewStats | null;
+  overviewRefreshing: boolean;
+  refreshOverview: () => Promise<void>;
   invoices: UsageInvoice[];
   loading: boolean;
   settings: Record<string, unknown>;
@@ -155,6 +158,9 @@ const DashboardContext = createContext<DashboardCtx>({
   transcripts: [],
   analytics: [],
   overview: null,
+  outboundOverview: null,
+  overviewRefreshing: false,
+  refreshOverview: async () => {},
   invoices: [],
   loading: false,
   settings: {},
@@ -257,7 +263,6 @@ function Card({ children, className = "" }: { children: React.ReactNode; classNa
 const navItems = [
   { id: "overview", label: "Overview", icon: LayoutDashboard },
 
-  { id: "ai-receptionist", label: "AI Receptionist", icon: Bot, group: "Inbound" },
   { id: "call-logs", label: "Call Logs", icon: PhoneCall, group: "Inbound" },
   { id: "transcripts", label: "Transcripts", icon: FileText, group: "Inbound" },
   { id: "recordings", label: "Recordings", icon: Mic, group: "Inbound" },
@@ -265,7 +270,6 @@ const navItems = [
   { id: "staff-queue", label: "Staff Action Queue", icon: ClipboardList, group: "Inbound" },
   { id: "settings", label: "Settings", icon: Settings, group: "Inbound" },
 
-  { id: "outbound-agent", label: "Outbound Agent", icon: PhoneOutgoing, group: "Outbound" },
   { id: "outbound-call-logs", label: "Call Logs", icon: PhoneCall, group: "Outbound" },
   { id: "outbound-transcripts", label: "Transcripts", icon: FileText, group: "Outbound" },
   { id: "outbound-recordings", label: "Recordings", icon: Mic, group: "Outbound" },
@@ -404,217 +408,92 @@ function TopBar() {
 }
 
 // ── Screen: Overview ─────────────────────────────────────────────────────────
-function OverviewScreen() {
-  const { callLogs, tenantInfo, overview, staffTasks, analytics } = useDashboard();
-  // Cancellation/Reschedule requests aren't tracked by the Inbound Tracker's
-  // billing sheet - the Staff Action Queue is the only place they're actually
-  // recorded, so derive those two counts from there instead of leaving them
-  // blank when the data genuinely exists elsewhere.
-  const bookingCount = staffTasks.filter(t => String(t.type ?? "").toLowerCase().includes("book")).length;
-  const cancellationCount = staffTasks.filter(t => String(t.type ?? "").toLowerCase().includes("cancel")).length;
-  const rescheduleCount = staffTasks.filter(t => String(t.type ?? "").toLowerCase().includes("reschedul")).length;
+// One KPI row (Minutes Used / Total Calls / Overage Cost / Avg Call Duration)
+// reused for both Inbound and Outbound, so adding outbound didn't mean
+// duplicating four cards' worth of JSX with a different variable name.
+function OverviewKpiRow({ stats }: { stats: OverviewStats | null }) {
+  const pct = stats ? Math.min(100, Math.round((stats.minutesUsed / stats.minutesIncluded) * 100)) : 0;
+  return (
+    <div className="grid grid-cols-4 gap-4">
+      <KpiCard label="Minutes Used" value={stats ? `${stats.minutesUsed} / ${stats.minutesIncluded}` : "—"} sub={stats ? `${pct}% of plan` : "—"} icon={Clock} color="amber" />
+      <KpiCard label="Total Calls" value={stats ? String(stats.totalCalls) : "—"} sub={stats?.billingPeriod ?? "—"} icon={PhoneCall} color="purple" />
+      <KpiCard label="Overage Cost" value={stats ? `$${stats.overageUSD.toFixed(2)}` : "—"} sub={stats ? `${stats.overageMinutes} min over` : "—"} icon={CreditCard} color={stats && stats.overageMinutes > 0 ? "red" : "green"} />
+      <KpiCard label="Avg Call Duration" value={stats?.avgCallDisplay ?? "—"} sub="Per call" icon={Zap} color="teal" />
+    </div>
+  );
+}
 
-  // Outcome/sentiment breakdowns come straight from real call logs rather
-  // than the old permanently-empty placeholder arrays, so the pies actually
-  // reflect what's in the sheet instead of always rendering blank.
-  const outcomeCounts = new Map<string, number>();
-  const sentimentCounts = new Map<string, number>();
-  for (const c of callLogs) {
-    const outcome = c.outcome || "Unknown";
-    const sentiment = c.sentiment || "Unknown";
-    outcomeCounts.set(outcome, (outcomeCounts.get(outcome) ?? 0) + 1);
-    sentimentCounts.set(sentiment, (sentimentCounts.get(sentiment) ?? 0) + 1);
-  }
-  const outcomeColors = [PURPLE, TEAL, "#f59e0b", "#ef4444", "#94a3b8"];
-  const sentimentColors: Record<string, string> = { Positive: "#10b981", Neutral: "#94a3b8", Negative: "#f97316", Frustrated: "#ef4444", Unknown: "#cbd5e1" };
-  const liveOutcomeData = [...outcomeCounts.entries()].map(([name, value], i) => ({ name, value, color: outcomeColors[i % outcomeColors.length] }));
-  const liveSentimentData = [...sentimentCounts.entries()].map(([name, value]) => ({ name, value, color: sentimentColors[name] ?? "#cbd5e1" }));
+function OverviewScreen() {
+  // Deliberately sourced from ONLY the n8n Overview webhooks (`overview` for
+  // inbound, `outboundOverview` for outbound) - no staffTasks/callLogs/
+  // analytics mixed in, so every number on this screen traces back to one
+  // of those two sources. No outbound tracker workflow exists yet, so
+  // outboundOverview stays null (rendered as "—") until one is wired up.
+  const { overview, outboundOverview, overviewRefreshing, refreshOverview } = useDashboard();
+
+  const combinedUsed = (overview?.minutesUsed ?? 0) + (outboundOverview?.minutesUsed ?? 0);
+  const combinedIncluded = (overview?.minutesIncluded ?? 0) + (outboundOverview?.minutesIncluded ?? 0);
+  const combinedPct = combinedIncluded > 0 ? Math.min(100, Math.round((combinedUsed / combinedIncluded) * 100)) : 0;
+  const inboundShare = combinedIncluded > 0 ? Math.min(100, ((overview?.minutesUsed ?? 0) / combinedIncluded) * 100) : 0;
+  const outboundShare = combinedIncluded > 0 ? Math.min(100 - inboundShare, ((outboundOverview?.minutesUsed ?? 0) / combinedIncluded) * 100) : 0;
 
   return (
     <div className="p-6 space-y-6">
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-lg font-semibold text-foreground">Overview</h1>
-          <p className="text-xs text-muted-foreground">{tenantInfo?.clinic_name ?? "—"}</p>
+          <p className="text-xs text-muted-foreground">Combined inbound & outbound usage at a glance.</p>
         </div>
-        <button className="flex items-center gap-2 bg-primary text-primary-foreground text-sm font-medium px-4 py-2 rounded-md hover:opacity-90 transition-opacity">
-          <Download size={13} /> Export Report
+        <button
+          onClick={refreshOverview}
+          disabled={overviewRefreshing}
+          className="flex items-center gap-2 bg-primary text-primary-foreground text-sm font-medium px-4 py-2 rounded-md hover:opacity-90 transition-opacity disabled:opacity-50"
+        >
+          <RefreshCw size={13} className={overviewRefreshing ? "animate-spin" : ""} /> Refresh
         </button>
       </div>
 
-      {/* KPI Grid */}
-      <div className="grid grid-cols-4 gap-4">
-        <KpiCard label="Total Calls Handled" value={overview ? String(overview.totalCalls) : "—"} sub={overview?.billingPeriod ?? "This billing period"} icon={PhoneCall} color="purple" />
-        <KpiCard label="Bookings Created" value={String(bookingCount)} sub="Via AI" icon={CheckCircle2} color="teal" />
-        <KpiCard label="Missed Calls Recovered" value="—" sub="Converted to bookings" icon={RefreshCw} color="green" />
-        <KpiCard label="Transfers to Staff" value="—" sub="Transfer rate" icon={ArrowUpRight} color="amber" />
-        <KpiCard label="Appointment Lookups" value="—" sub="Existing patients" icon={Search} color="indigo" />
-        <KpiCard label="Availability Checks" value="—" sub="Unique queries" icon={Calendar} color="purple" />
-        <KpiCard label="Cancellation Requests" value={String(cancellationCount)} sub="Staff notified" icon={XCircle} color="amber" />
-        <KpiCard label="Reschedule Requests" value={String(rescheduleCount)} sub="Staff notified" icon={Clock} color="amber" />
-        <KpiCard label="Avg Sentiment Score" value="—" sub="Out of 5" icon={Heart} color="green" />
-        <KpiCard label="Est. Revenue Booked" value="—" sub="At avg $120/visit" icon={ArrowUpRight} color="teal" />
-        <KpiCard label="Admin Hours Saved" value="—" sub="Est. @ 8 min/call" icon={Clock} color="purple" />
-        <KpiCard label="AI Success Rate" value="—" sub="Function success" icon={Zap} color="green" />
-      </div>
-
-      {/* Charts Row */}
-      <div className="grid grid-cols-2 gap-4">
-        <Card className="p-4">
-          <h3 className="text-sm font-semibold text-foreground mb-4">Calls & Completed Over Time</h3>
-          <ResponsiveContainer width="100%" height={200}>
-            <AreaChart data={analytics}>
-              <defs>
-                <linearGradient id="callGrad" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="5%" stopColor={PURPLE} stopOpacity={0.15} />
-                  <stop offset="95%" stopColor={PURPLE} stopOpacity={0} />
-                </linearGradient>
-                <linearGradient id="bookGrad" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="5%" stopColor={TEAL} stopOpacity={0.15} />
-                  <stop offset="95%" stopColor={TEAL} stopOpacity={0} />
-                </linearGradient>
-              </defs>
-              <CartesianGrid strokeDasharray="3 3" stroke="#E8EAF6" />
-              <XAxis dataKey="label" tick={{ fontSize: 11, fill: SLATE }} axisLine={false} tickLine={false} />
-              <YAxis tick={{ fontSize: 11, fill: SLATE }} axisLine={false} tickLine={false} />
-              <Tooltip contentStyle={{ fontSize: 12, borderRadius: 6, border: "1px solid #E8EAF6" }} />
-              <Legend iconType="circle" iconSize={8} wrapperStyle={{ fontSize: 11 }} />
-              <Area type="monotone" dataKey="calls" stroke={PURPLE} strokeWidth={2} fill="url(#callGrad)" name="Calls" />
-              <Area type="monotone" dataKey="completed" stroke={TEAL} strokeWidth={2} fill="url(#bookGrad)" name="Completed" />
-            </AreaChart>
-          </ResponsiveContainer>
-        </Card>
-        <Card className="p-4">
-          <h3 className="text-sm font-semibold text-foreground mb-4">Call Outcomes</h3>
-          <div className="flex items-center gap-6">
-            <ResponsiveContainer width={160} height={160}>
-              <PieChart>
-                <Pie data={liveOutcomeData} cx="50%" cy="50%" innerRadius={45} outerRadius={72} dataKey="value" strokeWidth={0}>
-                  {liveOutcomeData.map((d, i) => <Cell key={i} fill={d.color} />)}
-                </Pie>
-                <Tooltip contentStyle={{ fontSize: 11, borderRadius: 6 }} />
-              </PieChart>
-            </ResponsiveContainer>
-            <div className="flex flex-col gap-2 flex-1">
-              {liveOutcomeData.length === 0 && <p className="text-xs text-muted-foreground">No calls yet.</p>}
-              {liveOutcomeData.map((d) => (
-                <div key={d.name} className="flex items-center justify-between gap-2">
-                  <div className="flex items-center gap-2">
-                    <span className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ background: d.color }} />
-                    <span className="text-xs text-foreground">{d.name}</span>
-                  </div>
-                  <span className="text-xs font-semibold text-foreground font-mono">{d.value}</span>
-                </div>
-              ))}
-            </div>
+      <Card className="p-5">
+        <div className="flex items-center justify-between mb-2">
+          <div>
+            <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">Total AI Minutes Used</p>
+            <p className="text-xs text-muted-foreground mt-0.5">{overview?.billingPeriod ?? "—"} · Inbound + Outbound</p>
           </div>
-        </Card>
-      </div>
-
-      {/* Charts Row 2 */}
-      <div className="grid grid-cols-2 gap-4">
-        <Card className="p-4">
-          <h3 className="text-sm font-semibold text-foreground mb-4">Calls by Period</h3>
-          <ResponsiveContainer width="100%" height={160}>
-            <BarChart data={analytics}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#E8EAF6" />
-              <XAxis dataKey="label" tick={{ fontSize: 11, fill: SLATE }} axisLine={false} tickLine={false} />
-              <YAxis tick={{ fontSize: 11, fill: SLATE }} axisLine={false} tickLine={false} />
-              <Tooltip contentStyle={{ fontSize: 12, borderRadius: 6 }} />
-              <Bar dataKey="calls" fill={TEAL} radius={[4, 4, 0, 0]} />
-            </BarChart>
-          </ResponsiveContainer>
-        </Card>
-        <Card className="p-4">
-          <h3 className="text-sm font-semibold text-foreground mb-4">Sentiment Breakdown</h3>
-          <div className="flex items-center gap-6">
-            <ResponsiveContainer width={160} height={160}>
-              <PieChart>
-                <Pie data={liveSentimentData} cx="50%" cy="50%" innerRadius={45} outerRadius={72} dataKey="value" strokeWidth={0}>
-                  {liveSentimentData.map((d, i) => <Cell key={i} fill={d.color} />)}
-                </Pie>
-                <Tooltip contentStyle={{ fontSize: 11, borderRadius: 6 }} />
-              </PieChart>
-            </ResponsiveContainer>
-            <div className="flex flex-col gap-2 flex-1">
-              {liveSentimentData.length === 0 && <p className="text-xs text-muted-foreground">No calls yet.</p>}
-              {liveSentimentData.map((d) => (
-                <div key={d.name} className="flex items-center justify-between gap-2">
-                  <div className="flex items-center gap-2">
-                    <span className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ background: d.color }} />
-                    <span className="text-xs text-foreground">{d.name}</span>
-                  </div>
-                  <span className="text-xs font-semibold text-foreground font-mono">{d.value}</span>
-                </div>
-              ))}
-            </div>
-          </div>
-        </Card>
-      </div>
-
-      {/* Bottom Row */}
-      <div className="grid grid-cols-3 gap-4">
-        {/* Recent Calls */}
-        <div className="col-span-2">
-          <Card>
-            <div className="px-4 py-3 border-b border-border flex items-center justify-between">
-              <h3 className="text-sm font-semibold text-foreground">Recent Calls</h3>
-              <button className="text-xs text-primary font-medium hover:underline">View All</button>
-            </div>
-            <div className="overflow-x-auto">
-              <table className="w-full text-xs">
-                <thead>
-                  <tr className="border-b border-border bg-muted/40">
-                    {["Time", "Caller", "Service", "Outcome", "Sentiment", "Duration"].map(h => (
-                      <th key={h} className="text-left px-4 py-2 text-muted-foreground font-medium">{h}</th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {callLogs.slice(0, 5).map((c) => (
-                    <tr key={c.id} className="border-b border-border last:border-0 hover:bg-muted/30 transition-colors">
-                      <td className="px-4 py-2.5 font-mono text-muted-foreground">{c.time?.split(" ")[1]}</td>
-                      <td className="px-4 py-2.5 font-medium text-foreground">{c.caller}</td>
-                      <td className="px-4 py-2.5 text-muted-foreground">{c.service}</td>
-                      <td className="px-4 py-2.5"><Badge label={c.outcome ?? ""} variant={c.outcome ?? ""} /></td>
-                      <td className="px-4 py-2.5"><Badge label={c.sentiment ?? ""} variant={c.sentiment ?? ""} /></td>
-                      <td className="px-4 py-2.5 font-mono text-muted-foreground">{c.duration}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </Card>
+          <p className="text-2xl font-semibold text-foreground font-mono">
+            {combinedIncluded > 0 ? combinedUsed.toFixed(1) : "—"}
+            <span className="text-sm text-muted-foreground font-normal"> / {combinedIncluded > 0 ? combinedIncluded : "—"} min</span>
+          </p>
         </div>
+        <div className="h-2 bg-muted rounded-full overflow-hidden flex">
+          <div className="h-full bg-primary" style={{ width: `${inboundShare}%` }} />
+          <div className="h-full bg-teal-500" style={{ width: `${outboundShare}%` }} />
+        </div>
+        <div className="flex items-center gap-4 mt-2 text-[11px] text-muted-foreground">
+          <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-primary" /> Inbound — {overview ? `${overview.minutesUsed} / ${overview.minutesIncluded}` : "—"} min</span>
+          <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-teal-500" /> Outbound — {outboundOverview ? `${outboundOverview.minutesUsed} / ${outboundOverview.minutesIncluded}` : "—"} min</span>
+        </div>
+      </Card>
 
-        {/* AI Health Card */}
-        <Card className="p-4 flex flex-col gap-3">
-          <div className="flex items-center justify-between">
-            <h3 className="text-sm font-semibold text-foreground">AI Receptionist Health</h3>
-            <Badge label="Active" variant="Active" />
+      <OverviewKpiRow stats={overview} />
+      <OverviewKpiRow stats={outboundOverview} />
+
+      <Card className="p-5">
+        <h3 className="text-sm font-semibold text-foreground mb-4">Billing Summary</h3>
+        <div className="grid grid-cols-3 gap-4 text-xs">
+          <div>
+            <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">Billing Period</p>
+            <p className="font-semibold text-foreground mt-1">{overview?.billingPeriod ?? "—"}</p>
           </div>
-          <div className="space-y-2.5 text-xs">
-            {[
-              ["Agent Name", "Grace"],
-              ["Status", "Live"],
-              ["Last Call", "—"],
-              ["Last Booking", "—"],
-              ["Function Success", "—"],
-              ["Phone Number", "—"],
-              ["Connected Clinic", tenantInfo?.clinic_name ?? "—"],
-            ].map(([k, v]) => (
-              <div key={k} className="flex items-center justify-between py-1.5 border-b border-border last:border-0">
-                <span className="text-muted-foreground">{k}</span>
-                <span className="font-medium text-foreground">{v}</span>
-              </div>
-            ))}
+          <div>
+            <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">Inbound Recordings</p>
+            <p className="font-semibold text-foreground mt-1">{overview ? String(overview.totalRecordings) : "—"}</p>
           </div>
-          <div className="mt-auto pt-2 grid grid-cols-2 gap-2">
-            <button className="bg-primary text-primary-foreground text-xs font-medium px-3 py-1.5 rounded-md hover:opacity-90">Test Agent</button>
-            <button className="bg-muted text-foreground text-xs font-medium px-3 py-1.5 rounded-md hover:bg-accent transition-colors border border-border">Pause Agent</button>
+          <div>
+            <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">Inbound Transcripts</p>
+            <p className="font-semibold text-foreground mt-1">{overview ? String(overview.totalTranscripts) : "—"}</p>
           </div>
-        </Card>
-      </div>
+        </div>
+      </Card>
     </div>
   );
 }
@@ -3133,14 +3012,12 @@ function PaymentRecoveryScreen() {
 // ── Root App ──────────────────────────────────────────────────────────────────
 const SCREENS: Record<string, React.FC> = {
   "overview": OverviewScreen,
-  "ai-receptionist": AIReceptionistScreen,
   "call-logs": InboundCallLogsScreen,
   "transcripts": InboundTranscriptsScreen,
   "recordings": InboundRecordingsScreen,
   "analytics": InboundAnalyticsScreen,
   "staff-queue": StaffQueueScreen,
   "settings": SettingsScreen,
-  "outbound-agent": OutboundAgentScreen,
   "outbound-call-logs": OutboundCallLogsScreen,
   "outbound-transcripts": OutboundTranscriptsScreen,
   "outbound-recordings": OutboundRecordingsScreen,
@@ -3163,6 +3040,7 @@ export default function App() {
   const [transcripts, setTranscripts] = useState<Transcript[]>([]);
   const [analytics, setAnalytics] = useState<AnalyticsPoint[]>([]);
   const [overview, setOverview] = useState<OverviewStats | null>(null);
+  const [outboundOverview, setOutboundOverview] = useState<OverviewStats | null>(null);
   const [invoices, setInvoices] = useState<UsageInvoice[]>([]);
   const [settings, setSettings] = useState<Record<string, unknown>>({});
   const [loading, setLoading] = useState(false);
@@ -3179,8 +3057,11 @@ export default function App() {
       fetch(`/api/link/${accessToken}/inbound/analytics`).then(r => r.ok ? r.json() : []),
       fetch(`/api/link/${accessToken}/inbound/overview`).then(r => r.ok ? r.json() : null),
       fetch(`/api/link/${accessToken}/inbound/invoices`).then(r => r.ok ? r.json() : { invoices: [] }),
+      // No outbound tracker exists yet, so this 404s/502s until one is wired
+      // up - that's expected, and just leaves outboundOverview null.
+      fetch(`/api/link/${accessToken}/outbound/overview`).then(r => r.ok ? r.json() : null).catch(() => null),
     ])
-      .then(([tenant, requests, savedSettings, callsRes, transcriptsRes, analyticsRes, overviewRes, invoicesRes]) => {
+      .then(([tenant, requests, savedSettings, callsRes, transcriptsRes, analyticsRes, overviewRes, invoicesRes, outboundOverviewRes]) => {
         setTenantInfo(tenant);
         setStaffTasks(requests);
         setSettings(savedSettings ?? {});
@@ -3189,6 +3070,7 @@ export default function App() {
         setAnalytics(Array.isArray(analyticsRes) ? analyticsRes : []);
         setOverview(overviewRes && !overviewRes.error ? overviewRes : null);
         setInvoices(Array.isArray(invoicesRes?.invoices) ? invoicesRes.invoices : []);
+        setOutboundOverview(outboundOverviewRes && !outboundOverviewRes.error ? outboundOverviewRes : null);
       })
       .catch(() => {})
       .finally(() => setLoading(false));
@@ -3219,18 +3101,40 @@ export default function App() {
         fetch(`/api/link/${accessToken}/inbound/analytics`).then(r => r.ok ? r.json() : null),
         fetch(`/api/link/${accessToken}/inbound/overview`).then(r => r.ok ? r.json() : null),
         fetch(`/api/link/${accessToken}/inbound/invoices`).then(r => r.ok ? r.json() : null),
+        fetch(`/api/link/${accessToken}/outbound/overview`).then(r => r.ok ? r.json() : null).catch(() => null),
       ])
-        .then(([callsRes, transcriptsRes, analyticsRes, overviewRes, invoicesRes]) => {
+        .then(([callsRes, transcriptsRes, analyticsRes, overviewRes, invoicesRes, outboundOverviewRes]) => {
           if (Array.isArray(callsRes?.calls)) setCallLogs(callsRes.calls.map(mapInboundCall));
           if (Array.isArray(transcriptsRes?.transcripts)) setTranscripts(transcriptsRes.transcripts.map(mapInboundTranscript));
           if (Array.isArray(analyticsRes)) setAnalytics(analyticsRes);
           if (overviewRes && !overviewRes.error) setOverview(overviewRes);
           if (Array.isArray(invoicesRes?.invoices)) setInvoices(invoicesRes.invoices);
+          if (outboundOverviewRes && !outboundOverviewRes.error) setOutboundOverview(outboundOverviewRes);
         })
         .catch(() => {});
     }, 20000);
     return () => clearInterval(interval);
   }, [accessToken]);
+
+  const [overviewRefreshing, setOverviewRefreshing] = useState(false);
+  async function refreshOverview() {
+    if (!accessToken) return;
+    setOverviewRefreshing(true);
+    try {
+      const [res, outboundRes] = await Promise.all([
+        fetch(`/api/link/${accessToken}/inbound/overview`),
+        fetch(`/api/link/${accessToken}/outbound/overview`).catch(() => null),
+      ]);
+      const data = res.ok ? await res.json() : null;
+      setOverview(data && !data.error ? data : null);
+      const outboundData = outboundRes && outboundRes.ok ? await outboundRes.json() : null;
+      setOutboundOverview(outboundData && !outboundData.error ? outboundData : null);
+    } catch {
+      // keep whatever was last loaded
+    } finally {
+      setOverviewRefreshing(false);
+    }
+  }
 
   async function updateTaskStatus(id: string, status: string) {
     if (!accessToken) return;
@@ -3316,7 +3220,7 @@ export default function App() {
   }
 
   return (
-    <DashboardContext.Provider value={{ accessToken, tenantInfo, staffTasks, callLogs, transcripts, analytics, overview, invoices, loading, settings, updateTaskStatus, deleteTask, saveSection, saveBulk, syncRetell }}>
+    <DashboardContext.Provider value={{ accessToken, tenantInfo, staffTasks, callLogs, transcripts, analytics, overview, outboundOverview, overviewRefreshing, refreshOverview, invoices, loading, settings, updateTaskStatus, deleteTask, saveSection, saveBulk, syncRetell }}>
       <div
         className="flex h-screen w-screen overflow-hidden bg-background"
         style={{ fontFamily: "'Inter', sans-serif" }}

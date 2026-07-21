@@ -509,6 +509,17 @@ app.get('/api/link/:accessToken/inbound/invoices', n8nRoute(async (req, res) => 
   res.json(await callInboundTracker(tenant, 'invoices'));
 }));
 
+// ── Outbound Tracker endpoint (placeholder) ─────────────────────────────────
+// Mirrors the inbound overview route above, but calling `<client_id>/outbound-overview`
+// instead of `<client_id>/overview`. No outbound n8n workflow exists yet - once
+// one is set up, just make sure its webhook path matches this, or update the
+// path string below to whatever it actually uses.
+app.get('/api/link/:accessToken/outbound/overview', n8nRoute(async (req, res) => {
+  const tenant = findTenant(req.params.accessToken);
+  if (!tenant) return res.status(404).json({ error: 'Invalid access token' });
+  res.json(await callInboundTracker(tenant, 'outbound-overview'));
+}));
+
 // Serve built frontend
 app.use(express.static(join(ROOT, 'dist')));
 app.get('*', (_req, res) => res.sendFile(join(ROOT, 'dist/index.html')));
