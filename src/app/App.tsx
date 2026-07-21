@@ -1724,7 +1724,12 @@ function RecordingsScreen({ direction }: { direction: "inbound" | "outbound" }) 
 interface DurationCategory { id: string; label: string; durations: string; }
 interface AppointmentType { id: string; service_name: string; keywords: string; duration_categories: DurationCategory[]; }
 interface Practitioner { id: string; name: string; keywords: string; staff_num: string; appointment_types: AppointmentType[]; }
-interface FAQ { id: string; question: string; answer: string; }
+interface FAQ { id: string; question: string; answer: string; category?: string; }
+
+const FAQ_CATEGORIES = [
+  "Appointments", "Services", "Pricing and Insurance", "Clinic Policies",
+  "Location and Parking", "Accessibility", "Preparation and Aftercare", "General",
+];
 
 type DraftKey = 'clinic_profile' | 'clinic_hours' | 'transfer_escalation' | 'sms_follow_ups';
 
@@ -1748,6 +1753,7 @@ function SettingsScreen() {
   const [practitioners, setPractitioners] = useState<Practitioner[]>([]);
   const [faqs, setFaqs] = useState<FAQ[]>([]);
   const [faqSearch, setFaqSearch] = useState("");
+  const [faqCategoryFilter, setFaqCategoryFilter] = useState("All");
   // Practitioner cards default to collapsed summaries so the section doesn't
   // read as one long expanded form - expanding one is purely a UI toggle,
   // it doesn't affect what's in `practitioners` or what gets saved.
@@ -2284,6 +2290,7 @@ function SettingsScreen() {
                           <button
                             type="button"
                             onClick={() => removePractitioner(p.id)}
+                            aria-label={`Remove ${p.name || `practitioner #${i + 1}`}`}
                             className="text-muted-foreground hover:text-destructive transition-colors flex-shrink-0"
                           >
                             <X size={13} />
@@ -2302,7 +2309,7 @@ function SettingsScreen() {
                           <button type="button" onClick={() => setExpandedPractitionerId(null)} className="text-[10px] font-medium text-muted-foreground hover:text-foreground transition-colors">
                             Collapse
                           </button>
-                          <button type="button" onClick={() => removePractitioner(p.id)} className="text-muted-foreground hover:text-destructive transition-colors">
+                          <button type="button" onClick={() => removePractitioner(p.id)} aria-label={`Remove ${p.name || `practitioner #${i + 1}`}`} className="text-muted-foreground hover:text-destructive transition-colors">
                             <X size={13} />
                           </button>
                         </div>
@@ -2344,7 +2351,7 @@ function SettingsScreen() {
                                 <input value={t.keywords ?? ""} onChange={e => updateAppointmentTypeField(p.id, t.id, 'keywords', e.target.value)} placeholder="Service keywords (e.g. chiro, chiropractor, adjustment)" className="w-full bg-input-background border border-border rounded-md px-3 py-1.5 text-[10px] text-foreground focus:outline-none focus:ring-1 focus:ring-ring text-muted-foreground" />
                               </div>
                               {types.length > 1 && (
-                                <button type="button" onClick={() => removeAppointmentType(p.id, t.id)} className="text-muted-foreground hover:text-destructive transition-colors shrink-0 mt-1.5">
+                                <button type="button" onClick={() => removeAppointmentType(p.id, t.id)} aria-label={`Remove service type ${t.service_name || `#${ti + 1}`}`} className="text-muted-foreground hover:text-destructive transition-colors shrink-0 mt-1.5">
                                   <X size={12} />
                                 </button>
                               )}
@@ -2365,7 +2372,7 @@ function SettingsScreen() {
                                       ))}
                                     </div>
                                     {(t.duration_categories ?? []).length > 1 && (
-                                      <button type="button" onClick={() => removeDurationCategory(p.id, t.id, c.id)} className="text-muted-foreground hover:text-destructive transition-colors ml-auto">
+                                      <button type="button" onClick={() => removeDurationCategory(p.id, t.id, c.id)} aria-label={`Remove duration category ${c.label || ""}`} className="text-muted-foreground hover:text-destructive transition-colors ml-auto">
                                         <X size={10} />
                                       </button>
                                     )}
@@ -2506,17 +2513,31 @@ function SettingsScreen() {
                     className="w-full bg-input-background border border-border rounded-md pl-8 pr-3 py-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
                   />
                 </div>
+                <div className="flex items-center gap-1.5 flex-wrap">
+                  {["All", ...FAQ_CATEGORIES].map(cat => (
+                    <button
+                      key={cat}
+                      type="button"
+                      onClick={() => setFaqCategoryFilter(cat)}
+                      className={`text-[10px] font-medium px-2.5 py-1 rounded-full border transition-colors ${faqCategoryFilter === cat ? "bg-primary text-white border-primary" : "border-border text-muted-foreground hover:bg-muted"}`}
+                    >
+                      {cat}
+                    </button>
+                  ))}
+                </div>
                 {faqs.filter(f =>
-                  !faqSearch.trim() ||
-                  f.question.toLowerCase().includes(faqSearch.trim().toLowerCase()) ||
-                  f.answer.toLowerCase().includes(faqSearch.trim().toLowerCase())
+                  (!faqSearch.trim() ||
+                    f.question.toLowerCase().includes(faqSearch.trim().toLowerCase()) ||
+                    f.answer.toLowerCase().includes(faqSearch.trim().toLowerCase())) &&
+                  (faqCategoryFilter === "All" || (f.category ?? "General") === faqCategoryFilter)
                 ).length === 0 && (
-                  <p className="text-xs text-muted-foreground text-center py-6">No FAQs match "{faqSearch}".</p>
+                  <p className="text-xs text-muted-foreground text-center py-6">No FAQs match this search/category.</p>
                 )}
                 {faqs.filter(f =>
-                  !faqSearch.trim() ||
-                  f.question.toLowerCase().includes(faqSearch.trim().toLowerCase()) ||
-                  f.answer.toLowerCase().includes(faqSearch.trim().toLowerCase())
+                  (!faqSearch.trim() ||
+                    f.question.toLowerCase().includes(faqSearch.trim().toLowerCase()) ||
+                    f.answer.toLowerCase().includes(faqSearch.trim().toLowerCase())) &&
+                  (faqCategoryFilter === "All" || (f.category ?? "General") === faqCategoryFilter)
                 ).map((faq) => {
                   const i = faqs.findIndex(f => f.id === faq.id);
                   const normalizedQ = faq.question.trim().toLowerCase();
@@ -2526,19 +2547,32 @@ function SettingsScreen() {
                     <div className="flex items-center justify-between">
                       <div className="flex items-center gap-2">
                         <span className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">FAQ #{i + 1}</span>
+                        <span className="text-[9px] font-medium text-muted-foreground bg-muted px-1.5 py-0.5 rounded">{faq.category ?? "General"}</span>
                         {isDuplicate && (
                           <span className="flex items-center gap-1 text-[9px] font-medium text-amber-700 bg-amber-50 px-1.5 py-0.5 rounded">
                             <AlertTriangle size={9} /> Duplicate question
                           </span>
                         )}
                       </div>
-                      <button type="button" onClick={() => setFaqs(prev => prev.filter(f => f.id !== faq.id))} className="text-muted-foreground hover:text-destructive transition-colors">
+                      <button type="button" onClick={() => setFaqs(prev => prev.filter(f => f.id !== faq.id))} aria-label="Remove FAQ" className="text-muted-foreground hover:text-destructive transition-colors">
                         <X size={13} />
                       </button>
                     </div>
-                    <div className="space-y-1.5">
-                      <label className="text-xs font-medium text-foreground">Question</label>
-                      <input value={faq.question} onChange={e => setFaqs(prev => prev.map(f => f.id === faq.id ? { ...f, question: e.target.value } : f))} placeholder="What are your clinic hours?" className="w-full bg-input-background border border-border rounded-md px-3 py-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring" />
+                    <div className="grid grid-cols-2 gap-3">
+                      <div className="col-span-2 space-y-1.5">
+                        <label className="text-xs font-medium text-foreground">Question</label>
+                        <input value={faq.question} onChange={e => setFaqs(prev => prev.map(f => f.id === faq.id ? { ...f, question: e.target.value } : f))} placeholder="What are your clinic hours?" className="w-full bg-input-background border border-border rounded-md px-3 py-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring" />
+                      </div>
+                      <div className="col-span-2 space-y-1.5">
+                        <label className="text-xs font-medium text-foreground">Category</label>
+                        <select
+                          value={faq.category ?? "General"}
+                          onChange={e => setFaqs(prev => prev.map(f => f.id === faq.id ? { ...f, category: e.target.value } : f))}
+                          className="w-full bg-input-background border border-border rounded-md px-3 py-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+                        >
+                          {FAQ_CATEGORIES.map(cat => <option key={cat} value={cat}>{cat}</option>)}
+                        </select>
+                      </div>
                     </div>
                     <div className="space-y-1.5">
                       <label className="text-xs font-medium text-foreground">Answer</label>
