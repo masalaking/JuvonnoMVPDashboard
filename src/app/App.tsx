@@ -410,6 +410,7 @@ function OverviewScreen() {
   // billing sheet - the Staff Action Queue is the only place they're actually
   // recorded, so derive those two counts from there instead of leaving them
   // blank when the data genuinely exists elsewhere.
+  const bookingCount = staffTasks.filter(t => String(t.type ?? "").toLowerCase().includes("book")).length;
   const cancellationCount = staffTasks.filter(t => String(t.type ?? "").toLowerCase().includes("cancel")).length;
   const rescheduleCount = staffTasks.filter(t => String(t.type ?? "").toLowerCase().includes("reschedul")).length;
 
@@ -444,7 +445,7 @@ function OverviewScreen() {
       {/* KPI Grid */}
       <div className="grid grid-cols-4 gap-4">
         <KpiCard label="Total Calls Handled" value={overview ? String(overview.totalCalls) : "—"} sub={overview?.billingPeriod ?? "This billing period"} icon={PhoneCall} color="purple" />
-        <KpiCard label="Bookings Created" value="—" sub="Via AI" icon={CheckCircle2} color="teal" />
+        <KpiCard label="Bookings Created" value={String(bookingCount)} sub="Via AI" icon={CheckCircle2} color="teal" />
         <KpiCard label="Missed Calls Recovered" value="—" sub="Converted to bookings" icon={RefreshCw} color="green" />
         <KpiCard label="Transfers to Staff" value="—" sub="Transfer rate" icon={ArrowUpRight} color="amber" />
         <KpiCard label="Appointment Lookups" value="—" sub="Existing patients" icon={Search} color="indigo" />
