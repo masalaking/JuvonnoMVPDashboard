@@ -94,7 +94,7 @@ type UsageInvoice = {
 // Adapts the Inbound Tracker n8n workflow's response shapes (see
 // "Build Calls Response" / "Build Transcripts Response" nodes) into this
 // dashboard's existing CallLog/Transcript types.
-function mapInboundCall(raw: Record<string, unknown>): CallLog {
+function mapInboundCall(raw: Record<string, unknown>, direction: "inbound" | "outbound" = "inbound"): CallLog {
   return {
     id: String(raw.call_id ?? raw.id ?? crypto.randomUUID()),
     time: String(raw.timestamp ?? raw.date ?? ""),
@@ -104,13 +104,13 @@ function mapInboundCall(raw: Record<string, unknown>): CallLog {
     sentiment: String(raw.sentiment ?? ""),
     duration: String(raw.durationDisplay ?? raw.duration_display ?? ""),
     staffAction: false,
-    direction: "inbound",
+    direction,
     recordingUrl: String(raw.recordingUrl ?? raw.recording_url ?? ""),
     summary: String(raw.summary ?? ""),
   };
 }
 
-function mapInboundTranscript(raw: Record<string, unknown>): Transcript {
+function mapInboundTranscript(raw: Record<string, unknown>, direction: "inbound" | "outbound" = "inbound"): Transcript {
   return {
     id: String(raw.call_id ?? raw.id ?? crypto.randomUUID()),
     time: String(raw.timestamp ?? raw.date ?? ""),
@@ -119,7 +119,7 @@ function mapInboundTranscript(raw: Record<string, unknown>): Transcript {
     sentiment: String(raw.sentiment ?? ""),
     duration: String(raw.durationDisplay ?? raw.duration_display ?? ""),
     preview: String(raw.summary ?? ""),
-    direction: "inbound",
+    direction,
     lines: Array.isArray(raw.transcript) ? raw.transcript as { speaker: string; text: string }[] : [],
   };
 }
@@ -1058,11 +1058,10 @@ function OutboundTranscriptsScreen() { return <TranscriptsScreen direction="outb
 const ANALYTICS_RANGE_LABELS = ["Hourly", "Daily", "Weekly", "2 Months", "3 Months", "6 Months", "Yearly", "All Time"];
 
 function AnalyticsScreen({ direction }: { direction: "inbound" | "outbound" }) {
-  // Inbound is wired to the real Inbound Tracker n8n workflow's analytics
-  // webhook, with its own range selector (matching Build Analytics Response's
-  // range param). Outbound has no tracker workflow yet, so it deliberately
-  // shows an empty state instead of quietly reusing inbound's numbers - the
-  // old version of this screen showed identical data for both directions.
+  // Each direction is wired to its own real n8n tracker workflow's analytics
+  // webhook (inbound/analytics or outbound/analytics), each with its own
+  // range selector (matching Build Analytics Response's range param). They
+  // are genuinely separate Google Sheets, so the numbers won't match.
   const { accessToken } = useDashboard();
   const [range, setRange] = useState(1);
   const [refreshTick, setRefreshTick] = useState(0);
@@ -1070,9 +1069,9 @@ function AnalyticsScreen({ direction }: { direction: "inbound" | "outbound" }) {
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
-    if (direction !== "inbound" || !accessToken) { setData([]); return; }
+    if (!accessToken) { setData([]); return; }
     setLoading(true);
-    fetch(`/api/link/${accessToken}/inbound/analytics?range=${range}`)
+    fetch(`/api/link/${accessToken}/${direction}/analytics?range=${range}`)
       .then(r => r.ok ? r.json() : [])
       .then(res => setData(Array.isArray(res) ? res : []))
       .catch(() => setData([]))
@@ -1092,15 +1091,13 @@ function AnalyticsScreen({ direction }: { direction: "inbound" | "outbound" }) {
           </h1>
           <p className="text-xs text-muted-foreground">{direction === "outbound" ? "Outbound call volume and trends over time." : "Inbound call volume and trends over time."}</p>
         </div>
-        {direction === "inbound" && (
-          <button
-            onClick={() => setRefreshTick(t => t + 1)}
-            disabled={loading}
-            className="flex items-center gap-2 bg-gradient-to-r from-violet-600 to-teal-500 text-white text-sm font-medium px-4 py-2 rounded-md hover:opacity-90 transition-opacity disabled:opacity-50"
-          >
-            <RefreshCw size={13} className={loading ? "animate-spin" : ""} /> Refresh
-          </button>
-        )}
+        <button
+          onClick={() => setRefreshTick(t => t + 1)}
+          disabled={loading}
+          className="flex items-center gap-2 bg-gradient-to-r from-violet-600 to-teal-500 text-white text-sm font-medium px-4 py-2 rounded-md hover:opacity-90 transition-opacity disabled:opacity-50"
+        >
+          <RefreshCw size={13} className={loading ? "animate-spin" : ""} /> Refresh
+        </button>
       </div>
 
       <Card className="p-5">
@@ -1112,16 +1109,13 @@ function AnalyticsScreen({ direction }: { direction: "inbound" | "outbound" }) {
           <select
             value={range}
             onChange={e => setRange(Number(e.target.value))}
-            disabled={direction === "outbound"}
             className="text-xs font-medium border border-border rounded-md px-2.5 py-1.5 bg-card disabled:opacity-50 focus:outline-none focus:ring-1 focus:ring-ring"
           >
             {ANALYTICS_RANGE_LABELS.map((l, i) => <option key={i} value={i}>{l}</option>)}
           </select>
         </div>
 
-        {direction === "outbound" ? (
-          <p className="text-xs text-muted-foreground text-center py-16">No outbound tracker connected yet.</p>
-        ) : data.length === 0 ? (
+        {data.length === 0 ? (
           <p className="text-xs text-muted-foreground text-center py-16">{loading ? "Loading…" : "No calls in this range."}</p>
         ) : (
           <div className="overflow-x-auto">
@@ -1142,9 +1136,9 @@ function AnalyticsScreen({ direction }: { direction: "inbound" | "outbound" }) {
       </Card>
 
       <div className="grid grid-cols-3 gap-4">
-        <KpiCard label="Total Calls (Range)" value={direction === "inbound" && data.length ? String(totalCalls) : "—"} icon={PhoneCall} color="purple" />
-        <KpiCard label="Total Minutes (Range)" value={direction === "inbound" && data.length ? `${totalMinutes.toFixed(1)}m` : "—"} icon={Clock} color="teal" />
-        <KpiCard label="Completed Calls" value={direction === "inbound" && data.length ? String(completedCalls) : "—"} icon={CheckCircle2} color="green" />
+        <KpiCard label="Total Calls (Range)" value={data.length ? String(totalCalls) : "—"} icon={PhoneCall} color="purple" />
+        <KpiCard label="Total Minutes (Range)" value={data.length ? `${totalMinutes.toFixed(1)}m` : "—"} icon={Clock} color="teal" />
+        <KpiCard label="Completed Calls" value={data.length ? String(completedCalls) : "—"} icon={CheckCircle2} color="green" />
       </div>
     </div>
   );
@@ -3724,16 +3718,20 @@ export default function App() {
       fetch(`/api/link/${accessToken}/inbound/analytics`).then(r => r.ok ? r.json() : []),
       fetch(`/api/link/${accessToken}/inbound/overview`).then(r => r.ok ? r.json() : null),
       fetch(`/api/link/${accessToken}/inbound/invoices`).then(r => r.ok ? r.json() : { invoices: [] }),
-      // No outbound tracker exists yet, so this 404s/502s until one is wired
-      // up - that's expected, and just leaves outboundOverview null.
       fetch(`/api/link/${accessToken}/outbound/overview`).then(r => r.ok ? r.json() : null).catch(() => null),
+      fetch(`/api/link/${accessToken}/outbound/calls`).then(r => r.ok ? r.json() : { calls: [] }).catch(() => ({ calls: [] })),
+      fetch(`/api/link/${accessToken}/outbound/transcripts`).then(r => r.ok ? r.json() : { transcripts: [] }).catch(() => ({ transcripts: [] })),
     ])
-      .then(([tenant, requests, savedSettings, callsRes, transcriptsRes, analyticsRes, overviewRes, invoicesRes, outboundOverviewRes]) => {
+      .then(([tenant, requests, savedSettings, callsRes, transcriptsRes, analyticsRes, overviewRes, invoicesRes, outboundOverviewRes, outboundCallsRes, outboundTranscriptsRes]) => {
         setTenantInfo(tenant);
         setStaffTasks(requests);
         setSettings(savedSettings ?? {});
-        setCallLogs(Array.isArray(callsRes?.calls) ? callsRes.calls.map(mapInboundCall) : []);
-        setTranscripts(Array.isArray(transcriptsRes?.transcripts) ? transcriptsRes.transcripts.map(mapInboundTranscript) : []);
+        const inboundCalls = Array.isArray(callsRes?.calls) ? callsRes.calls.map((c: Record<string, unknown>) => mapInboundCall(c, "inbound")) : [];
+        const outboundCalls = Array.isArray(outboundCallsRes?.calls) ? outboundCallsRes.calls.map((c: Record<string, unknown>) => mapInboundCall(c, "outbound")) : [];
+        setCallLogs([...inboundCalls, ...outboundCalls]);
+        const inboundTranscripts = Array.isArray(transcriptsRes?.transcripts) ? transcriptsRes.transcripts.map((t: Record<string, unknown>) => mapInboundTranscript(t, "inbound")) : [];
+        const outboundTranscripts = Array.isArray(outboundTranscriptsRes?.transcripts) ? outboundTranscriptsRes.transcripts.map((t: Record<string, unknown>) => mapInboundTranscript(t, "outbound")) : [];
+        setTranscripts([...inboundTranscripts, ...outboundTranscripts]);
         setAnalytics(Array.isArray(analyticsRes) ? analyticsRes : []);
         setOverview(overviewRes && !overviewRes.error ? overviewRes : null);
         setInvoices(Array.isArray(invoicesRes?.invoices) ? invoicesRes.invoices : []);
@@ -3769,10 +3767,20 @@ export default function App() {
         fetch(`/api/link/${accessToken}/inbound/overview`).then(r => r.ok ? r.json() : null),
         fetch(`/api/link/${accessToken}/inbound/invoices`).then(r => r.ok ? r.json() : null),
         fetch(`/api/link/${accessToken}/outbound/overview`).then(r => r.ok ? r.json() : null).catch(() => null),
+        fetch(`/api/link/${accessToken}/outbound/calls`).then(r => r.ok ? r.json() : null).catch(() => null),
+        fetch(`/api/link/${accessToken}/outbound/transcripts`).then(r => r.ok ? r.json() : null).catch(() => null),
       ])
-        .then(([callsRes, transcriptsRes, analyticsRes, overviewRes, invoicesRes, outboundOverviewRes]) => {
-          if (Array.isArray(callsRes?.calls)) setCallLogs(callsRes.calls.map(mapInboundCall));
-          if (Array.isArray(transcriptsRes?.transcripts)) setTranscripts(transcriptsRes.transcripts.map(mapInboundTranscript));
+        .then(([callsRes, transcriptsRes, analyticsRes, overviewRes, invoicesRes, outboundOverviewRes, outboundCallsRes, outboundTranscriptsRes]) => {
+          if (Array.isArray(callsRes?.calls) || Array.isArray(outboundCallsRes?.calls)) {
+            const inboundCalls = Array.isArray(callsRes?.calls) ? callsRes.calls.map((c: Record<string, unknown>) => mapInboundCall(c, "inbound")) : [];
+            const outboundCalls = Array.isArray(outboundCallsRes?.calls) ? outboundCallsRes.calls.map((c: Record<string, unknown>) => mapInboundCall(c, "outbound")) : [];
+            setCallLogs([...inboundCalls, ...outboundCalls]);
+          }
+          if (Array.isArray(transcriptsRes?.transcripts) || Array.isArray(outboundTranscriptsRes?.transcripts)) {
+            const inboundTranscripts = Array.isArray(transcriptsRes?.transcripts) ? transcriptsRes.transcripts.map((t: Record<string, unknown>) => mapInboundTranscript(t, "inbound")) : [];
+            const outboundTranscripts = Array.isArray(outboundTranscriptsRes?.transcripts) ? outboundTranscriptsRes.transcripts.map((t: Record<string, unknown>) => mapInboundTranscript(t, "outbound")) : [];
+            setTranscripts([...inboundTranscripts, ...outboundTranscripts]);
+          }
           if (Array.isArray(analyticsRes)) setAnalytics(analyticsRes);
           if (overviewRes && !overviewRes.error) setOverview(overviewRes);
           if (Array.isArray(invoicesRes?.invoices)) setInvoices(invoicesRes.invoices);

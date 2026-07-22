@@ -106,6 +106,29 @@ async function callInboundTracker(tenant, path, query = {}) {
   return json;
 }
 
+// The Outbound Tracker n8n workflow is a SEPARATE workflow from the inbound
+// one, with its own webhook prefix - for this tenant it's literally
+// "juvonno-outbound/<path>", not "<client_id>/outbound-<path>" under the
+// inbound prefix. Mirrors callInboundTracker's request/response handling,
+// just against `<client_id>-outbound/<path>` instead of `<client_id>/<path>`.
+async function callOutboundTracker(tenant, path, query = {}) {
+  const url = new URL(`${INBOUND_TRACKER_HOST}/${tenant.client_id}-outbound/${path.replace(/^\/+/, '')}`);
+  url.searchParams.set('tenantId', tenant.access_token);
+  for (const [key, value] of Object.entries(query)) {
+    if (value !== undefined && value !== null) url.searchParams.set(key, String(value));
+  }
+  const res = await fetch(url);
+  const text = await res.text();
+  let json;
+  try { json = text ? JSON.parse(text) : {}; } catch { json = { raw: text }; }
+  if (!res.ok) {
+    const err = new Error(json?.error ?? `n8n responded with ${res.status}`);
+    err.status = 502;
+    throw err;
+  }
+  return json;
+}
+
 // Wraps a route handler that talks to n8n so failures come back as a clean
 // 502 instead of an unhandled rejection / stack trace to the client.
 function n8nRoute(handler) {
@@ -509,15 +532,40 @@ app.get('/api/link/:accessToken/inbound/invoices', n8nRoute(async (req, res) => 
   res.json(await callInboundTracker(tenant, 'invoices'));
 }));
 
-// ── Outbound Tracker endpoint (placeholder) ─────────────────────────────────
-// Mirrors the inbound overview route above, but calling `<client_id>/outbound-overview`
-// instead of `<client_id>/overview`. No outbound n8n workflow exists yet - once
-// one is set up, just make sure its webhook path matches this, or update the
-// path string below to whatever it actually uses.
+// ── Outbound Tracker endpoints ───────────────────────────────────────────────
+// Proxies to the "Juvonno Outbound Tracker" n8n workflow's own GET webhooks
+// (<client_id>-outbound/overview, /analytics, /calls, /transcripts,
+// /invoices) - a separate workflow from the inbound one, with its own
+// Google Sheet, so these use callOutboundTracker rather than
+// callInboundTracker even though the response shapes are identical.
 app.get('/api/link/:accessToken/outbound/overview', n8nRoute(async (req, res) => {
   const tenant = findTenant(req.params.accessToken);
   if (!tenant) return res.status(404).json({ error: 'Invalid access token' });
-  res.json(await callInboundTracker(tenant, 'outbound-overview'));
+  res.json(await callOutboundTracker(tenant, 'overview'));
+}));
+
+app.get('/api/link/:accessToken/outbound/analytics', n8nRoute(async (req, res) => {
+  const tenant = findTenant(req.params.accessToken);
+  if (!tenant) return res.status(404).json({ error: 'Invalid access token' });
+  res.json(await callOutboundTracker(tenant, 'analytics', { range: req.query.range ?? 1 }));
+}));
+
+app.get('/api/link/:accessToken/outbound/calls', n8nRoute(async (req, res) => {
+  const tenant = findTenant(req.params.accessToken);
+  if (!tenant) return res.status(404).json({ error: 'Invalid access token' });
+  res.json(await callOutboundTracker(tenant, 'calls'));
+}));
+
+app.get('/api/link/:accessToken/outbound/transcripts', n8nRoute(async (req, res) => {
+  const tenant = findTenant(req.params.accessToken);
+  if (!tenant) return res.status(404).json({ error: 'Invalid access token' });
+  res.json(await callOutboundTracker(tenant, 'transcripts'));
+}));
+
+app.get('/api/link/:accessToken/outbound/invoices', n8nRoute(async (req, res) => {
+  const tenant = findTenant(req.params.accessToken);
+  if (!tenant) return res.status(404).json({ error: 'Invalid access token' });
+  res.json(await callOutboundTracker(tenant, 'invoices'));
 }));
 
 // Serve built frontend
