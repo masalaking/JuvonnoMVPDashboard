@@ -412,13 +412,26 @@ function TopBar() {
 // One KPI row (Minutes Used / Total Calls / Overage Cost / Avg Call Duration)
 // reused for both Inbound and Outbound, so adding outbound didn't mean
 // duplicating four cards' worth of JSX with a different variable name.
+// n8n overview responses can legitimately have some numeric fields missing
+// (partial data, an intermediate error shape, etc.) even when the object
+// itself isn't null - `undefined.toFixed()` throws, so every numeric field
+// read from one of these responses must be coerced through this first.
+function num(v: unknown): number {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : 0;
+}
+
 function OverviewKpiRow({ stats }: { stats: OverviewStats | null }) {
-  const pct = stats && stats.minutesIncluded > 0 ? Math.min(100, (stats.minutesUsed / stats.minutesIncluded) * 100) : 0;
+  const minutesUsed = num(stats?.minutesUsed);
+  const minutesIncluded = num(stats?.minutesIncluded);
+  const overageUSD = num(stats?.overageUSD);
+  const overageMinutes = num(stats?.overageMinutes);
+  const pct = minutesIncluded > 0 ? Math.min(100, (minutesUsed / minutesIncluded) * 100) : 0;
   return (
     <div className="grid grid-cols-4 gap-4">
-      <KpiCard label="Minutes Used" value={stats ? `${stats.minutesUsed.toFixed(2)} / ${stats.minutesIncluded}` : "—"} sub={stats ? `${pct.toFixed(2)}% of plan` : "—"} icon={Clock} color="amber" />
-      <KpiCard label="Total Calls" value={stats ? String(stats.totalCalls) : "—"} sub={stats?.billingPeriod ?? "—"} icon={PhoneCall} color="purple" />
-      <KpiCard label="Overage Cost" value={stats ? `$${stats.overageUSD.toFixed(2)}` : "—"} sub={stats ? `${stats.overageMinutes} min over` : "—"} icon={CreditCard} color={stats && stats.overageMinutes > 0 ? "red" : "green"} />
+      <KpiCard label="Minutes Used" value={stats ? `${minutesUsed.toFixed(2)} / ${minutesIncluded}` : "—"} sub={stats ? `${pct.toFixed(2)}% of plan` : "—"} icon={Clock} color="amber" />
+      <KpiCard label="Total Calls" value={stats ? String(num(stats.totalCalls)) : "—"} sub={stats?.billingPeriod ?? "—"} icon={PhoneCall} color="purple" />
+      <KpiCard label="Overage Cost" value={stats ? `$${overageUSD.toFixed(2)}` : "—"} sub={stats ? `${overageMinutes} min over` : "—"} icon={CreditCard} color={overageMinutes > 0 ? "red" : "green"} />
       <KpiCard label="Avg Call Duration" value={stats?.avgCallDisplay ?? "—"} sub="Per call" icon={Zap} color="teal" />
     </div>
   );
@@ -469,8 +482,8 @@ function OverviewScreen() {
           <div className="h-full bg-teal-500" style={{ width: `${outboundShare}%` }} />
         </div>
         <div className="flex items-center gap-4 mt-2 text-[11px] text-muted-foreground">
-          <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-primary" /> Inbound — {overview ? `${overview.minutesUsed.toFixed(2)} / ${overview.minutesIncluded}` : "—"} min</span>
-          <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-teal-500" /> Outbound — {outboundOverview ? `${outboundOverview.minutesUsed.toFixed(2)} / ${outboundOverview.minutesIncluded}` : "—"} min</span>
+          <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-primary" /> Inbound — {overview ? `${num(overview.minutesUsed).toFixed(2)} / ${num(overview.minutesIncluded)}` : "—"} min</span>
+          <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-teal-500" /> Outbound — {outboundOverview ? `${num(outboundOverview.minutesUsed).toFixed(2)} / ${num(outboundOverview.minutesIncluded)}` : "—"} min</span>
         </div>
       </Card>
 
@@ -2790,7 +2803,9 @@ function BillingScreen() {
   const { invoices } = useDashboard();
   // Build Invoices Response already sorts newest period first.
   const latest = invoices[0] ?? null;
-  const billingPct = latest ? Math.min(100, (latest.minutesUsed / latest.includedMinutes) * 100) : 0;
+  const latestMinutesUsed = num(latest?.minutesUsed);
+  const latestIncludedMinutes = num(latest?.includedMinutes);
+  const billingPct = latestIncludedMinutes > 0 ? Math.min(100, (latestMinutesUsed / latestIncludedMinutes) * 100) : 0;
 
   return (
     <div className="p-6 space-y-6">
@@ -2805,9 +2820,9 @@ function BillingScreen() {
       </div>
 
       <div className="grid grid-cols-4 gap-4">
-        <KpiCard label="Current Plan" value={latest ? `$${latest.baseRate.toFixed(0)}/mo` : "—"} sub={latest ? `${latest.includedMinutes.toLocaleString()} min included` : "—"} icon={Star} color="purple" />
-        <KpiCard label="Minutes Used" value={latest ? `${latest.minutesUsed} / ${latest.includedMinutes}` : "—"} sub="of plan included" icon={Clock} color="amber" />
-        <KpiCard label="Est. Overage" value={latest ? `$${latest.overageCost.toFixed(2)}` : "—"} sub={latest ? `${latest.overageMin} min over` : "vs plan limits"} icon={CreditCard} color={latest?.isOverage ? "red" : "green"} />
+        <KpiCard label="Current Plan" value={latest ? `$${num(latest.baseRate).toFixed(0)}/mo` : "—"} sub={latest ? `${latestIncludedMinutes.toLocaleString()} min included` : "—"} icon={Star} color="purple" />
+        <KpiCard label="Minutes Used" value={latest ? `${latestMinutesUsed} / ${latestIncludedMinutes}` : "—"} sub="of plan included" icon={Clock} color="amber" />
+        <KpiCard label="Est. Overage" value={latest ? `$${num(latest.overageCost).toFixed(2)}` : "—"} sub={latest ? `${num(latest.overageMin)} min over` : "vs plan limits"} icon={CreditCard} color={latest?.isOverage ? "red" : "green"} />
         <KpiCard label="Latest Invoice" value={latest?.amount ?? "—"} sub={latest ? (latest.paid ? "Paid" : latest.status) : "Current cycle"} icon={CreditCard} color="purple" />
       </div>
 
@@ -2847,22 +2862,22 @@ function BillingScreen() {
             <div>
               <div className="flex justify-between text-xs mb-1.5">
                 <span className="text-muted-foreground">AI Minutes Used</span>
-                <span className="font-semibold text-foreground font-mono">{latest ? `${latest.minutesUsed} / ${latest.includedMinutes}` : "—"}</span>
+                <span className="font-semibold text-foreground font-mono">{latest ? `${latestMinutesUsed} / ${latestIncludedMinutes}` : "—"}</span>
               </div>
               <div className="h-2.5 bg-muted rounded-full overflow-hidden">
                 <div className="h-full bg-amber-400 rounded-full" style={{ width: `${billingPct}%` }} />
               </div>
               {latest && billingPct >= 80 && (
                 <p className="text-[10px] text-amber-600 mt-1 font-medium">
-                  ⚠ {latest.isOverage ? "Over plan limit." : "Approaching plan limit."} {Math.max(0, latest.includedMinutes - latest.minutesUsed)} minutes remaining.
+                  ⚠ {latest.isOverage ? "Over plan limit." : "Approaching plan limit."} {Math.max(0, latestIncludedMinutes - latestMinutesUsed)} minutes remaining.
                 </p>
               )}
             </div>
             <div className="pt-2 space-y-2 text-xs">
               {[
-                ["Included Minutes", latest ? `${latest.includedMinutes.toLocaleString()}/mo` : "—"],
-                ["Overage Rate", latest ? `$${latest.overageRate.toFixed(2)}/min` : "—"],
-                ["Overage Minutes", latest ? String(latest.overageMin) : "—"],
+                ["Included Minutes", latest ? `${latestIncludedMinutes.toLocaleString()}/mo` : "—"],
+                ["Overage Rate", latest ? `$${num(latest.overageRate).toFixed(2)}/min` : "—"],
+                ["Overage Minutes", latest ? String(num(latest.overageMin)) : "—"],
                 ["Invoice Status", latest ? (latest.paid ? "Paid" : latest.status) : "—"],
                 ["Generated", latest?.date || "—"],
                 ["Due Date", latest?.dueDate || "—"],
