@@ -271,6 +271,7 @@ const navItems = [
   { id: "staff-queue", label: "Staff Action Queue", icon: ClipboardList, group: "Inbound" },
   { id: "settings", label: "Settings", icon: Settings, group: "Inbound" },
 
+  { id: "outbound-make-call", label: "Make a Call", icon: PhoneOutgoing, group: "Outbound" },
   { id: "outbound-call-logs", label: "Call Logs", icon: PhoneCall, group: "Outbound" },
   { id: "outbound-transcripts", label: "Transcripts", icon: FileText, group: "Outbound" },
   { id: "outbound-recordings", label: "Recordings", icon: Mic, group: "Outbound" },
@@ -1159,6 +1160,225 @@ function AnalyticsScreen({ direction }: { direction: "inbound" | "outbound" }) {
 
 function InboundAnalyticsScreen() { return <AnalyticsScreen direction="inbound" />; }
 function OutboundAnalyticsScreen() { return <AnalyticsScreen direction="outbound" />; }
+
+// ── Screen: Make a Call ───────────────────────────────────────────────────────
+interface CsvContact { phoneNumber: string; firstName: string; lastName: string; row: number; valid: boolean; reason?: string; }
+
+const REQUIRED_CSV_HEADERS = "phone_number, patient_first_name, patient_last_name";
+
+// Same E.164 check the n8n workflow itself enforces - validating here first
+// means a bad CSV gets caught before the batch call ever fires, not after.
+function isE164(phone: string): boolean {
+  return /^\+[1-9]\d{6,14}$/.test(phone);
+}
+
+function csvSplit(line: string): string[] {
+  return line.split(",").map(c => c.trim().replace(/^"|"$/g, ""));
+}
+
+// Header-name aware, not positional - matches by column NAME (aliasing the
+// n8n workflow's own accepted field names) so column order in the CSV
+// doesn't matter, only that phone/first/last name columns exist somewhere.
+function parseContactsCsv(text: string): CsvContact[] {
+  const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+  if (lines.length === 0) return [];
+
+  const headerCols = csvSplit(lines[0]).map(h => h.toLowerCase().replace(/[\s_]+/g, ""));
+  const findCol = (...aliases: string[]) => headerCols.findIndex(h => aliases.includes(h));
+  const phoneIdx = findCol("phonenumber", "phone", "number");
+  const firstIdx = findCol("patientfirstname", "firstname", "first");
+  const lastIdx = findCol("patientlastname", "lastname", "last");
+  const hasHeader = phoneIdx !== -1 || firstIdx !== -1 || lastIdx !== -1;
+  const rows = hasHeader ? lines.slice(1) : lines;
+
+  return rows.map((line, i) => {
+    const cols = csvSplit(line);
+    const phoneNumber = (hasHeader && phoneIdx !== -1 ? cols[phoneIdx] : cols[0] ?? "").replace(/[\s().-]/g, "");
+    const firstName = (hasHeader && firstIdx !== -1 ? cols[firstIdx] : cols[1]) ?? "";
+    const lastName = (hasHeader && lastIdx !== -1 ? cols[lastIdx] : cols[2]) ?? "";
+    const row = i + 1;
+    if (!phoneNumber) return { phoneNumber, firstName, lastName, row, valid: false, reason: "Missing phone number" };
+    if (!isE164(phoneNumber)) return { phoneNumber, firstName, lastName, row, valid: false, reason: "Not E.164 (e.g. +14165551234)" };
+    return { phoneNumber, firstName, lastName, row, valid: true };
+  });
+}
+
+function MakeCallScreen() {
+  const { accessToken } = useDashboard();
+  const [contacts, setContacts] = useState<CsvContact[]>([]);
+  const [fileName, setFileName] = useState("");
+  const [batchName, setBatchName] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [result, setResult] = useState<{ ok: boolean; message: string } | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const validContacts = contacts.filter(c => c.valid);
+  const invalidContacts = contacts.filter(c => !c.valid);
+
+  function reset() {
+    setContacts([]);
+    setFileName("");
+    setBatchName("");
+    setResult(null);
+  }
+
+  function handleFile(file: File) {
+    setFileName(file.name);
+    setResult(null);
+    const reader = new FileReader();
+    reader.onload = () => setContacts(parseContactsCsv(String(reader.result ?? "")));
+    reader.readAsText(file);
+  }
+
+  async function startBatchCall() {
+    if (!accessToken || validContacts.length === 0) return;
+    setSubmitting(true);
+    setResult(null);
+    try {
+      const res = await fetch(`/api/link/${accessToken}/outbound/make-call`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: batchName || undefined,
+          contacts: validContacts.map(c => ({ phoneNumber: c.phoneNumber, firstName: c.firstName, lastName: c.lastName })),
+        }),
+      });
+      const json = await res.json().catch(() => ({}));
+      if (res.ok && json.success !== false) {
+        setResult({ ok: true, message: `Batch call started for ${validContacts.length} contact${validContacts.length === 1 ? "" : "s"}.` });
+        setContacts([]);
+        setFileName("");
+      } else {
+        setResult({ ok: false, message: json.error || "Failed to start batch call." });
+      }
+    } catch {
+      setResult({ ok: false, message: "Could not reach the outbound workflow. Please try again." });
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <div className="p-6 space-y-5">
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-lg font-semibold bg-gradient-to-r from-violet-600 to-teal-500 bg-clip-text text-transparent">Make a Call</h1>
+          <p className="text-xs text-muted-foreground mt-0.5">Upload a contact list and launch an outbound campaign via Retell AI.</p>
+        </div>
+        <button
+          onClick={reset}
+          className="flex items-center gap-2 bg-gradient-to-r from-violet-600 to-teal-500 text-white text-sm font-medium px-4 py-2 rounded-md hover:opacity-90 transition-opacity"
+        >
+          <RefreshCw size={13} /> Refresh
+        </button>
+      </div>
+
+      <span className="inline-flex items-center px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wide text-white bg-gradient-to-r from-violet-600 to-teal-500">
+        Outbound
+      </span>
+
+      <div className="grid grid-cols-3 gap-4">
+        <KpiCard label="Contacts Ready" value={String(validContacts.length)} sub="Valid rows from CSV" icon={PhoneOutgoing} color="teal" />
+        <KpiCard label="Rows With Issues" value={String(invalidContacts.length)} sub="Need cleanup before submission" icon={FileText} color={invalidContacts.length > 0 ? "amber" : "purple"} />
+        <Card className="p-4 flex flex-col gap-1.5">
+          <div className="flex items-start justify-between">
+            <span className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Retell Status</span>
+            <span className="p-1.5 rounded-md bg-violet-50 text-violet-600"><Zap size={14} /></span>
+          </div>
+          <p className="text-lg font-semibold text-foreground">Ready</p>
+          <span className="inline-flex items-center w-fit text-[10px] font-medium text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-0.5 mt-0.5">n8n → Retell AI</span>
+        </Card>
+      </div>
+
+      <div className="grid grid-cols-2 gap-4 items-start">
+        <Card className="p-5 space-y-4">
+          <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">CSV Upload</p>
+          <div
+            onClick={() => fileInputRef.current?.click()}
+            onDragOver={e => e.preventDefault()}
+            onDrop={e => { e.preventDefault(); const f = e.dataTransfer.files?.[0]; if (f) handleFile(f); }}
+            className="border-2 border-dashed border-border rounded-lg p-8 flex flex-col items-center justify-center gap-2 text-center cursor-pointer hover:bg-muted/30 transition-colors"
+          >
+            <UploadCloud size={22} className="text-muted-foreground/50" />
+            <p className="text-sm font-semibold text-foreground">{fileName || "Drop CSV here or browse"}</p>
+            <p className="text-[10px] text-muted-foreground">Required headers: {REQUIRED_CSV_HEADERS}</p>
+            <input ref={fileInputRef} type="file" accept=".csv" className="hidden" onChange={e => { const f = e.target.files?.[0]; if (f) handleFile(f); }} />
+          </div>
+
+          <div className="space-y-1.5">
+            <label className="text-xs font-medium text-foreground">Batch Name (optional)</label>
+            <input value={batchName} onChange={e => setBatchName(e.target.value)} placeholder="e.g. Reminder calls - July" className="w-full bg-input-background border border-border rounded-md px-3 py-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring" />
+          </div>
+
+          <div>
+            <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide mb-1.5">Validation</p>
+            {contacts.length === 0 ? (
+              <p className="text-xs text-muted-foreground bg-muted/40 border border-border rounded-md p-3">Upload a CSV to validate contacts.</p>
+            ) : (
+              <div className="flex items-center gap-3 text-xs bg-muted/40 border border-border rounded-md p-3">
+                <span className="flex items-center gap-1 text-emerald-600 font-medium"><CheckCircle2 size={12} /> {validContacts.length} valid</span>
+                {invalidContacts.length > 0 && (
+                  <span className="flex items-center gap-1 text-destructive font-medium"><AlertTriangle size={12} /> {invalidContacts.length} invalid</span>
+                )}
+              </div>
+            )}
+          </div>
+
+          {result && (
+            <p className={`text-xs rounded-md p-3 border ${result.ok ? "bg-emerald-50 border-emerald-200 text-emerald-700" : "bg-red-50 border-red-200 text-destructive"}`}>
+              {result.message}
+            </p>
+          )}
+
+          <button
+            type="button"
+            onClick={startBatchCall}
+            disabled={submitting || validContacts.length === 0}
+            className="w-full flex items-center justify-center gap-2 bg-primary text-primary-foreground text-xs font-semibold px-4 py-2.5 rounded-md hover:opacity-90 disabled:opacity-50 disabled:bg-muted disabled:text-muted-foreground transition-colors"
+          >
+            <PhoneOutgoing size={13} />
+            {submitting ? "Starting batch call…" : validContacts.length === 0 ? "Upload contacts first" : `Start Batch Call (${validContacts.length})`}
+          </button>
+        </Card>
+
+        <Card className="overflow-hidden">
+          <div className="px-4 py-3 border-b border-border flex items-center justify-between">
+            <div>
+              <h3 className="text-sm font-semibold text-foreground">Contact Preview</h3>
+              <p className="text-[10px] text-muted-foreground mt-0.5">Valid contacts from the uploaded CSV</p>
+            </div>
+            <span className="text-[10px] font-medium text-muted-foreground bg-muted px-2 py-1 rounded-full">{validContacts.length} contact{validContacts.length === 1 ? "" : "s"}</span>
+          </div>
+          {validContacts.length === 0 ? (
+            <p className="text-xs text-muted-foreground py-14 text-center">No valid contacts to preview yet.</p>
+          ) : (
+            <div className="max-h-96 overflow-y-auto">
+              <table className="w-full text-xs">
+                <thead>
+                  <tr className="border-b border-border bg-muted/40 sticky top-0">
+                    {["Phone Number", "First Name", "Last Name", "Row"].map(h => (
+                      <th key={h} className="text-left px-4 py-2 text-muted-foreground font-medium">{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {validContacts.map((c) => (
+                    <tr key={c.row} className="border-b border-border last:border-0 hover:bg-muted/30 transition-colors">
+                      <td className="px-4 py-2 font-mono text-foreground">{c.phoneNumber}</td>
+                      <td className="px-4 py-2 text-foreground">{c.firstName || "—"}</td>
+                      <td className="px-4 py-2 text-foreground">{c.lastName || "—"}</td>
+                      <td className="px-4 py-2 font-mono text-muted-foreground">{c.row}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </Card>
+      </div>
+    </div>
+  );
+}
 
 // ── Screen: Trends ────────────────────────────────────────────────────────────
 function TrendsScreen() {
@@ -3694,6 +3914,7 @@ const SCREENS: Record<string, React.FC> = {
   "analytics": InboundAnalyticsScreen,
   "staff-queue": StaffQueueScreen,
   "settings": SettingsScreen,
+  "outbound-make-call": MakeCallScreen,
   "outbound-call-logs": OutboundCallLogsScreen,
   "outbound-transcripts": OutboundTranscriptsScreen,
   "outbound-recordings": OutboundRecordingsScreen,

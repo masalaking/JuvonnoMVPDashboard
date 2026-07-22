@@ -129,6 +129,24 @@ async function callOutboundTracker(tenant, path, query = {}) {
   return json;
 }
 
+// POST variant for outbound-tracker-prefixed webhooks that take a body
+// instead of query params (e.g. the "Make a Call" batch-call trigger).
+// Passes through n8n's response body AND status code, since that workflow
+// deliberately responds 400 with { success:false, invalidRows } on bad
+// input rather than a generic 502 - the caller needs to see that shape.
+async function postToOutboundTracker(tenant, path, body) {
+  const url = `${INBOUND_TRACKER_HOST}/${tenant.client_id}-outbound/${path.replace(/^\/+/, '')}`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const text = await res.text();
+  let json;
+  try { json = text ? JSON.parse(text) : {}; } catch { json = { raw: text }; }
+  return { status: res.status, json };
+}
+
 // Wraps a route handler that talks to n8n so failures come back as a clean
 // 502 instead of an unhandled rejection / stack trace to the client.
 function n8nRoute(handler) {
@@ -566,6 +584,18 @@ app.get('/api/link/:accessToken/outbound/invoices', n8nRoute(async (req, res) =>
   const tenant = findTenant(req.params.accessToken);
   if (!tenant) return res.status(404).json({ error: 'Invalid access token' });
   res.json(await callOutboundTracker(tenant, 'invoices'));
+}));
+
+// Triggers the "Make a Call" batch-call workflow - body: { contacts: [{phoneNumber, firstName, lastName}, ...], name?: string }
+app.post('/api/link/:accessToken/outbound/make-call', n8nRoute(async (req, res) => {
+  const tenant = findTenant(req.params.accessToken);
+  if (!tenant) return res.status(404).json({ error: 'Invalid access token' });
+  const { contacts, name } = req.body ?? {};
+  if (!Array.isArray(contacts) || contacts.length === 0) {
+    return res.status(400).json({ success: false, error: 'contacts must be a non-empty array' });
+  }
+  const { status, json } = await postToOutboundTracker(tenant, 'make-call', { contacts, name });
+  res.status(status).json(json);
 }));
 
 // Serve built frontend
