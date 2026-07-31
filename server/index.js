@@ -497,6 +497,80 @@ app.post('/api/link/:accessToken/billing/tasks/:taskId/cancel', n8nRoute(async (
   res.json(await callN8n(tenant, 'billing.task.cancel', { task_id: req.params.taskId }));
 }));
 
+// ── Payment Recovery (AI-call based) ────────────────────────────────────────
+// Separate from the `billing.*` endpoints above, which are the older
+// SMS/email-reminder model. This is the AI-outbound-call recovery workflow
+// (JUVONNO_PAYMENT_RECOVERY_DASHBOARD spec): Day-3 payment request -> Day-7/14
+// Retell call queue -> staff approval -> dispatch -> outcome -> reconciliation.
+// Same proxy pattern as callN8n - the n8n workflow just needs to listen for
+// these exact event names on the tenant's n8n_webhook_url.
+app.get('/api/link/:accessToken/recovery/overview', n8nRoute(async (req, res) => {
+  const tenant = findTenant(req.params.accessToken);
+  if (!tenant) return res.status(404).json({ error: 'Invalid access token' });
+  res.json(await callN8n(tenant, 'recovery.get_overview'));
+}));
+
+app.get('/api/link/:accessToken/recovery/invoices', n8nRoute(async (req, res) => {
+  const tenant = findTenant(req.params.accessToken);
+  if (!tenant) return res.status(404).json({ error: 'Invalid access token' });
+  res.json(await callN8n(tenant, 'recovery.get_invoices'));
+}));
+
+app.get('/api/link/:accessToken/recovery/queue', n8nRoute(async (req, res) => {
+  const tenant = findTenant(req.params.accessToken);
+  if (!tenant) return res.status(404).json({ error: 'Invalid access token' });
+  res.json(await callN8n(tenant, 'recovery.get_queue'));
+}));
+
+app.get('/api/link/:accessToken/recovery/calls', n8nRoute(async (req, res) => {
+  const tenant = findTenant(req.params.accessToken);
+  if (!tenant) return res.status(404).json({ error: 'Invalid access token' });
+  res.json(await callN8n(tenant, 'recovery.get_calls'));
+}));
+
+app.get('/api/link/:accessToken/recovery/activity', n8nRoute(async (req, res) => {
+  const tenant = findTenant(req.params.accessToken);
+  if (!tenant) return res.status(404).json({ error: 'Invalid access token' });
+  res.json(await callN8n(tenant, 'recovery.get_activity'));
+}));
+
+app.get('/api/link/:accessToken/recovery/settings', n8nRoute(async (req, res) => {
+  const tenant = findTenant(req.params.accessToken);
+  if (!tenant) return res.status(404).json({ error: 'Invalid access token' });
+  res.json(await callN8n(tenant, 'recovery.get_settings'));
+}));
+
+app.post('/api/link/:accessToken/recovery/settings', n8nRoute(async (req, res) => {
+  const tenant = findTenant(req.params.accessToken);
+  if (!tenant) return res.status(404).json({ error: 'Invalid access token' });
+  res.json(await callN8n(tenant, 'recovery.settings_changed', { settings: req.body }));
+}));
+
+app.post('/api/link/:accessToken/recovery/queue/approve', n8nRoute(async (req, res) => {
+  const tenant = findTenant(req.params.accessToken);
+  if (!tenant) return res.status(404).json({ error: 'Invalid access token' });
+  res.json(await callN8n(tenant, 'recovery.queue.approve', { queue_ids: req.body?.queueIds ?? [] }));
+}));
+
+app.post('/api/link/:accessToken/recovery/queue/reject', n8nRoute(async (req, res) => {
+  const tenant = findTenant(req.params.accessToken);
+  if (!tenant) return res.status(404).json({ error: 'Invalid access token' });
+  res.json(await callN8n(tenant, 'recovery.queue.reject', { queue_ids: req.body?.queueIds ?? [], reason: req.body?.reason }));
+}));
+
+function recoveryInvoiceAction(event) {
+  return n8nRoute(async (req, res) => {
+    const tenant = findTenant(req.params.accessToken);
+    if (!tenant) return res.status(404).json({ error: 'Invalid access token' });
+    res.json(await callN8n(tenant, event, { invoice_id: req.params.invoiceId, reason: req.body?.reason }));
+  });
+}
+
+app.post('/api/link/:accessToken/recovery/invoices/:invoiceId/hold', recoveryInvoiceAction('recovery.invoice.hold'));
+app.post('/api/link/:accessToken/recovery/invoices/:invoiceId/resume', recoveryInvoiceAction('recovery.invoice.resume'));
+app.post('/api/link/:accessToken/recovery/invoices/:invoiceId/reconcile', recoveryInvoiceAction('recovery.invoice.reconcile'));
+app.post('/api/link/:accessToken/recovery/invoices/:invoiceId/escalate', recoveryInvoiceAction('recovery.invoice.escalate'));
+
 app.post('/api/link/:accessToken/billing/tasks/:taskId/reschedule', n8nRoute(async (req, res) => {
   const tenant = findTenant(req.params.accessToken);
   if (!tenant) return res.status(404).json({ error: 'Invalid access token' });

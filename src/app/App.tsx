@@ -3116,90 +3116,154 @@ function BillingScreen() {
 }
 
 // ── Payment Recovery ─────────────────────────────────────────────────────────
-type RecoveryStatus =
-  | "new" | "sms_reminder_1_sent" | "email_reminder_1_sent"
-  | "sms_reminder_2_sent" | "email_reminder_2_sent" | "payment_link_sent"
-  | "paid" | "staff_escalation_required" | "manual_hold" | "failed";
+// AI-outbound-call recovery (Retell), per the Payment Recovery spec. Reads
+// and writes via /api/link/:accessToken/recovery/* (server/index.js), which
+// proxies to the tenant's n8n_webhook_url using recovery.get_* / recovery.*
+// event names. Field readers below accept BOTH the spec's camelCase contract
+// and snake_case (Google-Sheets-column style) since the exact response shape
+// depends on how that n8n workflow ends up serializing its Sheets columns.
+function pick(obj: any, ...keys: string[]): unknown {
+  if (!obj) return undefined;
+  for (const k of keys) if (obj[k] !== undefined && obj[k] !== null && obj[k] !== "") return obj[k];
+  return undefined;
+}
+function pickText(obj: any, ...keys: string[]): string { return safeText(pick(obj, ...keys)); }
+function pickNum(obj: any, ...keys: string[]): number { return num(pick(obj, ...keys)); }
+function pickBool(obj: any, ...keys: string[]): boolean { return parseBoolean(pick(obj, ...keys)); }
 
-interface PRInvoice {
-  invoice_id: string; invoice_number: string; clinic_id: string;
-  patient_name: string; patient_phone: string; patient_email: string;
-  amount_due: number; original_amount?: number; recovered_amount?: number;
-  due_date: string; status: RecoveryStatus;
-  last_reminder_at?: string; next_reminder_at?: string;
-  last_updated: string; attempt_count: number;
-  last_synced_at?: string;
+type RInvoiceStatus = "unpaid" | "paid" | "manual_hold" | "staff_attention" | "failed" | string;
+type RStage = "new" | "day_3_payment_request" | "day_7_call" | "day_14_call" | "staff_escalation" | "recovered" | "closed" | string;
+type RApproval = "pending" | "approved" | "rejected" | string;
+type RQueueStatus = "configuration_required" | "pending" | "submitted" | "in_progress" | "completed" | "cancelled_paid" | "cancelled_hold" | "staff_followup_required" | "failed" | string;
+
+interface RInvoice {
+  invoiceId: string; invoiceNumber: string; patientName: string;
+  phoneMasked: string; emailMasked: string;
+  originalAmount: number; amountDue: number;
+  status: RInvoiceStatus; dueDate: string; daysOverdue: number;
+  stage: RStage; manualHold: boolean; optedOut: boolean;
+  recoveryEntryAmount: number; paidAt: string; lastVerifiedAt: string; lastUpdated: string;
 }
-interface PRTask {
-  task_id: string; invoice_id: string; invoice_number: string; patient_name: string;
-  reminder_type: string; scheduled_time: string;
-  status: "pending" | "completed" | "cancelled" | "failed";
-  attempt_count: number; failure_reason?: string;
+interface RQueueItem {
+  queueId: string; patientName: string; phoneMasked: string;
+  invoiceNumbers: string[]; amountDue: number; dueDate: string; daysOverdue: number;
+  callStage: string; scheduledFor: string;
+  approval: RApproval; queueStatus: RQueueStatus; attemptCount: number; blockers: string[];
 }
-interface PRComm {
-  comm_id: string; invoice_id: string; invoice_number: string; patient_name: string;
-  channel: "sms" | "email"; recipient: string; message: string; reminder_type?: string;
-  status: "queued" | "sent" | "delivered" | "failed"; timestamp: string;
+interface RCall {
+  id: string; patientName: string; timestamp: string; stage: string; outcome: string;
+  duration: string; balance: number; paidAfterward: boolean; staffFollowup: boolean;
+}
+interface RActivity { id: string; patientName: string; type: string; status: string; summary: string; timestamp: string; }
+interface RMetrics {
+  totalOutstanding: number; activeUnpaidInvoices: number;
+  recoveredRevenue: number; recoveredInvoices: number;
+  automatedContacts: number; staffHoursSaved: number; labourSavings: number; automationCost: number;
+  estimatedIncrementalRecovery: number | null; estimatedTotalSavings: number | null; roiPercent: number | null;
+  lastUpdated: string;
 }
 
-const STATUS_LABELS: Record<RecoveryStatus, string> = {
-  new: "New", sms_reminder_1_sent: "SMS 1 Sent", email_reminder_1_sent: "Email 1 Sent",
-  sms_reminder_2_sent: "SMS 2 Sent", email_reminder_2_sent: "Email 2 Sent",
-  payment_link_sent: "Payment Link Sent", paid: "Paid",
-  staff_escalation_required: "Staff Attention", manual_hold: "Paused", failed: "Failed",
-};
-const STATUS_COLORS: Record<RecoveryStatus, string> = {
-  new: "bg-blue-100 text-blue-700", sms_reminder_1_sent: "bg-blue-100 text-blue-700",
-  email_reminder_1_sent: "bg-blue-100 text-blue-700", sms_reminder_2_sent: "bg-indigo-100 text-indigo-700",
-  email_reminder_2_sent: "bg-indigo-100 text-indigo-700", payment_link_sent: "bg-violet-100 text-violet-700",
-  paid: "bg-emerald-100 text-emerald-700", staff_escalation_required: "bg-amber-100 text-amber-700",
-  manual_hold: "bg-slate-100 text-slate-600", failed: "bg-red-100 text-red-700",
-};
-function RecoveryBadge({ status }: { status: RecoveryStatus }) {
-  return <span className={`inline-flex items-center px-2 py-0.5 rounded text-[10px] font-medium ${STATUS_COLORS[status]}`}>{STATUS_LABELS[status]}</span>;
+function mapRInvoice(r: any): RInvoice {
+  return {
+    invoiceId: pickText(r, "invoiceId", "invoice_id"),
+    invoiceNumber: pickText(r, "invoiceNumber", "invoice_number"),
+    patientName: pickText(r, "patientDisplayName", "patient_name") || "Unknown",
+    phoneMasked: pickText(r, "patientPhoneMasked", "patient_phone_masked", "patient_phone"),
+    emailMasked: pickText(r, "patientEmailMasked", "patient_email_masked", "patient_email"),
+    originalAmount: pickNum(r, "originalAmount", "original_amount"),
+    amountDue: pickNum(r, "amountDue", "amount_due"),
+    status: pickText(r, "status") || "unpaid",
+    dueDate: pickText(r, "dueDate", "due_date"),
+    daysOverdue: pickNum(r, "daysOverdue", "days_overdue"),
+    stage: pickText(r, "recoveryStage", "recovery_stage") || "new",
+    manualHold: pickBool(r, "manualHold", "manual_hold"),
+    optedOut: pickBool(r, "optedOut", "opt_out"),
+    recoveryEntryAmount: pickNum(r, "recoveryProgramEntryAmount", "recovery_program_entry_amount"),
+    paidAt: pickText(r, "paidAt", "paid_at"),
+    lastVerifiedAt: pickText(r, "lastVerifiedAt", "last_verified_at"),
+    lastUpdated: pickText(r, "lastUpdated", "last_updated"),
+  };
+}
+function mapRQueueItem(r: any): RQueueItem {
+  const nums = pick(r, "invoiceNumbers", "invoice_numbers");
+  return {
+    queueId: pickText(r, "queueId", "queue_id"),
+    patientName: pickText(r, "patientDisplayName", "patient_name") || "Unknown",
+    phoneMasked: pickText(r, "patientPhoneMasked", "patient_phone_masked", "patient_phone"),
+    invoiceNumbers: Array.isArray(nums) ? nums.map(String) : pickText(r, "invoiceNumbers", "invoice_numbers").split(",").map(s => s.trim()).filter(Boolean),
+    amountDue: pickNum(r, "amountDue", "amount_due"),
+    dueDate: pickText(r, "dueDate", "due_date"),
+    daysOverdue: pickNum(r, "daysOverdue", "days_overdue"),
+    callStage: pickText(r, "callStage", "call_stage") || "day_7",
+    scheduledFor: pickText(r, "scheduledFor", "scheduled_for"),
+    approval: pickText(r, "approvalStatus", "approval_status") || "pending",
+    queueStatus: pickText(r, "queueStatus", "queue_status") || "pending",
+    attemptCount: pickNum(r, "attemptCount", "attempt_count"),
+    blockers: Array.isArray(r?.blockers) ? r.blockers.map(String) : [],
+  };
+}
+function mapRCall(r: any): RCall {
+  return {
+    id: pickText(r, "id", "callId", "call_id") || crypto.randomUUID(),
+    patientName: pickText(r, "patientDisplayName", "patient_name") || "Unknown",
+    timestamp: pickText(r, "timestamp", "callTimestamp", "call_timestamp"),
+    stage: pickText(r, "stage", "callStage", "call_stage"),
+    outcome: pickText(r, "outcome", "callOutcome", "call_outcome"),
+    duration: pickText(r, "duration", "callDurationDisplay", "call_duration_display"),
+    balance: pickNum(r, "amountDue", "amount_due", "balance"),
+    paidAfterward: pickBool(r, "paidAfterward", "paid_afterward"),
+    staffFollowup: pickBool(r, "staffFollowup", "staff_followup_required"),
+  };
+}
+function mapRActivity(r: any): RActivity {
+  return {
+    id: pickText(r, "id") || crypto.randomUUID(),
+    patientName: pickText(r, "patientDisplayName", "patient_name"),
+    type: pickText(r, "type"),
+    status: pickText(r, "status") || "info",
+    summary: pickText(r, "summary"),
+    timestamp: pickText(r, "timestamp"),
+  };
+}
+function mapRMetrics(r: any): RMetrics {
+  return {
+    totalOutstanding: pickNum(r, "totalOutstanding", "total_outstanding"),
+    activeUnpaidInvoices: pickNum(r, "activeUnpaidInvoices", "active_unpaid_invoices"),
+    recoveredRevenue: pickNum(r, "recoveredRevenue", "recovered_revenue"),
+    recoveredInvoices: pickNum(r, "recoveredInvoices", "recovered_invoices"),
+    automatedContacts: pickNum(r, "automatedContacts", "automated_contacts"),
+    staffHoursSaved: pickNum(r, "staffHoursSaved", "staff_hours_saved"),
+    labourSavings: pickNum(r, "labourSavings", "labour_savings"),
+    automationCost: pickNum(r, "automationCost", "automation_cost"),
+    estimatedIncrementalRecovery: pick(r, "estimatedIncrementalRecovery", "estimated_incremental_recovery") != null ? pickNum(r, "estimatedIncrementalRecovery", "estimated_incremental_recovery") : null,
+    estimatedTotalSavings: pick(r, "estimatedTotalSavings", "estimated_total_savings") != null ? pickNum(r, "estimatedTotalSavings", "estimated_total_savings") : null,
+    roiPercent: pick(r, "roiPercent", "roi_percent") != null ? pickNum(r, "roiPercent", "roi_percent") : null,
+    lastUpdated: pickText(r, "lastUpdated", "last_updated"),
+  };
 }
 
-// TODO: Replace with real data from GET /billing/invoices endpoint (connects to n8n workflow that syncs Juvonno invoices)
-const PR_INVOICES: PRInvoice[] = [
-  { invoice_id:"inv_001", invoice_number:"INV-1001", clinic_id:"juvonno", patient_name:"Sarah Mitchell", patient_phone:"+16045550101", patient_email:"sarah@example.com", amount_due:285.00, original_amount:285, due_date:"2026-06-15", status:"sms_reminder_1_sent", last_reminder_at:"2026-07-01T09:00:00Z", next_reminder_at:"2026-07-02T09:00:00Z", last_updated:"2026-07-01T09:00:00Z", attempt_count:1, last_synced_at:"2026-07-04T08:00:00Z" },
-  { invoice_id:"inv_002", invoice_number:"INV-1002", clinic_id:"juvonno", patient_name:"James Okafor", patient_phone:"+16045550102", patient_email:"james@example.com", amount_due:150.00, original_amount:150, due_date:"2026-06-20", status:"email_reminder_1_sent", last_reminder_at:"2026-07-02T10:00:00Z", next_reminder_at:"2026-07-05T09:00:00Z", last_updated:"2026-07-02T10:00:00Z", attempt_count:2, last_synced_at:"2026-07-04T08:00:00Z" },
-  { invoice_id:"inv_003", invoice_number:"INV-1003", clinic_id:"juvonno", patient_name:"Priya Sharma", patient_phone:"", patient_email:"priya@example.com", amount_due:420.50, original_amount:420.50, due_date:"2026-06-10", status:"staff_escalation_required", last_reminder_at:"2026-06-30T09:00:00Z", last_updated:"2026-07-01T08:00:00Z", attempt_count:4, last_synced_at:"2026-07-04T08:00:00Z" },
-  { invoice_id:"inv_004", invoice_number:"INV-1004", clinic_id:"juvonno", patient_name:"Tom Bellamy", patient_phone:"+16045550104", patient_email:"tom@example.com", amount_due:0, original_amount:95, recovered_amount:95, due_date:"2026-06-01", status:"paid", last_reminder_at:"2026-06-25T09:00:00Z", last_updated:"2026-07-03T14:22:00Z", attempt_count:2, last_synced_at:"2026-07-03T14:20:00Z" },
-  { invoice_id:"inv_005", invoice_number:"INV-1005", clinic_id:"juvonno", patient_name:"Rachel Ng", patient_phone:"+16045550105", patient_email:"rachel@example.com", amount_due:330.00, original_amount:330, due_date:"2026-06-28", status:"manual_hold", last_reminder_at:"2026-06-29T09:00:00Z", last_updated:"2026-07-01T11:00:00Z", attempt_count:1, last_synced_at:"2026-07-04T08:00:00Z" },
-  { invoice_id:"inv_006", invoice_number:"INV-1006", clinic_id:"juvonno", patient_name:"David Lam", patient_phone:"+16045550106", patient_email:"", amount_due:175.00, original_amount:175, due_date:"2026-07-01", status:"new", next_reminder_at:"2026-07-06T09:00:00Z", last_updated:"2026-07-04T00:00:00Z", attempt_count:0, last_synced_at:"2026-07-04T08:00:00Z" },
-  { invoice_id:"inv_007", invoice_number:"INV-1007", clinic_id:"juvonno", patient_name:"Anita Patel", patient_phone:"+16045550107", patient_email:"anita@example.com", amount_due:512.00, original_amount:512, due_date:"2026-06-05", status:"failed", last_reminder_at:"2026-07-01T09:00:00Z", last_updated:"2026-07-01T09:05:00Z", attempt_count:3, last_synced_at:"2026-07-04T08:00:00Z" },
-];
-// TODO: Replace with real data from GET /billing/tasks endpoint (n8n maintains reminder tasks in Google Sheets)
-const PR_TASKS: PRTask[] = [
-  { task_id:"task_001", invoice_id:"inv_001", invoice_number:"INV-1001", patient_name:"Sarah Mitchell", reminder_type:"email_reminder_1", scheduled_time:"2026-07-02T09:00:00Z", status:"pending", attempt_count:0 },
-  { task_id:"task_002", invoice_id:"inv_002", invoice_number:"INV-1002", patient_name:"James Okafor", reminder_type:"sms_reminder_2", scheduled_time:"2026-07-05T09:00:00Z", status:"pending", attempt_count:0 },
-  { task_id:"task_007", invoice_id:"inv_001", invoice_number:"INV-1001", patient_name:"Sarah Mitchell", reminder_type:"reconciliation_check", scheduled_time:"2026-07-08T09:00:00Z", status:"pending", attempt_count:0 },
-  { task_id:"task_003", invoice_id:"inv_003", invoice_number:"INV-1003", patient_name:"Priya Sharma", reminder_type:"staff_escalation", scheduled_time:"2026-07-01T08:00:00Z", status:"completed", attempt_count:1 },
-  { task_id:"task_004", invoice_id:"inv_004", invoice_number:"INV-1004", patient_name:"Tom Bellamy", reminder_type:"sms_reminder_1", scheduled_time:"2026-06-25T09:00:00Z", status:"completed", attempt_count:1 },
-  { task_id:"task_008", invoice_id:"inv_004", invoice_number:"INV-1004", patient_name:"Tom Bellamy", reminder_type:"reconciliation_check", scheduled_time:"2026-07-03T14:00:00Z", status:"completed", attempt_count:1 },
-  { task_id:"task_005", invoice_id:"inv_007", invoice_number:"INV-1007", patient_name:"Anita Patel", reminder_type:"sms_reminder_2", scheduled_time:"2026-07-01T09:00:00Z", status:"failed", attempt_count:3, failure_reason:"Carrier rejection" },
-  { task_id:"task_006", invoice_id:"inv_006", invoice_number:"INV-1006", patient_name:"David Lam", reminder_type:"sms_reminder_1", scheduled_time:"2026-07-06T09:00:00Z", status:"pending", attempt_count:0 },
-  { task_id:"task_009", invoice_id:"inv_005", invoice_number:"INV-1005", patient_name:"Rachel Ng", reminder_type:"sms_reminder_1", scheduled_time:"2026-06-29T09:00:00Z", status:"cancelled", attempt_count:0 },
-];
-// TODO: Replace with real data from GET /billing/communications endpoint (SMS/email history from Twilio & email provider)
-const PR_COMMS: PRComm[] = [
-  { comm_id:"c001", invoice_id:"inv_001", invoice_number:"INV-1001", patient_name:"Sarah Mitchell", channel:"sms", recipient:"+1604···0101", reminder_type:"sms_reminder_1", message:"Hi Sarah, invoice INV-1001 has an outstanding balance of $285.00.", status:"delivered", timestamp:"2026-07-01T09:00:00Z" },
-  { comm_id:"c002", invoice_id:"inv_002", invoice_number:"INV-1002", patient_name:"James Okafor", channel:"sms", recipient:"+1604···0102", reminder_type:"sms_reminder_1", message:"Hi James, invoice INV-1002 has an outstanding balance of $150.00.", status:"delivered", timestamp:"2026-07-01T09:01:00Z" },
-  { comm_id:"c003", invoice_id:"inv_002", invoice_number:"INV-1002", patient_name:"James Okafor", channel:"email", recipient:"james@···.com", reminder_type:"email_reminder_1", message:"Hello James, our records show an outstanding balance of $150.00 for invoice INV-1002.", status:"sent", timestamp:"2026-07-02T10:00:00Z" },
-  { comm_id:"c004", invoice_id:"inv_003", invoice_number:"INV-1003", patient_name:"Priya Sharma", channel:"email", recipient:"priya@···.com", reminder_type:"email_reminder_1", message:"Hello Priya, our records show an outstanding balance of $420.50 for invoice INV-1003.", status:"delivered", timestamp:"2026-06-30T09:00:00Z" },
-  { comm_id:"c005", invoice_id:"inv_004", invoice_number:"INV-1004", patient_name:"Tom Bellamy", channel:"sms", recipient:"+1604···0104", reminder_type:"sms_reminder_1", message:"Hi Tom, invoice INV-1004 has an outstanding balance of $95.00.", status:"delivered", timestamp:"2026-06-25T09:00:00Z" },
-  { comm_id:"c006", invoice_id:"inv_007", invoice_number:"INV-1007", patient_name:"Anita Patel", channel:"sms", recipient:"+1604···0107", reminder_type:"sms_reminder_2", message:"Hi Anita, invoice INV-1007 still has a balance of $512.00.", status:"failed", timestamp:"2026-07-01T09:00:00Z" },
-];
-// TODO: Fetch settings (templates, schedule, toggles) from GET /billing/settings endpoint
-// POST /billing/settings saves back to n8n (which persists to Google Sheets or environment config)
-const DEFAULT_TEMPLATES = {
-  sms_1: "Hi {{patient_first_name}}, this is a reminder that invoice {{invoice_number}} has an outstanding balance of {{amount_due}}. {{payment_link}}",
-  email_1_subject: "Payment reminder for invoice {{invoice_number}}",
-  email_1_body: "Hello {{patient_first_name}},\n\nOur records show an outstanding balance of {{amount_due}} for invoice {{invoice_number}}.\n\nYou can make a payment here: {{payment_link}}\n\nIf you have already paid, please disregard this message.",
-  sms_2: "Hi {{patient_first_name}}, we are following up about invoice {{invoice_number}}, which still has a balance of {{amount_due}}. {{payment_link}}",
-  email_2_subject: "Follow-up for invoice {{invoice_number}}",
-  email_2_body: "Hello {{patient_first_name}},\n\nWe are following up because invoice {{invoice_number}} still shows an outstanding balance of {{amount_due}}.\n\nYou can make a payment here: {{payment_link}}\n\nIf you need assistance, please contact the clinic.",
+const R_INVOICE_STATUS_LABEL: Record<string, string> = { unpaid: "Unpaid", paid: "Paid", manual_hold: "On Hold", staff_attention: "Staff Attention", failed: "Failed" };
+const R_STAGE_LABEL: Record<string, string> = { new: "New", day_3_payment_request: "Day-3 Request", day_7_call: "Day-7 Call", day_14_call: "Day-14 Call", staff_escalation: "Staff Escalation", recovered: "Recovered", closed: "Closed" };
+const R_QUEUE_STATUS_LABEL: Record<string, string> = { configuration_required: "Config Required", pending: "Pending", submitted: "Submitted", in_progress: "In Progress", completed: "Completed", cancelled_paid: "Cancelled (Paid)", cancelled_hold: "Cancelled (Hold)", staff_followup_required: "Needs Follow-up", failed: "Failed" };
+// Outcome -> visual tone, per spec §10.1 (never colour-only - RPill always
+// pairs the tone with the literal label text too).
+const R_OUTCOME_TONE: Record<string, "green" | "blue" | "gray" | "amber" | "red"> = {
+  reminder_delivered: "green", already_paid: "green",
+  voicemail_left: "blue", payment_link_requested: "blue",
+  no_answer: "gray",
+  billing_question: "amber", billing_dispute: "amber", promise_to_pay: "amber",
+  financial_assistance_requested: "amber", staff_followup_required: "amber",
+  wrong_number: "red", opt_out: "red", technical_failure: "red",
 };
+function RPill({ label, tone }: { label: string; tone: "green" | "blue" | "gray" | "amber" | "red" | "slate" }) {
+  const toneClass: Record<string, string> = {
+    green: "bg-emerald-50 text-emerald-700", blue: "bg-blue-50 text-blue-700",
+    gray: "bg-slate-100 text-slate-600", amber: "bg-amber-50 text-amber-700",
+    red: "bg-red-50 text-red-700", slate: "bg-slate-100 text-slate-600",
+  };
+  return <span className={`inline-flex items-center px-2 py-0.5 rounded text-[10px] font-medium ${toneClass[tone]}`}>{label}</span>;
+}
+function humanizeSnake(s: string): string { return s.replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase()); }
 
 function PRLoadingSkeleton() {
   return (
@@ -3224,683 +3288,557 @@ function PRErrorState({ onRetry }: { onRetry: () => void }) {
   );
 }
 
-interface PRActivityEvent {
-  id: string; invoice_number: string; label: string; timestamp: string;
+function fmtCurrency(n: number): string { return `$${n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`; }
+function fmtDate(iso?: string): string {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  return isNaN(d.getTime()) ? iso : d.toLocaleDateString("en-CA", { month: "short", day: "numeric", year: "numeric" });
 }
 
 function PaymentRecoveryScreen() {
   const { accessToken } = useDashboard();
-  const [activeTab, setActiveTab] = useState("overview");
-  const [activityLog, setActivityLog] = useState<PRActivityEvent[]>([]);
+  const [activeTab, setActiveTab] = useState<"overview" | "queue" | "invoices" | "calls" | "settings">("overview");
+
+  const [metrics, setMetrics] = useState<RMetrics | null>(null);
+  const [invoices, setInvoices] = useState<RInvoice[]>([]);
+  const [queue, setQueue] = useState<RQueueItem[]>([]);
+  const [calls, setCalls] = useState<RCall[]>([]);
+  const [activity, setActivity] = useState<RActivity[]>([]);
+  const [settings, setSettings] = useState<Record<string, unknown> | null>(null);
+
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(false);
+  const [refreshTick, setRefreshTick] = useState(0);
+
   const [search, setSearch] = useState("");
   const [invoiceFilter, setInvoiceFilter] = useState("all");
-  const [sortField, setSortField] = useState<"amount_due"|"due_date"|"last_updated"|"next_reminder_at">("due_date");
-  const [sortDir, setSortDir] = useState<"asc"|"desc">("asc");
-  const [taskTab, setTaskTab] = useState<"pending"|"completed"|"cancelled"|"failed">("pending");
-  const [commFilter, setCommFilter] = useState("all");
-  const [commDateFrom, setCommDateFrom] = useState("");
-  const [commDateTo, setCommDateTo] = useState("");
-  const [templates, setTemplates] = useState({ ...DEFAULT_TEMPLATES });
-  const [schedule, setSchedule] = useState({ sms1_delay:0, email1_delay:1, sms2_delay:3, email2_delay:3, escalation_delay:1 });
-  const [prSettings, setPrSettings] = useState({ sms_enabled:true, email_enabled:true, all_paused:false, timezone:"America/Toronto", send_start:"09:00", send_end:"19:00", min_balance:"0" });
-  const [confirm, setConfirm] = useState<{ label: string; invoiceNum: string; onConfirm?: () => void } | null>(null);
-  const [detailInvoice, setDetailInvoice] = useState<PRInvoice | null>(null);
-  const [savingSettings, setSavingSettings] = useState(false);
-  const [saveMsg, setSaveMsg] = useState("");
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState(false);
-  const [successMsg, setSuccessMsg] = useState("");
+  const [queueFilter, setQueueFilter] = useState("pending");
+  const [selectedQueueIds, setSelectedQueueIds] = useState<Set<string>>(new Set());
+  const [callsSubTab, setCallsSubTab] = useState<"calls" | "activity">("calls");
 
-  const fmt = (iso?: string) => iso ? new Date(iso).toLocaleDateString("en-CA", { month:"short", day:"numeric" }) : "—";
-  // Billing data comes from an n8n webhook that isn't configured for every
-  // tenant (empty n8n_webhook_url) - amount_due can legitimately be missing
-  // rather than a real number, so this must not assume it's always defined.
-  const fmtAmt = (n: number | undefined | null) => n != null && !isNaN(n) ? `$${n.toFixed(2)}` : "—";
-  const VARS = ["{{patient_first_name}}","{{invoice_number}}","{{amount_due}}","{{due_date}}","{{payment_link}}","{{clinic_phone}}"];
+  const [confirm, setConfirm] = useState<{ title: string; body: string; onConfirm: () => void } | null>(null);
+  const [actionBusy, setActionBusy] = useState(false);
+  const [toast, setToast] = useState("");
 
-  const showSuccess = (msg: string) => { setSuccessMsg(msg); setTimeout(() => setSuccessMsg(""), 3000); };
+  function showToast(msg: string) { setToast(msg); setTimeout(() => setToast(""), 3000); }
 
-  // Records the action in the Overview "Recent Activity" feed immediately (client-side, optimistic).
-  // TODO: once endpoints below are live, replace this with the response from that POST call
-  // so Recent Activity reflects the actual server-confirmed result instead of an optimistic entry.
-  function logActivity(invoiceNum: string, label: string) {
-    setActivityLog(prev => [{ id: crypto.randomUUID(), invoice_number: invoiceNum, label, timestamp: new Date().toISOString() }, ...prev].slice(0, 20));
+  useEffect(() => {
+    if (!accessToken) return;
+    let cancelled = false;
+    setLoading(true);
+    setError(false);
+    Promise.all([
+      fetch(`/api/link/${accessToken}/recovery/overview`).then(r => r.ok ? r.json() : Promise.reject()),
+      fetch(`/api/link/${accessToken}/recovery/invoices`).then(r => r.ok ? r.json() : Promise.reject()),
+      fetch(`/api/link/${accessToken}/recovery/queue`).then(r => r.ok ? r.json() : Promise.reject()),
+      fetch(`/api/link/${accessToken}/recovery/calls`).then(r => r.ok ? r.json() : Promise.reject()),
+      fetch(`/api/link/${accessToken}/recovery/activity`).then(r => r.ok ? r.json() : Promise.reject()),
+      fetch(`/api/link/${accessToken}/recovery/settings`).then(r => r.ok ? r.json() : Promise.reject()),
+    ])
+      .then(([mRaw, iRaw, qRaw, cRaw, aRaw, sRaw]) => {
+        if (cancelled) return;
+        setMetrics(mapRMetrics(mRaw));
+        setInvoices((Array.isArray(iRaw) ? iRaw : iRaw?.invoices ?? []).map(mapRInvoice));
+        setQueue((Array.isArray(qRaw) ? qRaw : qRaw?.queue ?? []).map(mapRQueueItem));
+        setCalls((Array.isArray(cRaw) ? cRaw : cRaw?.calls ?? []).map(mapRCall));
+        setActivity((Array.isArray(aRaw) ? aRaw : aRaw?.activity ?? []).map(mapRActivity));
+        setSettings(sRaw && typeof sRaw === "object" ? sRaw : {});
+      })
+      .catch(() => { if (!cancelled) setError(true); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [accessToken, refreshTick]);
+
+  function refetch() { setRefreshTick(t => t + 1); }
+
+  async function postAction(path: string, body?: unknown): Promise<boolean> {
+    if (!accessToken) return false;
+    setActionBusy(true);
+    try {
+      const res = await fetch(`/api/link/${accessToken}${path}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body ?? {}),
+      });
+      return res.ok;
+    } catch {
+      return false;
+    } finally {
+      setActionBusy(false);
+    }
   }
 
-  // TODO: Wire each action to its n8n webhook via POST /api/link/:accessToken/billing/... (see endpoint list below)
-  const simulateAction = (label: string, invoiceNum: string, cb?: () => void) => {
-    setConfirm({ label, invoiceNum, onConfirm: () => { cb?.(); logActivity(invoiceNum, label); } });
-  };
+  function askConfirm(title: string, body: string, onConfirm: () => void) {
+    setConfirm({ title, body, onConfirm });
+  }
 
-  const totalOutstanding = PR_INVOICES.filter(i => i.status !== "paid").reduce((s,i) => s + i.amount_due, 0);
-  const recovered = PR_INVOICES.filter(i => i.status === "paid").reduce((s,i) => s + (i.recovered_amount ?? i.original_amount ?? 0), 0);
-  const activeUnpaid = PR_INVOICES.filter(i => !["paid","manual_hold","failed"].includes(i.status)).length;
-  const staffAttn = PR_INVOICES.filter(i => i.status === "staff_escalation_required").length;
-  const remindersSent = PR_COMMS.filter(c => ["sent","delivered"].includes(c.status)).length;
-  const failedCount = PR_COMMS.filter(c => c.status === "failed").length;
+  async function runConfirmed() {
+    if (!confirm) return;
+    const { onConfirm } = confirm;
+    setConfirm(null);
+    onConfirm();
+  }
 
-  const funnelStages = [
-    { label:"New", count: PR_INVOICES.filter(i => i.status === "new").length },
-    { label:"SMS 1 Sent", count: PR_INVOICES.filter(i => i.status === "sms_reminder_1_sent").length },
-    { label:"Email 1 Sent", count: PR_INVOICES.filter(i => i.status === "email_reminder_1_sent").length },
-    { label:"SMS 2 Sent", count: PR_INVOICES.filter(i => i.status === "sms_reminder_2_sent").length },
-    { label:"Email 2 Sent", count: PR_INVOICES.filter(i => i.status === "email_reminder_2_sent").length },
-    { label:"Staff Attention", count: PR_INVOICES.filter(i => i.status === "staff_escalation_required").length },
-    { label:"Paid", count: PR_INVOICES.filter(i => i.status === "paid").length },
-  ];
+  // ── Derived data ──────────────────────────────────────────────────────
+  const activeUnpaid = invoices.filter(i => i.status !== "paid");
+  const recoveryRate = (() => {
+    const cohort = invoices.filter(i => i.recoveryEntryAmount > 0);
+    const cohortTotal = cohort.reduce((s, i) => s + i.recoveryEntryAmount, 0);
+    const recovered = cohort.filter(i => i.status === "paid").reduce((s, i) => s + i.recoveryEntryAmount, 0);
+    return cohortTotal > 0 ? (recovered / cohortTotal) * 100 : null;
+  })();
+  const netValue = metrics ? (metrics.estimatedIncrementalRecovery ?? 0) + metrics.labourSavings - metrics.automationCost : null;
 
-  const sortedFilteredInvoices = [...PR_INVOICES]
+  const staffAttention = invoices
+    .filter(i => i.status === "staff_attention" || i.status === "failed")
+    .slice(0, 5);
+
+  const filteredInvoices = invoices
     .filter(i => {
       const matchesFilter =
         invoiceFilter === "unpaid" ? i.status !== "paid" :
         invoiceFilter === "paid" ? i.status === "paid" :
-        invoiceFilter === "escalation" ? i.status === "staff_escalation_required" :
-        invoiceFilter === "hold" ? i.status === "manual_hold" :
-        invoiceFilter === "failed" ? i.status === "failed" :
-        invoiceFilter === "missing_phone" ? !i.patient_phone :
-        invoiceFilter === "missing_email" ? !i.patient_email : true;
+        invoiceFilter === "attention" ? i.status === "staff_attention" :
+        invoiceFilter === "hold" ? i.manualHold : true;
       const matchesSearch = !search ||
-        i.invoice_number.toLowerCase().includes(search.toLowerCase()) ||
-        i.patient_name.toLowerCase().includes(search.toLowerCase());
+        i.invoiceNumber.toLowerCase().includes(search.toLowerCase()) ||
+        i.patientName.toLowerCase().includes(search.toLowerCase());
       return matchesFilter && matchesSearch;
     })
-    .sort((a, b) => {
-      const dir = sortDir === "asc" ? 1 : -1;
-      if (sortField === "amount_due") return dir * (a.amount_due - b.amount_due);
-      if (sortField === "due_date") return dir * (a.due_date.localeCompare(b.due_date));
-      if (sortField === "last_updated") return dir * (a.last_updated.localeCompare(b.last_updated));
-      if (sortField === "next_reminder_at") return dir * ((a.next_reminder_at ?? "").localeCompare(b.next_reminder_at ?? ""));
-      return 0;
-    });
+    .sort((a, b) => b.daysOverdue - a.daysOverdue);
 
-  const filteredTasks = PR_TASKS.filter(t => t.status === taskTab);
-
-  const filteredComms = PR_COMMS.filter(c => {
-    const matchesType =
-      commFilter === "sms" ? c.channel === "sms" :
-      commFilter === "email" ? c.channel === "email" :
-      commFilter === "sent" ? c.status === "sent" :
-      commFilter === "delivered" ? c.status === "delivered" :
-      commFilter === "failed" ? c.status === "failed" : true;
-    const ts = c.timestamp.slice(0, 10);
-    const fromOk = !commDateFrom || ts >= commDateFrom;
-    const toOk = !commDateTo || ts <= commDateTo;
-    return matchesType && fromOk && toOk;
+  const filteredQueue = queue.filter(q => {
+    if (queueFilter === "pending") return q.approval === "pending";
+    if (queueFilter === "approved") return q.approval === "approved" && q.queueStatus !== "completed";
+    if (queueFilter === "completed") return q.queueStatus === "completed";
+    if (queueFilter === "cancelled") return q.queueStatus.startsWith("cancelled");
+    if (queueFilter === "failed") return q.queueStatus === "failed";
+    return true;
   });
+  const queueSelectableIds = filteredQueue.filter(q => q.approval === "pending" && !["cancelled_paid", "cancelled_hold"].includes(q.queueStatus)).map(q => q.queueId);
+  const allSelected = queueSelectableIds.length > 0 && queueSelectableIds.every(id => selectedQueueIds.has(id));
 
-  const attentionInvoices = PR_INVOICES.filter(i =>
-    i.status === "staff_escalation_required" || i.status === "failed" ||
-    !i.patient_phone || !i.patient_email
-  );
-
-  const tabs = [
-    { id:"overview", label:"Overview" }, { id:"invoices", label:"Invoices" },
-    { id:"followups", label:"Follow-Ups" }, { id:"communications", label:"Communications" },
-    { id:"settings", label:"Settings" },
-  ];
-
-  const filterBtns = (opts: [string,string][], current: string, set: (v: string) => void) => (
-    <div className="flex items-center gap-0.5 bg-muted border border-border rounded-md p-1 w-fit flex-shrink-0 flex-wrap">
-      {opts.map(([v,l]) => (
-        <button key={v} onClick={() => set(v)} className={`text-[10px] px-2.5 py-1 rounded transition-colors ${current === v ? "bg-card shadow-sm text-foreground font-medium" : "text-muted-foreground hover:text-foreground"}`}>{l}</button>
-      ))}
-    </div>
-  );
-
-  const SortTh = ({ field, label }: { field: typeof sortField; label: string }) => (
-    <th className="text-left px-4 py-2.5 text-[10px] font-semibold text-muted-foreground uppercase tracking-wide whitespace-nowrap cursor-pointer select-none hover:text-foreground"
-      onClick={() => { if (sortField === field) setSortDir(d => d === "asc" ? "desc" : "asc"); else { setSortField(field); setSortDir("asc"); } }}>
-      <span className="flex items-center gap-1">{label}{sortField === field ? (sortDir === "asc" ? " ↑" : " ↓") : ""}</span>
-    </th>
-  );
-
-  // Success toast
-  const SuccessToast = successMsg ? (
-    <div className="fixed bottom-4 right-4 z-50 bg-emerald-600 text-white text-xs font-medium px-4 py-2.5 rounded-lg shadow-lg flex items-center gap-2">
-      <CheckCircle2 size={13} /> {successMsg}
-    </div>
-  ) : null;
-
-  // Confirmation modal
-  // TODO: On confirm, call POST /api/link/:accessToken/billing/invoices/:invoiceId/:action (see endpoint list)
-  if (confirm) return (
-    <>
-      {SuccessToast}
-      <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
-        <Card className="p-6 max-w-sm w-full mx-4 space-y-4">
-          <h3 className="text-sm font-semibold text-foreground">{confirm.label}</h3>
-          <p className="text-xs text-muted-foreground">This will update the automation for invoice <span className="font-mono font-medium">{confirm.invoiceNum}</span>.</p>
-          <div className="flex gap-2 justify-end">
-            <button onClick={() => setConfirm(null)} className="text-xs border border-border px-3 py-1.5 rounded-md hover:bg-muted transition-colors">Cancel</button>
-            <button onClick={() => { const cb = confirm.onConfirm; setConfirm(null); cb?.(); showSuccess(`${confirm.label} completed`); }} className="text-xs bg-primary text-primary-foreground px-3 py-1.5 rounded-md hover:opacity-90">Confirm</button>
-          </div>
-        </Card>
-      </div>
-    </>
-  );
-
-  // Invoice detail
-  if (detailInvoice) {
-    const inv = detailInvoice;
-    const timeline = PR_COMMS.filter(c => c.invoice_id === inv.invoice_id);
-    const invTasks = PR_TASKS.filter(t => t.invoice_id === inv.invoice_id);
-    return (
-      <div className="p-6 space-y-5 overflow-y-auto h-full">
-        {SuccessToast}
-        <button onClick={() => setDetailInvoice(null)} className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors">
-          <ChevronLeft size={13} /> Back to Invoices
-        </button>
-        <div className="flex items-start justify-between">
-          <div>
-            <h1 className="text-base font-semibold text-foreground">{inv.invoice_number}</h1>
-            <p className="text-xs text-muted-foreground">{inv.patient_name} · ID: <span className="font-mono">{inv.invoice_id}</span></p>
-          </div>
-          <RecoveryBadge status={inv.status} />
-        </div>
-        <div className="grid grid-cols-3 gap-4">
-          <Card className="p-4 space-y-2.5">
-            <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">Invoice Info</p>
-            {([
-              ["Invoice #", inv.invoice_number],
-              ["Internal ID", inv.invoice_id],
-              ["Patient", inv.patient_name],
-              ["Phone", inv.patient_phone || "— Missing"],
-              ["Email", inv.patient_email || "— Missing"],
-              ["Original Amount", inv.original_amount != null ? fmtAmt(inv.original_amount) : "—"],
-              ["Amount Due", fmtAmt(inv.amount_due)],
-              ["Due Date", fmt(inv.due_date)],
-              ["Last Juvonno Sync", fmt(inv.last_synced_at)],
-            ] as [string, string][]).map(([k, v]) => (
-              <div key={k} className="flex justify-between text-xs gap-2">
-                <span className="text-muted-foreground shrink-0">{k}</span>
-                <span className={`text-foreground font-medium truncate text-right ${v.startsWith("— Missing") ? "text-amber-600" : ""}`}>{v}</span>
-              </div>
-            ))}
-          </Card>
-          <Card className="p-4 space-y-2.5">
-            <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">Automation</p>
-            {([
-              ["Status", STATUS_LABELS[inv.status]],
-              ["Reminders", inv.status === "manual_hold" ? "Paused" : "Active"],
-              ["Last Reminder", fmt(inv.last_reminder_at)],
-              ["Next Reminder", fmt(inv.next_reminder_at)],
-              ["Attempt Count", String(inv.attempt_count)],
-            ] as [string, string][]).map(([k, v]) => (
-              <div key={k} className="flex justify-between text-xs">
-                <span className="text-muted-foreground">{k}</span>
-                <span className={`font-medium ${k === "Reminders" && v === "Paused" ? "text-amber-600" : "text-foreground"}`}>{v}</span>
-              </div>
-            ))}
-            <div className="pt-2 border-t border-border space-y-1">
-              <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide mb-1">Scheduled Tasks</p>
-              {invTasks.length === 0
-                ? <p className="text-[10px] text-muted-foreground">No tasks found.</p>
-                : invTasks.map(t => (
-                    <div key={t.task_id} className="flex justify-between text-[10px]">
-                      <span className="text-muted-foreground font-mono">{t.reminder_type}</span>
-                      <span className={`font-medium ${t.status === "failed" ? "text-red-600" : t.status === "completed" ? "text-emerald-600" : "text-foreground"}`}>{t.status} · {fmt(t.scheduled_time)}</span>
-                    </div>
-                  ))
-              }
-            </div>
-          </Card>
-          <Card className="p-4 space-y-2">
-            <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide mb-1">Actions</p>
-            {[
-              { label:"Send SMS now", disabled:!inv.patient_phone, hint: !inv.patient_phone ? "No phone number" : "" },
-              { label:"Send Email now", disabled:!inv.patient_email, hint: !inv.patient_email ? "No email address" : "" },
-              { label: inv.status === "manual_hold" ? "Resume reminders" : "Pause reminders", disabled:false, hint:"" },
-              { label:"Reschedule next reminder", disabled: inv.status === "paid", hint:"" },
-              { label:"Reconcile with Juvonno", disabled:false, hint:"" },
-              { label:"Escalate to staff", disabled: inv.status === "staff_escalation_required", hint:"" },
-            ].map(a => (
-              <div key={a.label}>
-                <button disabled={a.disabled} onClick={() => simulateAction(a.label, inv.invoice_number)}
-                  className="w-full text-left text-xs px-3 py-2 rounded-md border border-border hover:bg-muted transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
-                  {a.label}
-                </button>
-                {a.hint && <p className="text-[10px] text-amber-600 pl-1 mt-0.5">{a.hint}</p>}
-              </div>
-            ))}
-          </Card>
-        </div>
-        <Card className="p-4">
-          <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide mb-3">Recovery Timeline</p>
-          {timeline.length === 0
-            ? <p className="text-xs text-muted-foreground py-6 text-center">No communications yet.</p>
-            : <div className="space-y-3">{timeline.map(c => (
-                <div key={c.comm_id} className="flex items-start gap-3">
-                  <div className={`mt-0.5 w-6 h-6 rounded-full flex items-center justify-center flex-shrink-0 ${c.status === "failed" ? "bg-red-100" : c.channel === "sms" ? "bg-blue-100" : "bg-violet-100"}`}>
-                    {c.channel === "sms" ? <MessageSquare size={10} className={c.status === "failed" ? "text-red-600" : "text-blue-600"} /> : <Mail size={10} className="text-violet-600" />}
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center justify-between gap-2">
-                      <p className="text-xs font-medium text-foreground capitalize">{c.channel} · {c.reminder_type ?? "reminder"}</p>
-                      <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium flex-shrink-0 ${c.status === "delivered" ? "bg-emerald-100 text-emerald-700" : c.status === "sent" ? "bg-blue-100 text-blue-700" : c.status === "failed" ? "bg-red-100 text-red-700" : "bg-slate-100 text-slate-600"}`}>{c.status}</span>
-                    </div>
-                    <p className="text-[10px] text-muted-foreground">{fmt(c.timestamp)} · To: {c.recipient}</p>
-                    <p className="text-[10px] text-muted-foreground mt-0.5 truncate">{c.message}</p>
-                  </div>
-                </div>
-              ))}</div>
-          }
-        </Card>
-      </div>
-    );
+  function toggleQueueSelect(id: string) {
+    setSelectedQueueIds(prev => { const next = new Set(prev); next.has(id) ? next.delete(id) : next.add(id); return next; });
+  }
+  function toggleSelectAll() {
+    setSelectedQueueIds(allSelected ? new Set() : new Set(queueSelectableIds));
   }
 
+  async function approveQueueIds(ids: string[]) {
+    const ok = await postAction("/recovery/queue/approve", { queueIds: ids });
+    showToast(ok ? `Approved ${ids.length} call${ids.length === 1 ? "" : "s"}.` : "Could not reach the recovery workflow.");
+    setSelectedQueueIds(new Set());
+    if (ok) refetch();
+  }
+  async function rejectQueueIds(ids: string[]) {
+    const ok = await postAction("/recovery/queue/reject", { queueIds: ids });
+    showToast(ok ? `Rejected ${ids.length} call${ids.length === 1 ? "" : "s"}.` : "Could not reach the recovery workflow.");
+    setSelectedQueueIds(new Set());
+    if (ok) refetch();
+  }
+  async function invoiceAction(action: "hold" | "resume" | "reconcile" | "escalate", inv: RInvoice) {
+    const ok = await postAction(`/recovery/invoices/${encodeURIComponent(inv.invoiceId)}/${action}`);
+    showToast(ok ? `${humanizeSnake(action)} applied to ${inv.invoiceNumber}.` : "Could not reach the recovery workflow.");
+    if (ok) refetch();
+  }
+
+  const TABS: { id: typeof activeTab; label: string }[] = [
+    { id: "overview", label: "Overview" },
+    { id: "queue", label: "Recovery Queue" },
+    { id: "invoices", label: "Invoices" },
+    { id: "calls", label: "Calls & Activity" },
+    { id: "settings", label: "Settings" },
+  ];
+
+  if (loading) return <PRLoadingSkeleton />;
+  if (error) return <PRErrorState onRetry={refetch} />;
+
   return (
-    <div className="flex flex-col h-full">
-      {SuccessToast}
-      {/* Sub-tab nav */}
-      <div className="border-b border-border px-6 flex items-center gap-0.5 bg-card flex-shrink-0">
-        {tabs.map(t => (
-          <button key={t.id} onClick={() => {
-            setActiveTab(t.id);
-            setLoading(true); setError(false);
-            setTimeout(() => setLoading(false), 600);
-          }} className={`px-4 py-3 text-xs font-medium border-b-2 transition-colors whitespace-nowrap ${activeTab === t.id ? "border-primary text-primary" : "border-transparent text-muted-foreground hover:text-foreground"}`}>
+    <div className="p-6 space-y-5">
+      {toast && (
+        <div className="fixed bottom-4 right-4 z-50 bg-emerald-600 text-white text-xs font-medium px-4 py-2.5 rounded-lg shadow-lg flex items-center gap-2">
+          <CheckCircle2 size={13} /> {toast}
+        </div>
+      )}
+
+      {confirm && (
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
+          <Card className="p-6 max-w-sm w-full mx-4 space-y-4">
+            <h3 className="text-sm font-semibold text-foreground">{confirm.title}</h3>
+            <p className="text-xs text-muted-foreground">{confirm.body}</p>
+            <div className="flex gap-2 justify-end">
+              <button onClick={() => setConfirm(null)} className="text-xs border border-border px-3 py-1.5 rounded-md hover:bg-muted transition-colors">Cancel</button>
+              <button onClick={runConfirmed} disabled={actionBusy} className="text-xs bg-primary text-primary-foreground px-3 py-1.5 rounded-md hover:opacity-90 disabled:opacity-50">Confirm</button>
+            </div>
+          </Card>
+        </div>
+      )}
+
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-lg font-semibold text-foreground">Payment Recovery</h1>
+          <p className="text-xs text-muted-foreground mt-0.5">Outstanding balances, AI call recovery, and staff follow-up in one place.</p>
+        </div>
+        <button onClick={refetch} className="flex items-center gap-2 bg-muted border border-border text-xs font-medium px-3 py-1.5 rounded-md hover:bg-accent transition-colors">
+          <RefreshCw size={12} /> Refresh
+        </button>
+      </div>
+
+      <div className="flex items-center gap-1 border-b border-border">
+        {TABS.map(t => (
+          <button
+            key={t.id}
+            onClick={() => setActiveTab(t.id)}
+            className={`text-xs font-medium px-3 py-2 border-b-2 transition-colors ${activeTab === t.id ? "border-primary text-primary" : "border-transparent text-muted-foreground hover:text-foreground"}`}
+          >
             {t.label}
           </button>
         ))}
       </div>
 
-      <div className="flex-1 overflow-y-auto">
-        {loading && <PRLoadingSkeleton />}
-        {!loading && error && <PRErrorState onRetry={() => { setError(false); setLoading(true); setTimeout(() => setLoading(false), 600); }} />}
-        {!loading && !error && <>
+      {activeTab === "overview" && (
+        <div className="space-y-5">
+          <div className="grid grid-cols-5 gap-3">
+            <Card className="p-4 space-y-1">
+              <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">Outstanding</p>
+              <p className="text-xl font-semibold text-foreground font-mono">{metrics ? fmtCurrency(metrics.totalOutstanding) : "—"}</p>
+              <p className="text-[10px] text-muted-foreground">{metrics ? `across ${metrics.activeUnpaidInvoices} invoice${metrics.activeUnpaidInvoices === 1 ? "" : "s"}` : "point-in-time balance"}</p>
+            </Card>
+            <Card className="p-4 space-y-1">
+              <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">Recovered After Automation</p>
+              <p className="text-xl font-semibold text-emerald-600 font-mono">{metrics ? fmtCurrency(metrics.recoveredRevenue) : "—"}</p>
+              <p className="text-[10px] text-muted-foreground" title="Revenue recovered after the invoice entered the recovery program - not automatically incremental revenue.">{metrics ? `${metrics.recoveredInvoices} invoice${metrics.recoveredInvoices === 1 ? "" : "s"}` : "—"}</p>
+            </Card>
+            <Card className="p-4 space-y-1">
+              <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">Recovery Rate</p>
+              <p className="text-xl font-semibold text-foreground font-mono">{recoveryRate != null ? `${recoveryRate.toFixed(1)}%` : "—"}</p>
+              <p className="text-[10px] text-muted-foreground">Recovered ÷ eligible cohort balance</p>
+            </Card>
+            <Card className="p-4 space-y-1">
+              <div className="flex items-center gap-1.5">
+                <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">Staff Hours Saved</p>
+                <span className="text-[9px] font-medium bg-slate-100 text-slate-600 px-1 rounded">Estimated</span>
+              </div>
+              <p className="text-xl font-semibold text-foreground font-mono">{metrics ? metrics.staffHoursSaved.toFixed(1) : "—"}</p>
+              <p className="text-[10px] text-muted-foreground" title="Automated contacts × assumed manual minutes per follow-up ÷ 60, from Settings.">{metrics ? fmtCurrency(metrics.labourSavings) : "—"} in labour savings</p>
+            </Card>
+            <Card className="p-4 space-y-1">
+              <div className="flex items-center gap-1.5">
+                <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">Est. Net Value</p>
+                <span className="text-[9px] font-medium bg-slate-100 text-slate-600 px-1 rounded">Estimated</span>
+              </div>
+              <p className="text-xl font-semibold text-foreground font-mono">{netValue != null ? fmtCurrency(netValue) : "—"}</p>
+              <p className="text-[10px] text-muted-foreground" title="Estimated incremental recovery + labour savings − automation cost.">
+                {metrics?.estimatedIncrementalRecovery == null ? "Excludes incremental recovery (no baseline yet)" : "Incremental recovery + savings − cost"}
+              </p>
+            </Card>
+          </div>
 
-        {/* Overview */}
-        {activeTab === "overview" && (
-          <div className="p-6 space-y-6">
-            <div className="flex items-center justify-between">
-              <div><h1 className="text-base font-semibold text-foreground">Payment Recovery</h1><p className="text-xs text-muted-foreground">Automated invoice follow-up overview</p></div>
-              <button onClick={() => { showSuccess("Sync requested — Juvonno data will refresh shortly."); }} className="flex items-center gap-2 bg-muted border border-border text-xs font-medium px-3 py-2 rounded-md hover:bg-accent transition-colors"><RefreshCw size={12} /> Sync Juvonno</button>
-            </div>
-            <div className="grid grid-cols-2 gap-4 md:grid-cols-3 xl:grid-cols-6">
-              <KpiCard label="Total Outstanding" value={fmtAmt(totalOutstanding)} icon={TrendingUp} color="amber" />
-              <KpiCard label="Recovered Revenue" value={fmtAmt(recovered)} icon={CheckCircle2} color="green" />
-              <KpiCard label="Active Unpaid" value={String(activeUnpaid)} icon={FileText} color="indigo" />
-              <KpiCard label="Staff Attention" value={String(staffAttn)} icon={AlertTriangle} color="amber" />
-              <KpiCard label="Reminders Sent" value={String(remindersSent)} icon={Send} color="teal" />
-              <KpiCard label="Failed Reminders" value={String(failedCount)} icon={XCircle} color="red" />
-            </div>
-            <div className="grid grid-cols-2 gap-4">
-              <Card className="p-4">
-                <p className="text-xs font-semibold text-foreground mb-4">Recovery Funnel</p>
-                <div className="space-y-3">
-                  {funnelStages.map(s => (
-                    <div key={s.label} className="flex items-center gap-3">
-                      <span className="text-[10px] text-muted-foreground w-28 shrink-0">{s.label}</span>
-                      <div className="flex-1 bg-muted rounded-full h-1.5 overflow-hidden">
-                        <div className="h-full bg-primary rounded-full" style={{ width:`${PR_INVOICES.length ? (s.count / PR_INVOICES.length) * 100 : 0}%` }} />
+          <div className="grid grid-cols-2 gap-4">
+            <Card className="overflow-hidden">
+              <div className="px-4 py-3 border-b border-border flex items-center justify-between">
+                <h3 className="text-sm font-semibold text-foreground">Needs Staff Attention</h3>
+                {staffAttention.length > 0 && <button onClick={() => setActiveTab("invoices")} className="text-[10px] text-primary font-medium hover:underline">View all</button>}
+              </div>
+              {staffAttention.length === 0 ? (
+                <p className="text-xs text-muted-foreground py-8 text-center">No accounts need attention right now.</p>
+              ) : (
+                <div className="divide-y divide-border">
+                  {staffAttention.map(inv => (
+                    <div key={inv.invoiceId} className="px-4 py-2.5 flex items-center justify-between text-xs">
+                      <div>
+                        <p className="font-medium text-foreground">{inv.patientName}</p>
+                        <p className="text-[10px] text-muted-foreground">{fmtCurrency(inv.amountDue)} · {inv.daysOverdue}d overdue · {R_INVOICE_STATUS_LABEL[inv.status] ?? humanizeSnake(inv.status)}</p>
                       </div>
-                      <span className="text-xs font-mono text-foreground w-4 text-right">{s.count}</span>
+                      <button onClick={() => setActiveTab("invoices")} className="text-[10px] font-medium text-primary hover:underline">Open</button>
                     </div>
                   ))}
                 </div>
-              </Card>
-              <Card className="p-4">
-                <div className="flex items-center justify-between mb-3">
-                  <p className="text-xs font-semibold text-foreground">Staff Attention Required</p>
-                  <span className="text-[10px] text-muted-foreground">{attentionInvoices.length} invoice{attentionInvoices.length !== 1 ? "s" : ""}</span>
-                </div>
-                {attentionInvoices.length === 0
-                  ? <p className="text-xs text-muted-foreground text-center py-6">No invoices require attention.</p>
-                  : <div className="space-y-1">{attentionInvoices.map(inv => (
-                      <div key={inv.invoice_id} className="flex items-center justify-between py-2 border-b border-border last:border-0">
-                        <div>
-                          <p className="text-xs font-medium text-foreground">{inv.patient_name}</p>
-                          <p className="text-[10px] text-muted-foreground">{inv.invoice_number} · {fmtAmt(inv.amount_due)}
-                            {!inv.patient_phone && <span className="ml-1 text-amber-600">· No phone</span>}
-                            {!inv.patient_email && <span className="ml-1 text-amber-600">· No email</span>}
-                          </p>
-                        </div>
-                        <div className="flex items-center gap-2">
-                          <RecoveryBadge status={inv.status} />
-                          <button onClick={() => setDetailInvoice(inv)} className="text-[10px] text-primary hover:underline">View</button>
-                        </div>
+              )}
+            </Card>
+
+            <Card className="overflow-hidden">
+              <div className="px-4 py-3 border-b border-border">
+                <h3 className="text-sm font-semibold text-foreground">Recent Activity</h3>
+              </div>
+              {activity.length === 0 ? (
+                <p className="text-xs text-muted-foreground py-8 text-center">No recovery activity yet.</p>
+              ) : (
+                <div className="divide-y divide-border max-h-72 overflow-y-auto">
+                  {activity.slice(0, 10).map(a => (
+                    <div key={a.id} className="px-4 py-2.5 text-xs">
+                      <div className="flex items-center justify-between">
+                        <span className="font-medium text-foreground">{a.patientName || humanizeSnake(a.type)}</span>
+                        <span className="text-[10px] text-muted-foreground">{fmtDate(a.timestamp)}</span>
                       </div>
-                    ))}</div>
-                }
-              </Card>
-            </div>
-            <Card className="p-4">
-              <p className="text-xs font-semibold text-foreground mb-3">Recent Activity</p>
-              {/* Merges system communications (SMS/email sends) with staff-triggered actions (send/pause/escalate/etc.) into one feed */}
-              {(() => {
-                const commEvents = PR_COMMS.map(c => ({
-                  key: `comm_${c.comm_id}`, timestamp: c.timestamp, kind: "comm" as const, comm: c,
-                }));
-                const actionEvents = activityLog.map(a => ({
-                  key: `act_${a.id}`, timestamp: a.timestamp, kind: "action" as const, action: a,
-                }));
-                const merged = [...commEvents, ...actionEvents].sort((a, b) => b.timestamp.localeCompare(a.timestamp)).slice(0, 10);
-                return merged.length === 0
-                  ? <p className="text-xs text-muted-foreground text-center py-6">No recent activity.</p>
-                  : <div className="space-y-0">
-                      {merged.map(ev => ev.kind === "comm" ? (
-                        <div key={ev.key} className="flex items-center gap-3 py-2.5 border-b border-border last:border-0">
-                          <div className={`w-6 h-6 rounded-full flex items-center justify-center flex-shrink-0 ${ev.comm.status === "failed" ? "bg-red-100" : ev.comm.channel === "sms" ? "bg-blue-100" : "bg-violet-100"}`}>
-                            {ev.comm.channel === "sms" ? <MessageSquare size={10} className={ev.comm.status === "failed" ? "text-red-600" : "text-blue-600"} /> : <Mail size={10} className="text-violet-600" />}
-                          </div>
-                          <div className="flex-1 min-w-0">
-                            <p className="text-xs text-foreground">
-                              <span className="font-medium">{ev.comm.patient_name}</span> · {ev.comm.channel.toUpperCase()}{" "}
-                              <span className={ev.comm.status === "failed" ? "text-red-600" : ev.comm.status === "delivered" ? "text-emerald-600" : "text-muted-foreground"}>{ev.comm.status}</span>
-                            </p>
-                            <p className="text-[10px] text-muted-foreground truncate">{ev.comm.message}</p>
-                          </div>
-                          <span className="text-[10px] text-muted-foreground shrink-0">{fmt(ev.comm.timestamp)}</span>
-                        </div>
-                      ) : (
-                        <div key={ev.key} className="flex items-center gap-3 py-2.5 border-b border-border last:border-0">
-                          <div className="w-6 h-6 rounded-full flex items-center justify-center flex-shrink-0 bg-amber-100">
-                            <ClipboardList size={10} className="text-amber-600" />
-                          </div>
-                          <div className="flex-1 min-w-0">
-                            <p className="text-xs text-foreground"><span className="font-medium">{ev.action.label}</span> · {ev.action.invoice_number}</p>
-                            <p className="text-[10px] text-muted-foreground">Staff action</p>
-                          </div>
-                          <span className="text-[10px] text-muted-foreground shrink-0">{fmt(ev.action.timestamp)}</span>
-                        </div>
-                      ))}
-                    </div>;
-              })()}
+                      <p className="text-[10px] text-muted-foreground mt-0.5">{a.summary || humanizeSnake(a.type)}</p>
+                    </div>
+                  ))}
+                </div>
+              )}
             </Card>
           </div>
-        )}
+        </div>
+      )}
 
-        {/* Invoices */}
-        {activeTab === "invoices" && (
-          <div className="p-6 space-y-4">
-            <h1 className="text-base font-semibold text-foreground">Invoices</h1>
-            <div className="flex items-center gap-3 flex-wrap">
-              <div className="relative min-w-[180px] max-w-xs flex-1">
-                <Search size={13} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
-                <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Invoice # or patient name…" className="w-full bg-muted border border-border rounded-md pl-8 pr-3 py-1.5 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring" />
-              </div>
-              {filterBtns([
-                ["all","All"],["unpaid","Unpaid"],["paid","Paid"],
-                ["escalation","Staff Attn"],["hold","Paused"],["failed","Failed"],
-                ["missing_phone","No Phone"],["missing_email","No Email"],
-              ], invoiceFilter, setInvoiceFilter)}
-              <div className="flex items-center gap-2 ml-auto">
-                <span className="text-[10px] text-muted-foreground">Sort:</span>
-                <select value={sortField} onChange={e => setSortField(e.target.value as typeof sortField)} className="bg-muted border border-border rounded-md px-2 py-1 text-[10px] text-foreground focus:outline-none">
-                  <option value="due_date">Due Date</option>
-                  <option value="amount_due">Amount</option>
-                  <option value="last_updated">Last Updated</option>
-                  <option value="next_reminder_at">Next Reminder</option>
-                </select>
-                <button onClick={() => setSortDir(d => d === "asc" ? "desc" : "asc")} className="text-[10px] bg-muted border border-border px-2 py-1 rounded-md hover:bg-accent">{sortDir === "asc" ? "↑ Asc" : "↓ Desc"}</button>
-              </div>
+      {activeTab === "queue" && (
+        <div className="space-y-4">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-1 bg-muted border border-border rounded-md p-1 w-fit">
+              {["pending", "approved", "completed", "cancelled", "failed"].map(f => (
+                <button key={f} onClick={() => setQueueFilter(f)} className={`text-[10px] px-2.5 py-1 rounded transition-colors ${queueFilter === f ? "bg-card shadow-sm text-foreground font-medium" : "text-muted-foreground hover:text-foreground"}`}>{humanizeSnake(f)}</button>
+              ))}
             </div>
-            {sortedFilteredInvoices.length === 0
-              ? <Card className="p-10 text-center"><p className="text-sm font-medium text-foreground">No invoices found</p><p className="text-xs text-muted-foreground mt-1">Try adjusting your search or filter.</p></Card>
-              : <Card className="overflow-hidden">
-                  <div className="overflow-x-auto">
-                    <table className="w-full text-xs">
-                      <thead><tr className="border-b border-border bg-muted/50">
-                        <th className="text-left px-4 py-2.5 text-[10px] font-semibold text-muted-foreground uppercase tracking-wide whitespace-nowrap">Invoice #</th>
-                        <th className="text-left px-4 py-2.5 text-[10px] font-semibold text-muted-foreground uppercase tracking-wide whitespace-nowrap">Patient</th>
-                        <SortTh field="amount_due" label="Amount Due" />
-                        <SortTh field="due_date" label="Due Date" />
-                        <th className="text-left px-4 py-2.5 text-[10px] font-semibold text-muted-foreground uppercase tracking-wide whitespace-nowrap">Status</th>
-                        <th className="text-left px-4 py-2.5 text-[10px] font-semibold text-muted-foreground uppercase tracking-wide whitespace-nowrap">Contact</th>
-                        <SortTh field="last_updated" label="Last Reminder" />
-                        <SortTh field="next_reminder_at" label="Next Reminder" />
-                        <th className="text-left px-4 py-2.5 text-[10px] font-semibold text-muted-foreground uppercase tracking-wide whitespace-nowrap">Actions</th>
-                      </tr></thead>
-                      <tbody>
-                        {sortedFilteredInvoices.map(inv => (
-                          <tr key={inv.invoice_id} className="border-b border-border last:border-0 hover:bg-muted/30 transition-colors">
-                            <td className="px-4 py-3 font-mono font-medium text-foreground">{inv.invoice_number}</td>
-                            <td className="px-4 py-3 text-foreground whitespace-nowrap">{inv.patient_name}</td>
-                            <td className="px-4 py-3 font-mono">{fmtAmt(inv.amount_due)}</td>
-                            <td className="px-4 py-3 text-muted-foreground whitespace-nowrap">{fmt(inv.due_date)}</td>
-                            <td className="px-4 py-3"><RecoveryBadge status={inv.status} /></td>
-                            <td className="px-4 py-3">
-                              <div className="flex flex-col gap-0.5">
-                                <span className={`text-[10px] ${inv.patient_phone ? "text-emerald-600" : "text-amber-600"}`}>{inv.patient_phone ? "✓ Phone" : "✗ No phone"}</span>
-                                <span className={`text-[10px] ${inv.patient_email ? "text-emerald-600" : "text-amber-600"}`}>{inv.patient_email ? "✓ Email" : "✗ No email"}</span>
-                              </div>
-                            </td>
-                            <td className="px-4 py-3 text-muted-foreground whitespace-nowrap">{fmt(inv.last_reminder_at)}</td>
-                            <td className="px-4 py-3 text-muted-foreground whitespace-nowrap">{fmt(inv.next_reminder_at)}</td>
-                            <td className="px-4 py-3">
-                              <div className="flex items-center gap-1.5 flex-wrap">
-                                <button onClick={() => setDetailInvoice(inv)} className="text-[10px] font-medium text-primary hover:underline whitespace-nowrap">View</button>
-                                <span className="text-border">·</span>
-                                <button onClick={() => simulateAction("Send reminder now", inv.invoice_number)} className="text-[10px] text-muted-foreground hover:text-foreground">Send</button>
-                                <span className="text-border">·</span>
-                                <button onClick={() => simulateAction(inv.status === "manual_hold" ? "Resume reminders" : "Pause reminders", inv.invoice_number)} className="text-[10px] text-muted-foreground hover:text-foreground whitespace-nowrap">{inv.status === "manual_hold" ? "Resume" : "Pause"}</button>
-                                <span className="text-border">·</span>
-                                <button onClick={() => simulateAction("Escalate to staff", inv.invoice_number)} className="text-[10px] text-muted-foreground hover:text-foreground whitespace-nowrap">Escalate</button>
-                                <span className="text-border">·</span>
-                                <button onClick={() => simulateAction("Reconcile with Juvonno", inv.invoice_number)} className="text-[10px] text-muted-foreground hover:text-foreground whitespace-nowrap">Reconcile</button>
-                              </div>
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                </Card>
-            }
-          </div>
-        )}
-
-        {/* Follow-Ups */}
-        {activeTab === "followups" && (
-          <div className="p-6 space-y-4">
-            <h1 className="text-base font-semibold text-foreground">Follow-Ups</h1>
-            {filterBtns([["pending","Pending"],["completed","Completed"],["cancelled","Cancelled"],["failed","Failed"]], taskTab, (v) => setTaskTab(v as typeof taskTab))}
-            {filteredTasks.length === 0
-              ? <Card className="p-10 text-center"><p className="text-sm font-medium text-foreground">No {taskTab} reminders</p><p className="text-xs text-muted-foreground mt-1">No reminder tasks in this category.</p></Card>
-              : <Card className="overflow-hidden">
-                  <div className="overflow-x-auto">
-                    <table className="w-full text-xs">
-                      <thead><tr className="border-b border-border bg-muted/50">
-                        {["Task ID","Invoice #","Patient","Type","Scheduled","Status","Attempts","Notes","Actions"].map(h => (
-                          <th key={h} className="text-left px-4 py-2.5 text-[10px] font-semibold text-muted-foreground uppercase tracking-wide whitespace-nowrap">{h}</th>
-                        ))}
-                      </tr></thead>
-                      <tbody>
-                        {filteredTasks.map(t => (
-                          <tr key={t.task_id} className="border-b border-border last:border-0 hover:bg-muted/30 transition-colors">
-                            <td className="px-4 py-3 font-mono text-muted-foreground text-[10px]">{t.task_id}</td>
-                            <td className="px-4 py-3 font-mono font-medium text-foreground">{t.invoice_number}</td>
-                            <td className="px-4 py-3 text-foreground whitespace-nowrap">{t.patient_name}</td>
-                            <td className="px-4 py-3 font-mono text-muted-foreground text-[10px]">{t.reminder_type}</td>
-                            <td className="px-4 py-3 text-muted-foreground whitespace-nowrap">{fmt(t.scheduled_time)}</td>
-                            <td className="px-4 py-3">
-                              <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded ${t.status === "completed" ? "bg-emerald-100 text-emerald-700" : t.status === "failed" ? "bg-red-100 text-red-700" : t.status === "cancelled" ? "bg-slate-100 text-slate-600" : "bg-blue-100 text-blue-700"}`}>{t.status}</span>
-                            </td>
-                            <td className="px-4 py-3 text-center font-mono">{t.attempt_count}</td>
-                            <td className="px-4 py-3 text-muted-foreground">{t.failure_reason ?? "—"}</td>
-                            <td className="px-4 py-3">
-                              {t.status === "pending"
-                                ? <div className="flex items-center gap-1.5 flex-wrap">
-                                    <button onClick={() => simulateAction("Send now", t.invoice_number)} className="text-[10px] text-primary hover:underline">Send now</button>
-                                    <span className="text-border">·</span>
-                                    <button onClick={() => simulateAction("Reschedule task", t.invoice_number)} className="text-[10px] text-muted-foreground hover:text-foreground">Reschedule</button>
-                                    <span className="text-border">·</span>
-                                    <button onClick={() => simulateAction("Cancel task", t.invoice_number)} className="text-[10px] text-muted-foreground hover:text-foreground">Cancel</button>
-                                    <span className="text-border">·</span>
-                                    <button onClick={() => { const inv = PR_INVOICES.find(i => i.invoice_id === t.invoice_id); if (inv) setDetailInvoice(inv); }} className="text-[10px] text-muted-foreground hover:text-foreground whitespace-nowrap">Open invoice</button>
-                                  </div>
-                                : <div className="flex items-center gap-1.5">
-                                    <button onClick={() => { const inv = PR_INVOICES.find(i => i.invoice_id === t.invoice_id); if (inv) setDetailInvoice(inv); }} className="text-[10px] text-muted-foreground hover:text-foreground whitespace-nowrap">Open invoice</button>
-                                  </div>
-                              }
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                </Card>
-            }
-          </div>
-        )}
-
-        {/* Communications */}
-        {activeTab === "communications" && (
-          <div className="p-6 space-y-4">
-            <h1 className="text-base font-semibold text-foreground">Communications</h1>
-            <div className="flex items-center gap-3 flex-wrap">
-              {filterBtns([["all","All"],["sms","SMS"],["email","Email"],["sent","Sent"],["delivered","Delivered"],["failed","Failed"]], commFilter, setCommFilter)}
-              <div className="flex items-center gap-2 ml-auto flex-shrink-0">
-                <label className="text-[10px] text-muted-foreground">From</label>
-                <input type="date" value={commDateFrom} onChange={e => setCommDateFrom(e.target.value)} className="bg-muted border border-border rounded-md px-2 py-1 text-[10px] text-foreground focus:outline-none focus:ring-1 focus:ring-ring" />
-                <label className="text-[10px] text-muted-foreground">To</label>
-                <input type="date" value={commDateTo} onChange={e => setCommDateTo(e.target.value)} className="bg-muted border border-border rounded-md px-2 py-1 text-[10px] text-foreground focus:outline-none focus:ring-1 focus:ring-ring" />
-                {(commDateFrom || commDateTo) && <button onClick={() => { setCommDateFrom(""); setCommDateTo(""); }} className="text-[10px] text-muted-foreground hover:text-foreground">Clear</button>}
-              </div>
-            </div>
-            {filteredComms.length === 0
-              ? <Card className="p-10 text-center"><p className="text-sm font-medium text-foreground">No communications found</p><p className="text-xs text-muted-foreground mt-1">Try adjusting your filter or date range.</p></Card>
-              : <Card className="overflow-hidden">
-                  <div className="overflow-x-auto">
-                    <table className="w-full text-xs">
-                      <thead><tr className="border-b border-border bg-muted/50">
-                        {["Date","Invoice #","Patient","Channel","Recipient","Message Preview","Status"].map(h => (
-                          <th key={h} className="text-left px-4 py-2.5 text-[10px] font-semibold text-muted-foreground uppercase tracking-wide whitespace-nowrap">{h}</th>
-                        ))}
-                      </tr></thead>
-                      <tbody>
-                        {filteredComms.map(c => (
-                          <tr key={c.comm_id} className="border-b border-border last:border-0 hover:bg-muted/30 transition-colors">
-                            <td className="px-4 py-3 text-muted-foreground whitespace-nowrap">{fmt(c.timestamp)}</td>
-                            <td className="px-4 py-3 font-mono font-medium text-foreground">{c.invoice_number}</td>
-                            <td className="px-4 py-3 text-foreground whitespace-nowrap">{c.patient_name}</td>
-                            <td className="px-4 py-3">
-                              <span className={`inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded ${c.channel === "sms" ? "bg-blue-100 text-blue-700" : "bg-violet-100 text-violet-700"}`}>
-                                {c.channel === "sms" ? <MessageSquare size={9} /> : <Mail size={9} />}{c.channel.toUpperCase()}
-                              </span>
-                            </td>
-                            <td className="px-4 py-3 font-mono text-muted-foreground">{c.recipient}</td>
-                            <td className="px-4 py-3 text-muted-foreground max-w-[220px] truncate">{c.message}</td>
-                            <td className="px-4 py-3">
-                              <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded ${c.status === "delivered" ? "bg-emerald-100 text-emerald-700" : c.status === "sent" ? "bg-blue-100 text-blue-700" : c.status === "failed" ? "bg-red-100 text-red-700" : "bg-slate-100 text-slate-600"}`}>{c.status}</span>
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                </Card>
-            }
-          </div>
-        )}
-
-        {/* Settings */}
-        {activeTab === "settings" && (
-          <div className="p-6 space-y-5">
-            <div className="flex items-center justify-between">
-              <h1 className="text-base font-semibold text-foreground">Recovery Settings</h1>
-              <div className="flex items-center gap-3">
-                {saveMsg && <span className="text-xs text-emerald-600 font-medium">{saveMsg}</span>}
-                <button onClick={() => { setSavingSettings(true); setTimeout(() => { setSavingSettings(false); setSaveMsg("Settings saved"); setTimeout(() => setSaveMsg(""), 3000); }, 800); }} disabled={savingSettings} className="bg-primary text-primary-foreground text-xs font-medium px-4 py-2 rounded-md hover:opacity-90 disabled:opacity-50">
-                  {savingSettings ? "Saving…" : "Save Settings"}
+            {selectedQueueIds.size > 0 && (
+              <div className="flex items-center gap-2">
+                <span className="text-[10px] text-muted-foreground">{selectedQueueIds.size} selected</span>
+                <button
+                  onClick={() => {
+                    const ids = [...selectedQueueIds];
+                    const total = queue.filter(q => ids.includes(q.queueId)).reduce((s, q) => s + q.amountDue, 0);
+                    askConfirm("Approve selected calls?", `${ids.length} patient${ids.length === 1 ? "" : "s"}, ${fmtCurrency(total)} total balance. These will be dispatched for outbound calling once submitted.`, () => approveQueueIds(ids));
+                  }}
+                  className="text-[10px] font-medium bg-primary text-primary-foreground px-2.5 py-1.5 rounded-md hover:opacity-90"
+                >
+                  Approve selected
+                </button>
+                <button
+                  onClick={() => { const ids = [...selectedQueueIds]; askConfirm("Reject selected calls?", `${ids.length} call candidate${ids.length === 1 ? "" : "s"} will be rejected and not dispatched.`, () => rejectQueueIds(ids)); }}
+                  className="text-[10px] font-medium border border-border px-2.5 py-1.5 rounded-md hover:bg-muted"
+                >
+                  Reject selected
                 </button>
               </div>
+            )}
+          </div>
+
+          <Card className="overflow-hidden">
+            {filteredQueue.length === 0 ? (
+              <p className="text-xs text-muted-foreground py-10 text-center">No calls in this view.</p>
+            ) : (
+              <table className="w-full text-xs">
+                <thead>
+                  <tr className="border-b border-border bg-muted/40">
+                    <th className="px-4 py-2.5"><input type="checkbox" checked={allSelected} onChange={toggleSelectAll} className="rounded" /></th>
+                    {["Patient", "Invoices", "Balance", "Days Overdue", "Stage", "Scheduled", "Approval", "Status", ""].map(h => (
+                      <th key={h} className="text-left px-4 py-2.5 text-muted-foreground font-medium">{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {filteredQueue.map(q => {
+                    const selectable = q.approval === "pending" && !["cancelled_paid", "cancelled_hold"].includes(q.queueStatus);
+                    return (
+                      <tr key={q.queueId} className="border-b border-border last:border-0 hover:bg-muted/30 transition-colors">
+                        <td className="px-4 py-2.5">{selectable && <input type="checkbox" checked={selectedQueueIds.has(q.queueId)} onChange={() => toggleQueueSelect(q.queueId)} className="rounded" />}</td>
+                        <td className="px-4 py-2.5 font-medium text-foreground">{q.patientName}</td>
+                        <td className="px-4 py-2.5 text-muted-foreground">{q.invoiceNumbers.length > 1 ? `${q.invoiceNumbers.length} invoices` : q.invoiceNumbers[0] ?? "—"}</td>
+                        <td className="px-4 py-2.5 font-mono text-foreground">{fmtCurrency(q.amountDue)}</td>
+                        <td className="px-4 py-2.5 text-muted-foreground">{q.daysOverdue}d</td>
+                        <td className="px-4 py-2.5"><RPill label={q.callStage === "day_14" ? "Day 14" : "Day 7"} tone="blue" /></td>
+                        <td className="px-4 py-2.5 text-muted-foreground">{fmtDate(q.scheduledFor)}</td>
+                        <td className="px-4 py-2.5"><RPill label={humanizeSnake(q.approval)} tone={q.approval === "approved" ? "green" : q.approval === "rejected" ? "red" : "amber"} /></td>
+                        <td className="px-4 py-2.5"><RPill label={R_QUEUE_STATUS_LABEL[q.queueStatus] ?? humanizeSnake(q.queueStatus)} tone={q.queueStatus === "completed" ? "green" : q.queueStatus === "failed" ? "red" : "gray"} /></td>
+                        <td className="px-4 py-2.5">
+                          {q.approval === "pending" && (
+                            <div className="flex gap-1">
+                              <button onClick={() => askConfirm("Approve this call?", `${q.patientName}, ${fmtCurrency(q.amountDue)}.`, () => approveQueueIds([q.queueId]))} className="text-[10px] font-medium text-primary hover:underline">Approve</button>
+                              <button onClick={() => askConfirm("Reject this call?", `${q.patientName} will not be called for this cycle.`, () => rejectQueueIds([q.queueId]))} className="text-[10px] font-medium text-muted-foreground hover:text-destructive">Reject</button>
+                            </div>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            )}
+          </Card>
+        </div>
+      )}
+
+      {activeTab === "invoices" && (
+        <div className="space-y-4">
+          <div className="flex items-center justify-between">
+            <div className="relative">
+              <Search size={13} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
+              <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search invoice # or patient…" className="bg-card border border-border rounded-md pl-8 pr-3 py-1.5 text-xs w-64 focus:outline-none focus:ring-1 focus:ring-ring" />
             </div>
-            <Card className="p-5 space-y-4">
-              <p className="text-xs font-semibold text-foreground">Automation Controls</p>
-              <div className="space-y-3">
-                {([
-                  { key:"sms_enabled", label:"Enable SMS reminders" },
-                  { key:"email_enabled", label:"Enable email reminders" },
-                  { key:"all_paused", label:"Pause ALL reminders (global override)" },
-                ] as const).map(({ key, label }) => (
-                  <label key={key} className="flex items-center justify-between gap-3 cursor-pointer">
-                    <span className="text-xs text-foreground">{label}</span>
-                    <button type="button" onClick={() => setPrSettings(prev => ({ ...prev, [key]: !prev[key] }))}
-                      className={`relative w-9 h-5 rounded-full transition-colors flex-shrink-0 ${prSettings[key] ? "bg-primary" : "bg-muted border border-border"}`}>
-                      <span className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform ${prSettings[key] ? "translate-x-4" : ""}`} />
-                    </button>
-                  </label>
-                ))}
-              </div>
-              <div className="grid grid-cols-2 gap-4 pt-2 border-t border-border md:grid-cols-4">
-                <div className="space-y-1.5">
-                  <label className="text-xs font-medium text-foreground">Clinic Timezone</label>
-                  <select value={prSettings.timezone} onChange={e => setPrSettings(s => ({ ...s, timezone:e.target.value }))} className="w-full bg-input-background border border-border rounded-md px-3 py-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring">
-                    <option>America/Toronto</option><option>America/Vancouver</option><option>America/New_York</option>
-                  </select>
-                </div>
-                <div className="space-y-1.5">
-                  <label className="text-xs font-medium text-foreground">Send Window Start</label>
-                  <input type="time" value={prSettings.send_start} onChange={e => setPrSettings(s => ({ ...s, send_start:e.target.value }))} className="w-full bg-input-background border border-border rounded-md px-3 py-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring" />
-                </div>
-                <div className="space-y-1.5">
-                  <label className="text-xs font-medium text-foreground">Send Window End</label>
-                  <input type="time" value={prSettings.send_end} onChange={e => setPrSettings(s => ({ ...s, send_end:e.target.value }))} className="w-full bg-input-background border border-border rounded-md px-3 py-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring" />
-                </div>
-                <div className="space-y-1.5">
-                  <label className="text-xs font-medium text-foreground">Minimum Invoice Balance ($)</label>
-                  <input type="number" min={0} value={prSettings.min_balance} onChange={e => setPrSettings(s => ({ ...s, min_balance:e.target.value }))} placeholder="0" className="w-full bg-input-background border border-border rounded-md px-3 py-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring" />
-                </div>
-              </div>
-            </Card>
-            <Card className="p-5 space-y-4">
-              <p className="text-xs font-semibold text-foreground">Reminder Schedule</p>
-              <p className="text-[10px] text-muted-foreground">Days between each reminder stage. Set 0 to send immediately when eligible.</p>
-              {([
-                { key:"sms1_delay" as const, label:"SMS Reminder 1", sub:"Days after invoice becomes eligible" },
-                { key:"email1_delay" as const, label:"Email Reminder 1", sub:"Days after SMS 1" },
-                { key:"sms2_delay" as const, label:"SMS Reminder 2", sub:"Days after Email 1" },
-                { key:"email2_delay" as const, label:"Email Reminder 2", sub:"Days after SMS 2" },
-                { key:"escalation_delay" as const, label:"Staff Escalation", sub:"Days after Email 2" },
-              ]).map(({ key, label, sub }) => (
-                <div key={key} className="flex items-center justify-between">
-                  <div><p className="text-xs font-medium text-foreground">{label}</p><p className="text-[10px] text-muted-foreground">{sub}</p></div>
-                  <div className="flex items-center gap-2">
-                    <input type="number" min={0} max={30} value={schedule[key]} onChange={e => setSchedule(s => ({ ...s, [key]:parseInt(e.target.value)||0 }))} className="w-16 bg-input-background border border-border rounded-md px-2 py-1.5 text-xs text-foreground text-center focus:outline-none focus:ring-1 focus:ring-ring" />
-                    <span className="text-xs text-muted-foreground">days</span>
-                  </div>
-                </div>
+            <div className="flex items-center gap-1 bg-muted border border-border rounded-md p-1 w-fit">
+              {["all", "unpaid", "paid", "attention", "hold"].map(f => (
+                <button key={f} onClick={() => setInvoiceFilter(f)} className={`text-[10px] px-2.5 py-1 rounded transition-colors ${invoiceFilter === f ? "bg-card shadow-sm text-foreground font-medium" : "text-muted-foreground hover:text-foreground"}`}>{f === "all" ? "All" : R_INVOICE_STATUS_LABEL[f] ?? humanizeSnake(f)}</button>
               ))}
-            </Card>
-            <div className="space-y-3">
-              <p className="text-xs font-semibold text-foreground">Message Templates</p>
-              {(["sms_1","email_1_subject","email_1_body","sms_2","email_2_subject","email_2_body"] as const).map(field => {
-                const labelMap: Record<string, string> = { sms_1:"SMS Reminder 1", email_1_subject:"Email Reminder 1 — Subject", email_1_body:"Email Reminder 1 — Body", sms_2:"SMS Reminder 2", email_2_subject:"Email Reminder 2 — Subject", email_2_body:"Email Reminder 2 — Body" };
-                const isSMS = field === "sms_1" || field === "sms_2";
-                const val = templates[field];
-                const preview = val
-                  .replace("{{patient_first_name}}","Sarah")
-                  .replace("{{invoice_number}}","INV-1001")
-                  .replace("{{amount_due}}","$285.00")
-                  .replace("{{due_date}}","Jun 15")
-                  .replace("{{payment_link}}","[pay.clinic.ca/inv-1001]")
-                  .replace("{{clinic_phone}}","(604) 555-0100");
-                return (
-                  <Card key={field} className="p-4 space-y-3">
-                    <div className="flex items-center justify-between">
-                      <p className="text-xs font-semibold text-foreground">{labelMap[field]}</p>
-                      {isSMS && <span className={`text-[10px] font-mono ${val.length > 160 ? "text-red-600 font-semibold" : "text-muted-foreground"}`}>{val.length} / 160 chars</span>}
-                    </div>
-                    <textarea value={val} onChange={e => setTemplates(prev => ({ ...prev, [field]:e.target.value }))} rows={isSMS ? 3 : 5} className="w-full bg-input-background border border-border rounded-md px-3 py-2 text-xs text-foreground font-mono focus:outline-none focus:ring-1 focus:ring-ring resize-none" />
-                    <div className="flex flex-wrap gap-1.5">
-                      {VARS.map(v => <button key={v} type="button" onClick={() => setTemplates(prev => ({ ...prev, [field]:prev[field]+v }))} className="text-[10px] bg-muted border border-border px-1.5 py-0.5 rounded font-mono hover:bg-accent transition-colors">{v}</button>)}
-                    </div>
-                    <div className="space-y-1.5 pt-1 border-t border-border">
-                      <p className="text-[10px] font-medium text-muted-foreground">Preview:</p>
-                      <p className="text-[10px] text-foreground bg-muted rounded-md p-2 whitespace-pre-wrap font-mono leading-relaxed">{preview}</p>
-                      <button type="button" onClick={() => setTemplates(prev => ({ ...prev, [field]:DEFAULT_TEMPLATES[field] }))} className="text-[10px] text-muted-foreground hover:text-foreground transition-colors">Restore default</button>
-                    </div>
-                  </Card>
-                );
-              })}
             </div>
           </div>
-        )}
 
-        </>}
-      </div>
+          <Card className="overflow-hidden">
+            {filteredInvoices.length === 0 ? (
+              <p className="text-xs text-muted-foreground py-10 text-center">No invoices match this view.</p>
+            ) : (
+              <table className="w-full text-xs">
+                <thead>
+                  <tr className="border-b border-border bg-muted/40">
+                    {["Invoice", "Patient", "Contact", "Balance", "Due", "Overdue", "Stage", "Status", ""].map(h => (
+                      <th key={h} className="text-left px-4 py-2.5 text-muted-foreground font-medium">{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {filteredInvoices.map(inv => (
+                    <tr key={inv.invoiceId} className="border-b border-border last:border-0 hover:bg-muted/30 transition-colors">
+                      <td className="px-4 py-2.5 font-mono text-foreground">{inv.invoiceNumber}</td>
+                      <td className="px-4 py-2.5 font-medium text-foreground">{inv.patientName}</td>
+                      <td className="px-4 py-2.5 text-muted-foreground font-mono">{inv.phoneMasked || "—"}</td>
+                      <td className="px-4 py-2.5 font-mono text-foreground">{fmtCurrency(inv.amountDue)}</td>
+                      <td className="px-4 py-2.5 text-muted-foreground">{fmtDate(inv.dueDate)}</td>
+                      <td className="px-4 py-2.5 text-muted-foreground">{inv.daysOverdue}d</td>
+                      <td className="px-4 py-2.5"><RPill label={R_STAGE_LABEL[inv.stage] ?? humanizeSnake(inv.stage)} tone="blue" /></td>
+                      <td className="px-4 py-2.5"><RPill label={R_INVOICE_STATUS_LABEL[inv.status] ?? humanizeSnake(inv.status)} tone={inv.status === "paid" ? "green" : inv.status === "staff_attention" || inv.status === "failed" ? "red" : inv.manualHold ? "gray" : "amber"} /></td>
+                      <td className="px-4 py-2.5">
+                        {inv.status !== "paid" && (
+                          <div className="flex gap-1.5">
+                            {inv.manualHold ? (
+                              <button onClick={() => invoiceAction("resume", inv)} className="text-[10px] font-medium text-primary hover:underline">Resume</button>
+                            ) : (
+                              <button onClick={() => askConfirm("Place on hold?", `${inv.patientName} will be paused from further recovery contact.`, () => invoiceAction("hold", inv))} className="text-[10px] font-medium text-muted-foreground hover:text-foreground">Hold</button>
+                            )}
+                            <button onClick={() => invoiceAction("reconcile", inv)} className="text-[10px] font-medium text-muted-foreground hover:text-foreground">Reconcile</button>
+                            <button onClick={() => askConfirm("Escalate to staff?", `${inv.patientName} will be flagged for manual staff follow-up.`, () => invoiceAction("escalate", inv))} className="text-[10px] font-medium text-muted-foreground hover:text-destructive">Escalate</button>
+                          </div>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </Card>
+        </div>
+      )}
+
+      {activeTab === "calls" && (
+        <div className="space-y-4">
+          <div className="flex items-center gap-1 bg-muted border border-border rounded-md p-1 w-fit">
+            <button onClick={() => setCallsSubTab("calls")} className={`text-[10px] px-2.5 py-1 rounded transition-colors ${callsSubTab === "calls" ? "bg-card shadow-sm text-foreground font-medium" : "text-muted-foreground hover:text-foreground"}`}>Call Outcomes</button>
+            <button onClick={() => setCallsSubTab("activity")} className={`text-[10px] px-2.5 py-1 rounded transition-colors ${callsSubTab === "activity" ? "bg-card shadow-sm text-foreground font-medium" : "text-muted-foreground hover:text-foreground"}`}>All Activity</button>
+          </div>
+
+          {callsSubTab === "calls" ? (
+            <Card className="overflow-hidden">
+              {calls.length === 0 ? (
+                <p className="text-xs text-muted-foreground py-10 text-center">Call outcomes will appear after the first completed call.</p>
+              ) : (
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="border-b border-border bg-muted/40">
+                      {["Patient", "Date/Time", "Stage", "Outcome", "Duration", "Balance", "Paid After", "Staff Follow-up"].map(h => (
+                        <th key={h} className="text-left px-4 py-2.5 text-muted-foreground font-medium">{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {calls.map(c => (
+                      <tr key={c.id} className="border-b border-border last:border-0 hover:bg-muted/30 transition-colors">
+                        <td className="px-4 py-2.5 font-medium text-foreground">{c.patientName}</td>
+                        <td className="px-4 py-2.5 text-muted-foreground">{fmtDate(c.timestamp)}</td>
+                        <td className="px-4 py-2.5"><RPill label={c.stage === "day_14" ? "Day 14" : "Day 7"} tone="blue" /></td>
+                        <td className="px-4 py-2.5"><RPill label={humanizeSnake(c.outcome) || "—"} tone={R_OUTCOME_TONE[c.outcome] ?? "gray"} /></td>
+                        <td className="px-4 py-2.5 font-mono text-muted-foreground">{c.duration || "—"}</td>
+                        <td className="px-4 py-2.5 font-mono text-foreground">{fmtCurrency(c.balance)}</td>
+                        <td className="px-4 py-2.5">{c.paidAfterward ? <RPill label="Paid" tone="green" /> : "—"}</td>
+                        <td className="px-4 py-2.5">{c.staffFollowup ? <RPill label="Needed" tone="amber" /> : "—"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </Card>
+          ) : (
+            <Card className="overflow-hidden">
+              {activity.length === 0 ? (
+                <p className="text-xs text-muted-foreground py-10 text-center">No recovery activity occurred yet.</p>
+              ) : (
+                <div className="divide-y divide-border">
+                  {activity.map(a => (
+                    <div key={a.id} className="px-4 py-2.5 flex items-center justify-between text-xs">
+                      <div>
+                        <p className="font-medium text-foreground">{a.patientName || humanizeSnake(a.type)}</p>
+                        <p className="text-[10px] text-muted-foreground mt-0.5">{a.summary || humanizeSnake(a.type)}</p>
+                      </div>
+                      <span className="text-[10px] text-muted-foreground flex-shrink-0 ml-3">{fmtDate(a.timestamp)}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </Card>
+          )}
+        </div>
+      )}
+
+      {activeTab === "settings" && (
+        <div className="max-w-2xl space-y-4">
+          <Card className="p-5 space-y-3">
+            <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">Automation Controls</p>
+            {[
+              ["ai_calls_enabled", "Enable AI calls"],
+              ["day_7_enabled", "Enable Day-7 calls"],
+              ["day_14_enabled", "Enable Day-14 calls"],
+              ["require_manual_approval", "Require manual approval"],
+              ["weekend_calls_enabled", "Enable weekend calls"],
+            ].map(([key, label]) => (
+              <label key={key} className="flex items-center justify-between py-1.5 border-b border-border last:border-0 text-xs">
+                <span className="text-foreground">{label}</span>
+                <input
+                  type="checkbox"
+                  checked={parseBoolean(settings?.[key])}
+                  onChange={e => setSettings(prev => ({ ...(prev ?? {}), [key]: e.target.checked }))}
+                  className="rounded"
+                />
+              </label>
+            ))}
+          </Card>
+          <Card className="p-5 space-y-3">
+            <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">Financial Assumptions</p>
+            {[
+              ["manual_minutes_per_followup", "Manual minutes per follow-up"],
+              ["loaded_hourly_cost", "Loaded staff hourly cost ($)"],
+              ["monthly_platform_cost", "Monthly allocated platform cost ($)"],
+            ].map(([key, label]) => (
+              <div key={key} className="space-y-1">
+                <label className="text-xs font-medium text-foreground">{label}</label>
+                <input
+                  type="number"
+                  value={safeText(settings?.[key])}
+                  onChange={e => setSettings(prev => ({ ...(prev ?? {}), [key]: e.target.value }))}
+                  className="w-full bg-input-background border border-border rounded-md px-3 py-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+                />
+              </div>
+            ))}
+          </Card>
+          <button
+            onClick={async () => {
+              const ok = await postAction("/recovery/settings", settings ?? {});
+              showToast(ok ? "Settings saved." : "Could not reach the recovery workflow.");
+              if (ok) refetch();
+            }}
+            disabled={actionBusy}
+            className="bg-primary text-primary-foreground text-xs font-medium px-4 py-2 rounded-md hover:opacity-90 disabled:opacity-50"
+          >
+            Save Settings
+          </button>
+          <button
+            onClick={() => askConfirm("Pause all calls?", "This immediately stops all outbound recovery calls for every patient until re-enabled.", async () => {
+              const ok = await postAction("/recovery/settings", { ...(settings ?? {}), ai_calls_enabled: false });
+              showToast(ok ? "All calls paused." : "Could not reach the recovery workflow.");
+              if (ok) refetch();
+            })}
+            className="ml-2 text-xs font-medium text-destructive border border-destructive/30 px-4 py-2 rounded-md hover:bg-red-50"
+          >
+            Pause All Calls
+          </button>
+        </div>
+      )}
     </div>
   );
 }
