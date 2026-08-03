@@ -18,8 +18,11 @@ import {
 } from "recharts";
 
 // ── Palette helpers ──────────────────────────────────────────────────────────
+// Healthcare-appropriate teal/white palette. `PURPLE` keeps its name (renaming
+// would touch every chart/KpiCard call site) but is now a clinical blue used
+// as the second series color alongside TEAL, matching --chart-2 in theme.css.
 const TEAL = "#0D9488";
-const PURPLE = "#7C3AED";
+const PURPLE = "#2563EB";
 const INDIGO = "#6366F1";
 const AMBER = "#F59E0B";
 const RED = "#EF4444";
@@ -182,7 +185,7 @@ function useDashboard() { return useContext(DashboardContext); }
 function Badge({ label, variant }: { label: string; variant: string }) {
   const map: Record<string, string> = {
     Booked: "bg-emerald-100 text-emerald-700",
-    Transferred: "bg-violet-100 text-violet-700",
+    Transferred: "bg-teal-100 text-teal-700",
     "FAQ Answered": "bg-teal-100 text-teal-700",
     "Staff Action": "bg-amber-100 text-amber-700",
     "Staff Action Needed": "bg-amber-100 text-amber-700",
@@ -196,7 +199,7 @@ function Badge({ label, variant }: { label: string; variant: string }) {
     Medium: "bg-amber-100 text-amber-700",
     Low: "bg-slate-100 text-slate-600",
     New: "bg-blue-100 text-blue-700",
-    "In Progress": "bg-violet-100 text-violet-700",
+    "In Progress": "bg-teal-100 text-teal-700",
     Completed: "bg-emerald-100 text-emerald-700",
     Dismissed: "bg-slate-100 text-slate-500",
     Active: "bg-emerald-100 text-emerald-700",
@@ -218,7 +221,7 @@ function KpiCard({ label, value, sub, icon: Icon, trend, color = "purple" }: {
   label: string; value: string; sub?: string; icon: any; trend?: string; color?: string;
 }) {
   const colors: Record<string, string> = {
-    purple: "bg-violet-50 text-violet-600",
+    purple: "bg-blue-50 text-blue-600",
     teal: "bg-teal-50 text-teal-600",
     green: "bg-emerald-50 text-emerald-600",
     amber: "bg-amber-50 text-amber-600",
@@ -322,7 +325,7 @@ function Sidebar({ active, onNav }: { active: string; onNav: (id: string) => voi
     <div className="w-[240px] min-h-screen bg-sidebar flex flex-col flex-shrink-0">
       <div className="px-5 py-5 border-b border-sidebar-border">
         <div className="flex items-center gap-2.5">
-          <div className="w-7 h-7 rounded-md bg-violet-600 flex items-center justify-center">
+          <div className="w-7 h-7 rounded-md bg-teal-600 flex items-center justify-center">
             <Bot size={14} className="text-white" />
           </div>
           <div>
@@ -344,11 +347,11 @@ function Sidebar({ active, onNav }: { active: string; onNav: (id: string) => voi
                 onClick={() => onNav(id)}
                 className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-md text-left transition-colors text-sm ${
                   active === id
-                    ? "bg-violet-600/20 text-white font-medium"
+                    ? "bg-teal-600/20 text-white font-medium"
                     : "text-sidebar-foreground hover:bg-sidebar-accent hover:text-white"
                 }`}
               >
-                <Icon size={15} className={active === id ? "text-violet-400" : ""} />
+                <Icon size={15} className={active === id ? "text-teal-400" : ""} />
                 <span className="flex-1">{label}</span>
                 {id === "staff-queue" && openTaskCount > 0 && (
                   <span className="bg-red-500 text-white text-[10px] font-bold px-1.5 py-0.5 rounded-full">{openTaskCount}</span>
@@ -360,7 +363,7 @@ function Sidebar({ active, onNav }: { active: string; onNav: (id: string) => voi
       </nav>
       <div className="px-4 py-4 border-t border-sidebar-border">
         <div className="flex items-center gap-2.5">
-          <div className="w-7 h-7 rounded-full bg-violet-700 flex items-center justify-center text-xs text-white font-semibold">
+          <div className="w-7 h-7 rounded-full bg-teal-700 flex items-center justify-center text-xs text-white font-semibold">
             {tenantInfo ? initials(tenantInfo.receptionist_name) : "—"}
           </div>
           <div className="flex-1 min-w-0">
@@ -403,7 +406,7 @@ function TopBar() {
         <button className="p-2 rounded-md hover:bg-muted transition-colors">
           <HelpCircle size={15} className="text-muted-foreground" />
         </button>
-        <button className="w-7 h-7 rounded-full bg-violet-600 flex items-center justify-center text-xs text-white font-semibold">{tenantInfo ? initials(tenantInfo.receptionist_name) : "—"}</button>
+        <button className="w-7 h-7 rounded-full bg-teal-600 flex items-center justify-center text-xs text-white font-semibold">{tenantInfo ? initials(tenantInfo.receptionist_name) : "—"}</button>
       </div>
     </div>
   );
@@ -554,7 +557,7 @@ function AIReceptionistScreen() {
         {/* Agent Profile */}
         <Card className="p-5 flex flex-col gap-4">
           <div className="flex items-center gap-3">
-            <div className="w-12 h-12 rounded-full bg-gradient-to-br from-violet-500 to-teal-500 flex items-center justify-center text-white font-bold text-lg">G</div>
+            <div className="w-12 h-12 rounded-full bg-gradient-to-br from-teal-600 to-cyan-500 flex items-center justify-center text-white font-bold text-lg">G</div>
             <div>
               <p className="font-semibold text-foreground">Grace</p>
               <p className="text-xs text-muted-foreground">AI Receptionist</p>
@@ -657,10 +660,10 @@ function AIReceptionistScreen() {
             {flowSteps.map((step, i) => (
               <div key={step} className="flex items-center flex-shrink-0">
                 <div className="flex flex-col items-center gap-1">
-                  <div className="w-8 h-8 rounded-full bg-violet-100 border-2 border-violet-400 flex items-center justify-center text-[10px] font-bold text-violet-700">{i + 1}</div>
+                  <div className="w-8 h-8 rounded-full bg-teal-100 border-2 border-teal-400 flex items-center justify-center text-[10px] font-bold text-teal-700">{i + 1}</div>
                   <span className="text-[10px] text-center text-foreground whitespace-nowrap w-20">{step}</span>
                 </div>
-                {i < flowSteps.length - 1 && <div className="w-8 h-0.5 bg-violet-200 flex-shrink-0 mb-4" />}
+                {i < flowSteps.length - 1 && <div className="w-8 h-0.5 bg-teal-200 flex-shrink-0 mb-4" />}
               </div>
             ))}
           </div>
@@ -944,12 +947,12 @@ function CallLogsScreen({ direction }: { direction: "inbound" | "outbound" }) {
                     <div className="space-y-3">
                       {selectedTranscript!.lines!.map((line, i) => (
                         <div key={i} className={`flex gap-3 ${line.speaker === "Caller" ? "flex-row-reverse" : ""}`}>
-                          <div className={`w-6 h-6 rounded-full flex items-center justify-center text-[9px] font-bold flex-shrink-0 ${line.speaker === "Caller" ? "bg-slate-200 text-slate-600" : "bg-violet-100 text-violet-700"}`}>
+                          <div className={`w-6 h-6 rounded-full flex items-center justify-center text-[9px] font-bold flex-shrink-0 ${line.speaker === "Caller" ? "bg-slate-200 text-slate-600" : "bg-teal-100 text-teal-700"}`}>
                             {line.speaker[0]}
                           </div>
                           <div className={`max-w-md ${line.speaker === "Caller" ? "items-end" : "items-start"} flex flex-col gap-0.5`}>
                             <span className="text-[10px] text-muted-foreground">{line.speaker}</span>
-                            <div className={`text-xs px-3 py-2 rounded-lg ${line.speaker === "Caller" ? "bg-muted text-foreground" : "bg-violet-100 text-violet-900"}`}>
+                            <div className={`text-xs px-3 py-2 rounded-lg ${line.speaker === "Caller" ? "bg-muted text-foreground" : "bg-teal-100 text-teal-900"}`}>
                               {line.text}
                             </div>
                           </div>
@@ -1004,7 +1007,7 @@ function TranscriptsScreen({ direction }: { direction: "inbound" | "outbound" })
               <div
                 key={t.id}
                 onClick={() => setSelected(t)}
-                className={`p-3 rounded-lg border cursor-pointer transition-colors ${selected?.id === t.id ? "border-primary/50 bg-violet-50" : "border-border bg-card hover:bg-muted/40"}`}
+                className={`p-3 rounded-lg border cursor-pointer transition-colors ${selected?.id === t.id ? "border-primary/50 bg-teal-50" : "border-border bg-card hover:bg-muted/40"}`}
               >
                 <div className="flex items-center justify-between mb-1">
                   <p className="text-xs font-semibold text-foreground">{t.caller}</p>
@@ -1041,12 +1044,12 @@ function TranscriptsScreen({ direction }: { direction: "inbound" | "outbound" })
               )}
               {(selected.lines ?? []).map((line, i) => (
                 <div key={i} className={`flex gap-3 ${line.speaker === "Caller" ? "flex-row-reverse" : ""}`}>
-                  <div className={`w-6 h-6 rounded-full flex items-center justify-center text-[9px] font-bold flex-shrink-0 ${line.speaker === "Caller" ? "bg-slate-200 text-slate-600" : "bg-violet-100 text-violet-700"}`}>
+                  <div className={`w-6 h-6 rounded-full flex items-center justify-center text-[9px] font-bold flex-shrink-0 ${line.speaker === "Caller" ? "bg-slate-200 text-slate-600" : "bg-teal-100 text-teal-700"}`}>
                     {line.speaker[0]}
                   </div>
                   <div className={`max-w-md ${line.speaker === "Caller" ? "items-end" : "items-start"} flex flex-col gap-0.5`}>
                     <span className="text-[10px] text-muted-foreground">{line.speaker}</span>
-                    <div className={`text-xs px-3 py-2 rounded-lg ${line.speaker === "Caller" ? "bg-muted text-foreground" : "bg-violet-100 text-violet-900"}`}>
+                    <div className={`text-xs px-3 py-2 rounded-lg ${line.speaker === "Caller" ? "bg-muted text-foreground" : "bg-teal-100 text-teal-900"}`}>
                       {line.text}
                     </div>
                   </div>
@@ -1100,7 +1103,7 @@ function AnalyticsScreen({ direction }: { direction: "inbound" | "outbound" }) {
     <div className="p-6 space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-lg font-semibold bg-gradient-to-r from-violet-600 to-teal-500 bg-clip-text text-transparent">
+          <h1 className="text-lg font-semibold bg-gradient-to-r from-teal-600 to-cyan-500 bg-clip-text text-transparent">
             {direction === "outbound" ? "Outbound Analytics" : "Inbound Analytics"}
           </h1>
           <p className="text-xs text-muted-foreground">{direction === "outbound" ? "Outbound call volume and trends over time." : "Inbound call volume and trends over time."}</p>
@@ -1108,7 +1111,7 @@ function AnalyticsScreen({ direction }: { direction: "inbound" | "outbound" }) {
         <button
           onClick={() => setRefreshTick(t => t + 1)}
           disabled={loading}
-          className="flex items-center gap-2 bg-gradient-to-r from-violet-600 to-teal-500 text-white text-sm font-medium px-4 py-2 rounded-md hover:opacity-90 transition-opacity disabled:opacity-50"
+          className="flex items-center gap-2 bg-gradient-to-r from-teal-600 to-cyan-500 text-white text-sm font-medium px-4 py-2 rounded-md hover:opacity-90 transition-opacity disabled:opacity-50"
         >
           <RefreshCw size={13} className={loading ? "animate-spin" : ""} /> Refresh
         </button>
@@ -1262,18 +1265,18 @@ function MakeCallScreen() {
     <div className="p-6 space-y-5">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-lg font-semibold bg-gradient-to-r from-violet-600 to-teal-500 bg-clip-text text-transparent">Make a Call</h1>
+          <h1 className="text-lg font-semibold bg-gradient-to-r from-teal-600 to-cyan-500 bg-clip-text text-transparent">Make a Call</h1>
           <p className="text-xs text-muted-foreground mt-0.5">Upload a contact list and launch an outbound campaign via Retell AI.</p>
         </div>
         <button
           onClick={reset}
-          className="flex items-center gap-2 bg-gradient-to-r from-violet-600 to-teal-500 text-white text-sm font-medium px-4 py-2 rounded-md hover:opacity-90 transition-opacity"
+          className="flex items-center gap-2 bg-gradient-to-r from-teal-600 to-cyan-500 text-white text-sm font-medium px-4 py-2 rounded-md hover:opacity-90 transition-opacity"
         >
           <RefreshCw size={13} /> Refresh
         </button>
       </div>
 
-      <span className="inline-flex items-center px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wide text-white bg-gradient-to-r from-violet-600 to-teal-500">
+      <span className="inline-flex items-center px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wide text-white bg-gradient-to-r from-teal-600 to-cyan-500">
         Outbound
       </span>
 
@@ -1283,7 +1286,7 @@ function MakeCallScreen() {
         <Card className="p-4 flex flex-col gap-1.5">
           <div className="flex items-start justify-between">
             <span className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Retell Status</span>
-            <span className="p-1.5 rounded-md bg-violet-50 text-violet-600"><Zap size={14} /></span>
+            <span className="p-1.5 rounded-md bg-teal-50 text-teal-600"><Zap size={14} /></span>
           </div>
           <p className="text-lg font-semibold text-foreground">Ready</p>
           <span className="inline-flex items-center w-fit text-[10px] font-medium text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-0.5 mt-0.5">n8n → Retell AI</span>
@@ -1408,7 +1411,7 @@ function TrendsScreen() {
       <div className="grid grid-cols-3 gap-4">
         {insights.map((ins) => {
           const colorMap: Record<string, string> = {
-            violet: "bg-violet-50 text-violet-600 border-violet-200",
+            violet: "bg-teal-50 text-teal-600 border-teal-200",
             teal: "bg-teal-50 text-teal-600 border-teal-200",
             indigo: "bg-indigo-50 text-indigo-600 border-indigo-200",
             amber: "bg-amber-50 text-amber-600 border-amber-200",
@@ -1506,7 +1509,7 @@ function getPatientFlags(task: StaffTask) {
 
 const STATUS_ACCENT: Record<string, string> = {
   New: "bg-blue-50 border-blue-100",
-  "In Progress": "bg-violet-50 border-violet-100",
+  "In Progress": "bg-teal-50 border-teal-100",
   Completed: "bg-emerald-50 border-emerald-100",
 };
 
@@ -1632,7 +1635,7 @@ function StaffQueueScreen() {
                     <td className="px-4 py-3 text-foreground">{flags ? flags.title : (safeText(task.type) || "—")}</td>
                     <td className="px-4 py-3">
                       <div className="flex items-center gap-2 flex-wrap">
-                        <div className="w-5 h-5 rounded-full bg-violet-100 text-violet-700 flex items-center justify-center text-[9px] font-bold flex-shrink-0">{patientName(task).charAt(0)}</div>
+                        <div className="w-5 h-5 rounded-full bg-teal-100 text-teal-700 flex items-center justify-center text-[9px] font-bold flex-shrink-0">{patientName(task).charAt(0)}</div>
                         <span className="font-medium text-foreground">{patientName(task)}</span>
                         {flags && <Badge label={flags.isFirstTimePatient ? "New Patient" : "Existing Patient"} variant={flags.isFirstTimePatient ? "New" : "Neutral"} />}
                         {flags?.visitType && <Badge label={flags.isFirstTimeVisit ? "Initial Visit" : "Follow-up"} variant={flags.isFirstTimeVisit ? "In Progress" : "Neutral"} />}
@@ -1671,7 +1674,7 @@ function StaffQueueScreen() {
 
             <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
               <div className="flex items-center gap-3 pb-4 border-b border-border">
-                <div className="w-10 h-10 rounded-full bg-violet-100 text-violet-700 flex items-center justify-center text-sm font-bold flex-shrink-0">{patientName(selectedTask).charAt(0)}</div>
+                <div className="w-10 h-10 rounded-full bg-teal-100 text-teal-700 flex items-center justify-center text-sm font-bold flex-shrink-0">{patientName(selectedTask).charAt(0)}</div>
                 <div className="flex-1">
                   <p className="text-sm font-semibold text-foreground">{patientName(selectedTask)}</p>
                   <p className="text-xs text-muted-foreground font-mono">{safeText(selectedTask.phone) || "No phone on file"}</p>
@@ -2497,7 +2500,7 @@ function SettingsScreen() {
                             onClick={() => setExpandedPractitionerId(p.id)}
                             className="flex-1 min-w-0 flex items-center gap-3 text-left"
                           >
-                            <div className="w-9 h-9 rounded-full bg-violet-100 text-violet-700 flex items-center justify-center text-xs font-bold flex-shrink-0">
+                            <div className="w-9 h-9 rounded-full bg-teal-100 text-teal-700 flex items-center justify-center text-xs font-bold flex-shrink-0">
                               {(p.name || "?").charAt(0).toUpperCase()}
                             </div>
                             <div className="flex-1 min-w-0">
