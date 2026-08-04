@@ -98,12 +98,33 @@ type UsageInvoice = {
 // Adapts the Inbound Tracker n8n workflow's response shapes (see
 // "Build Calls Response" / "Build Transcripts Response" nodes) into this
 // dashboard's existing CallLog/Transcript types.
+//
+// For outbound, the updated "Juvonno Outbound Tracker - Contact Logging"
+// n8n workflow now reads the real destination number and contact name off
+// Retell's call_analyzed webhook itself (to_number / metadata / dynamic
+// variables) and writes contact_first_name / contact_last_name /
+// contact_name / to_number straight into the Call Log and Transcripts
+// sheets - so the dashboard just displays those fields directly. This
+// replaces the old CSV-order-guessing workaround (localStorage FIFO queue),
+// which is no longer needed now that n8n reports the correct contact per
+// call.
+function outboundContactName(raw: Record<string, unknown>): string {
+  const full = String(raw.contact_name ?? "").trim();
+  if (full) return full;
+  const first = String(raw.contact_first_name ?? "").trim();
+  const last = String(raw.contact_last_name ?? "").trim();
+  const combined = [first, last].filter(Boolean).join(" ");
+  return combined || "Unknown";
+}
+
 function mapInboundCall(raw: Record<string, unknown>, direction: "inbound" | "outbound" = "inbound"): CallLog {
   return {
     id: String(raw.call_id ?? raw.id ?? crypto.randomUUID()),
     time: String(raw.timestamp ?? raw.date ?? ""),
-    caller: direction === "outbound" ? "Unknown" : String(raw.callerName ?? raw.from ?? "Unknown"),
-    phone: String(raw.from ?? raw.to ?? raw.phone ?? raw.phoneNumber ?? ""),
+    caller: direction === "outbound" ? outboundContactName(raw) : String(raw.callerName ?? raw.from ?? "Unknown"),
+    phone: direction === "outbound"
+      ? String(raw.to_number ?? raw.to ?? raw.phone ?? raw.phoneNumber ?? "")
+      : String(raw.from ?? raw.to ?? raw.phone ?? raw.phoneNumber ?? ""),
     outcome: String(raw.status ?? ""),
     sentiment: String(raw.sentiment ?? ""),
     duration: String(raw.durationDisplay ?? raw.duration_display ?? ""),
@@ -118,8 +139,10 @@ function mapInboundTranscript(raw: Record<string, unknown>, direction: "inbound"
   return {
     id: String(raw.call_id ?? raw.id ?? crypto.randomUUID()),
     time: String(raw.timestamp ?? raw.date ?? ""),
-    caller: direction === "outbound" ? "Unknown" : String(raw.callerName ?? "Unknown"),
-    phone: String(raw.from ?? raw.to ?? raw.phone ?? raw.phoneNumber ?? ""),
+    caller: direction === "outbound" ? outboundContactName(raw) : String(raw.callerName ?? "Unknown"),
+    phone: direction === "outbound"
+      ? String(raw.to_number ?? raw.to ?? raw.phone ?? raw.phoneNumber ?? "")
+      : String(raw.from ?? raw.to ?? raw.phone ?? raw.phoneNumber ?? ""),
     outcome: String(raw.status ?? ""),
     sentiment: String(raw.sentiment ?? ""),
     duration: String(raw.durationDisplay ?? raw.duration_display ?? ""),
@@ -127,88 +150,6 @@ function mapInboundTranscript(raw: Record<string, unknown>, direction: "inbound"
     direction,
     lines: Array.isArray(raw.transcript) ? raw.transcript as { speaker: string; text: string }[] : [],
   };
-}
-
-// Outbound caller/phone come ONLY from the CSV we uploaded, never from n8n
-// (its callerName/from fields for outbound calls are unreliable - often
-// "Unknown", and sometimes a placeholder phone number that doesn't match
-// what was actually dialed). Since we can't trust ANY field n8n returns to
-// identify which contact a given outbound call belongs to, we match calls
-// to CSV contacts by ORDER instead: each CSV upload appends its rows to a
-// FIFO queue, and each new outbound call (oldest-first) claims the next
-// unclaimed queue entry. The assignment is then remembered per call id so
-// it never changes on a later refresh once made.
-interface OutboundContact { firstName: string; lastName: string; phoneNumber: string }
-
-function outboundQueueKey(accessToken: string): string {
-  return `outboundQueue:${accessToken}`;
-}
-
-function outboundAssignmentsKey(accessToken: string): string {
-  return `outboundAssignments:${accessToken}`;
-}
-
-function loadOutboundQueue(accessToken: string): OutboundContact[] {
-  try {
-    return JSON.parse(localStorage.getItem(outboundQueueKey(accessToken)) ?? "[]");
-  } catch {
-    return [];
-  }
-}
-
-function loadOutboundAssignments(accessToken: string): Record<string, OutboundContact> {
-  try {
-    return JSON.parse(localStorage.getItem(outboundAssignmentsKey(accessToken)) ?? "{}");
-  } catch {
-    return {};
-  }
-}
-
-// Called right after a batch call is successfully started - appends the
-// submitted CSV rows (in order) to the FIFO queue future outbound calls
-// will be matched against.
-function saveOutboundContacts(accessToken: string, contacts: { phoneNumber: string; firstName: string; lastName: string }[]): void {
-  const queue = loadOutboundQueue(accessToken);
-  for (const c of contacts) queue.push({ firstName: c.firstName, lastName: c.lastName, phoneNumber: c.phoneNumber });
-  try {
-    localStorage.setItem(outboundQueueKey(accessToken), JSON.stringify(queue));
-  } catch {
-    // localStorage unavailable (private browsing, quota) - not critical, skip persisting.
-  }
-}
-
-// Assigns each outbound item (call or transcript, oldest first) its CSV
-// contact - reusing any assignment already made for that id, otherwise
-// claiming the next contact off the FIFO queue. Mutates items in place.
-function applyOutboundIdentities<T extends { id: number | string; time?: string; caller?: string; phone?: string }>(items: T[], accessToken: string | null | undefined): void {
-  if (!accessToken || items.length === 0) return;
-  const assignments = loadOutboundAssignments(accessToken);
-  const queue = loadOutboundQueue(accessToken);
-  let changed = false;
-
-  const sorted = [...items].sort((a, b) => String(a.time ?? "").localeCompare(String(b.time ?? "")));
-  for (const item of sorted) {
-    const id = String(item.id);
-    let entry = assignments[id];
-    if (!entry && queue.length > 0) {
-      entry = queue.shift()!;
-      assignments[id] = entry;
-      changed = true;
-    }
-    if (entry) {
-      item.caller = `${entry.firstName} ${entry.lastName}`.trim() || "Unknown";
-      item.phone = entry.phoneNumber;
-    }
-  }
-
-  if (changed) {
-    try {
-      localStorage.setItem(outboundAssignmentsKey(accessToken), JSON.stringify(assignments));
-      localStorage.setItem(outboundQueueKey(accessToken), JSON.stringify(queue));
-    } catch {
-      // localStorage unavailable - assignments won't persist across reloads, not critical.
-    }
-  }
 }
 
 // ── Dashboard context ─────────────────────────────────────────────────────────
@@ -964,7 +905,7 @@ function CallLogsScreen({ direction }: { direction: "inbound" | "outbound" }) {
           <table className="w-full text-xs">
             <thead>
               <tr className="border-b border-border bg-muted/40">
-                {["Date/Time", "Caller", "Phone", "Outcome", "Sentiment", "Duration", ""].map(h => (
+                {["Date/Time", direction === "outbound" ? "Contact" : "Caller", "Phone", "Outcome", "Sentiment", "Duration", ""].map(h => (
                   <th key={h} className="text-left px-3 py-2.5 text-muted-foreground font-medium whitespace-nowrap">{h}</th>
                 ))}
               </tr>
@@ -1335,12 +1276,20 @@ function MakeCallScreen() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           name: batchName || undefined,
-          contacts: validContacts.map(c => ({ phoneNumber: c.phoneNumber, firstName: c.firstName, lastName: c.lastName })),
+          // Matches the outbound tracker's recipient contract: E.164
+          // phone_number plus first/last/full name as Retell dynamic
+          // variables. clinic_id/client_id are added server-side from the
+          // authenticated tenant, not trusted from the browser.
+          contacts: validContacts.map(c => ({
+            phone_number: c.phoneNumber.trim(),
+            first_name: c.firstName.trim(),
+            last_name: c.lastName.trim(),
+            full_name: [c.firstName.trim(), c.lastName.trim()].filter(Boolean).join(" "),
+          })),
         }),
       });
       const json = await res.json().catch(() => ({}));
       if (res.ok && json.success !== false) {
-        saveOutboundContacts(accessToken, validContacts);
         setResult({ ok: true, message: `Batch call started for ${validContacts.length} contact${validContacts.length === 1 ? "" : "s"}.` });
         setContacts([]);
         setFileName("");
@@ -1949,7 +1898,7 @@ function RecordingsScreen({ direction }: { direction: "inbound" | "outbound" }) 
         <table className="w-full text-xs">
           <thead>
             <tr className="border-b border-border bg-muted/40">
-              {["Date/Time", "Caller", "Service", "Outcome", "Sentiment", "Duration", "Consent", "Retention", ""].map(h => (
+              {["Date/Time", direction === "outbound" ? "Contact" : "Caller", "Service", "Outcome", "Sentiment", "Duration", "Consent", "Retention", ""].map(h => (
                 <th key={h} className="text-left px-4 py-2.5 text-muted-foreground font-medium">{h}</th>
               ))}
             </tr>
@@ -4092,11 +4041,9 @@ export default function App() {
         setSettings(savedSettings ?? {});
         const inboundCalls = Array.isArray(callsRes?.calls) ? callsRes.calls.map((c: Record<string, unknown>) => mapInboundCall(c, "inbound")) : [];
         const outboundCalls = Array.isArray(outboundCallsRes?.calls) ? outboundCallsRes.calls.map((c: Record<string, unknown>) => mapInboundCall(c, "outbound")) : [];
-        applyOutboundIdentities(outboundCalls, accessToken);
         setCallLogs([...inboundCalls, ...outboundCalls]);
         const inboundTranscripts = Array.isArray(transcriptsRes?.transcripts) ? transcriptsRes.transcripts.map((t: Record<string, unknown>) => mapInboundTranscript(t, "inbound")) : [];
         const outboundTranscripts = Array.isArray(outboundTranscriptsRes?.transcripts) ? outboundTranscriptsRes.transcripts.map((t: Record<string, unknown>) => mapInboundTranscript(t, "outbound")) : [];
-        applyOutboundIdentities(outboundTranscripts, accessToken);
         setTranscripts([...inboundTranscripts, ...outboundTranscripts]);
         setAnalytics(Array.isArray(analyticsRes) ? analyticsRes : []);
         setOverview(overviewRes && !overviewRes.error ? overviewRes : null);
@@ -4150,13 +4097,11 @@ export default function App() {
           if (Array.isArray(callsRes?.calls) || Array.isArray(outboundCallsRes?.calls)) {
             const inboundCalls = Array.isArray(callsRes?.calls) ? callsRes.calls.map((c: Record<string, unknown>) => mapInboundCall(c, "inbound")) : [];
             const outboundCalls = Array.isArray(outboundCallsRes?.calls) ? outboundCallsRes.calls.map((c: Record<string, unknown>) => mapInboundCall(c, "outbound")) : [];
-            applyOutboundIdentities(outboundCalls, accessToken);
             setCallLogs([...inboundCalls, ...outboundCalls]);
           }
           if (Array.isArray(transcriptsRes?.transcripts) || Array.isArray(outboundTranscriptsRes?.transcripts)) {
             const inboundTranscripts = Array.isArray(transcriptsRes?.transcripts) ? transcriptsRes.transcripts.map((t: Record<string, unknown>) => mapInboundTranscript(t, "inbound")) : [];
             const outboundTranscripts = Array.isArray(outboundTranscriptsRes?.transcripts) ? outboundTranscriptsRes.transcripts.map((t: Record<string, unknown>) => mapInboundTranscript(t, "outbound")) : [];
-            applyOutboundIdentities(outboundTranscripts, accessToken);
             setTranscripts([...inboundTranscripts, ...outboundTranscripts]);
           }
           if (Array.isArray(analyticsRes)) setAnalytics(analyticsRes);

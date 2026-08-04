@@ -688,7 +688,12 @@ app.get('/api/link/:accessToken/outbound/invoices', n8nRoute(async (req, res) =>
   res.json(await callOutboundTracker(tenant, 'invoices'));
 }));
 
-// Triggers the "Make a Call" batch-call workflow - body: { contacts: [{phoneNumber, firstName, lastName}, ...], name?: string }
+// Triggers the "Make a Call" batch-call workflow - body:
+// { contacts: [{phone_number, first_name?, last_name?, full_name?}, ...], name?: string }
+// Matches the outbound tracker's recipient contract (see
+// FRONTEND_HANDOFF.md). clinic_id/client_id are set here from the resolved
+// tenant rather than trusted from the request body, so the browser can't
+// spoof which clinic a batch call is billed/logged against.
 app.post('/api/link/:accessToken/outbound/make-call', n8nRoute(async (req, res) => {
   const tenant = findTenant(req.params.accessToken);
   if (!tenant) return res.status(404).json({ error: 'Invalid access token' });
@@ -696,7 +701,17 @@ app.post('/api/link/:accessToken/outbound/make-call', n8nRoute(async (req, res) 
   if (!Array.isArray(contacts) || contacts.length === 0) {
     return res.status(400).json({ success: false, error: 'contacts must be a non-empty array' });
   }
-  const { status, json } = await postToOutboundTracker(tenant, 'make-call', { contacts, name });
+  const normalized = contacts.map((c) => {
+    const phone_number = String(c?.phone_number ?? c?.phoneNumber ?? '').trim();
+    const first_name = String(c?.first_name ?? c?.firstName ?? '').trim();
+    const last_name = String(c?.last_name ?? c?.lastName ?? '').trim();
+    const full_name = String(c?.full_name ?? c?.fullName ?? '').trim() || [first_name, last_name].filter(Boolean).join(' ');
+    return { phone_number, first_name, last_name, full_name, clinic_id: tenant.clinic_id, client_id: tenant.client_id };
+  });
+  if (normalized.some(c => !c.phone_number)) {
+    return res.status(400).json({ success: false, error: 'Every contact must have a phone_number' });
+  }
+  const { status, json } = await postToOutboundTracker(tenant, 'make-call', { contacts: normalized, name });
   res.status(status).json(json);
 }));
 
