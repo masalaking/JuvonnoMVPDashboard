@@ -66,6 +66,7 @@ type Transcript = {
   id: number | string;
   time?: string;
   caller?: string;
+  phone?: string;
   outcome?: string;
   sentiment?: string;
   service?: string;
@@ -119,19 +120,25 @@ function loadOutboundContacts(accessToken: string | null | undefined): Record<st
   }
 }
 
+// For outbound, caller/phone come ONLY from the CSV we uploaded - never
+// from n8n's callerName/from fields, which are frequently "Unknown" or
+// just echo the raw phone digits back as if they were a name. If a call's
+// phone doesn't match anything in the uploaded CSV, we show "Unknown"
+// rather than pretending the phone number is a name.
+function resolveOutboundIdentity(rawPhone: string, accessToken: string | null | undefined): { caller: string; phone: string } {
+  const contacts = loadOutboundContacts(accessToken);
+  const match = contacts[normalizePhone(rawPhone)];
+  if (match) {
+    return { caller: `${match.firstName} ${match.lastName}`.trim() || "Unknown", phone: rawPhone };
+  }
+  return { caller: "Unknown", phone: rawPhone };
+}
+
 function mapInboundCall(raw: Record<string, unknown>, direction: "inbound" | "outbound" = "inbound", accessToken?: string | null): CallLog {
   const rawPhone = String(raw.from ?? raw.to ?? raw.phone ?? raw.phoneNumber ?? "");
-  let caller = String(raw.callerName ?? raw.from ?? "Unknown");
-  let phone = rawPhone;
-
-  if (direction === "outbound") {
-    const contacts = loadOutboundContacts(accessToken);
-    const match = contacts[normalizePhone(rawPhone)];
-    if (match) {
-      caller = `${match.firstName} ${match.lastName}`.trim() || caller;
-      if (!phone) phone = rawPhone;
-    }
-  }
+  const { caller, phone } = direction === "outbound"
+    ? resolveOutboundIdentity(rawPhone, accessToken)
+    : { caller: String(raw.callerName ?? raw.from ?? "Unknown"), phone: rawPhone };
 
   return {
     id: String(raw.call_id ?? raw.id ?? crypto.randomUUID()),
@@ -148,11 +155,17 @@ function mapInboundCall(raw: Record<string, unknown>, direction: "inbound" | "ou
   };
 }
 
-function mapInboundTranscript(raw: Record<string, unknown>, direction: "inbound" | "outbound" = "inbound"): Transcript {
+function mapInboundTranscript(raw: Record<string, unknown>, direction: "inbound" | "outbound" = "inbound", accessToken?: string | null): Transcript {
+  const rawPhone = String(raw.from ?? raw.to ?? raw.phone ?? raw.phoneNumber ?? "");
+  const { caller, phone } = direction === "outbound"
+    ? resolveOutboundIdentity(rawPhone, accessToken)
+    : { caller: String(raw.callerName ?? "Unknown"), phone: rawPhone };
+
   return {
     id: String(raw.call_id ?? raw.id ?? crypto.randomUUID()),
     time: String(raw.timestamp ?? raw.date ?? ""),
-    caller: String(raw.callerName ?? "Unknown"),
+    caller,
+    phone,
     outcome: String(raw.status ?? ""),
     sentiment: String(raw.sentiment ?? ""),
     duration: String(raw.durationDisplay ?? raw.duration_display ?? ""),
@@ -3967,7 +3980,7 @@ export default function App() {
         const outboundCalls = Array.isArray(outboundCallsRes?.calls) ? outboundCallsRes.calls.map((c: Record<string, unknown>) => mapInboundCall(c, "outbound", accessToken)) : [];
         setCallLogs([...inboundCalls, ...outboundCalls]);
         const inboundTranscripts = Array.isArray(transcriptsRes?.transcripts) ? transcriptsRes.transcripts.map((t: Record<string, unknown>) => mapInboundTranscript(t, "inbound")) : [];
-        const outboundTranscripts = Array.isArray(outboundTranscriptsRes?.transcripts) ? outboundTranscriptsRes.transcripts.map((t: Record<string, unknown>) => mapInboundTranscript(t, "outbound")) : [];
+        const outboundTranscripts = Array.isArray(outboundTranscriptsRes?.transcripts) ? outboundTranscriptsRes.transcripts.map((t: Record<string, unknown>) => mapInboundTranscript(t, "outbound", accessToken)) : [];
         setTranscripts([...inboundTranscripts, ...outboundTranscripts]);
         setAnalytics(Array.isArray(analyticsRes) ? analyticsRes : []);
         setOverview(overviewRes && !overviewRes.error ? overviewRes : null);
@@ -4025,7 +4038,7 @@ export default function App() {
           }
           if (Array.isArray(transcriptsRes?.transcripts) || Array.isArray(outboundTranscriptsRes?.transcripts)) {
             const inboundTranscripts = Array.isArray(transcriptsRes?.transcripts) ? transcriptsRes.transcripts.map((t: Record<string, unknown>) => mapInboundTranscript(t, "inbound")) : [];
-            const outboundTranscripts = Array.isArray(outboundTranscriptsRes?.transcripts) ? outboundTranscriptsRes.transcripts.map((t: Record<string, unknown>) => mapInboundTranscript(t, "outbound")) : [];
+            const outboundTranscripts = Array.isArray(outboundTranscriptsRes?.transcripts) ? outboundTranscriptsRes.transcripts.map((t: Record<string, unknown>) => mapInboundTranscript(t, "outbound", accessToken)) : [];
             setTranscripts([...inboundTranscripts, ...outboundTranscripts]);
           }
           if (Array.isArray(analyticsRes)) setAnalytics(analyticsRes);
