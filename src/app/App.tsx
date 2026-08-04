@@ -98,53 +98,12 @@ type UsageInvoice = {
 // Adapts the Inbound Tracker n8n workflow's response shapes (see
 // "Build Calls Response" / "Build Transcripts Response" nodes) into this
 // dashboard's existing CallLog/Transcript types.
-// Outbound call names/numbers are unreliable coming back from the n8n
-// tracker (often "Unknown"), but we already know exactly who was called -
-// we sent that list ourselves from the uploaded CSV. Match on phone number
-// (last 10 digits, so +1/formatting differences don't matter) instead of
-// trusting whatever the workflow echoes back.
-function normalizePhone(p: string): string {
-  return (p ?? "").replace(/\D/g, "").slice(-10);
-}
-
-function outboundContactsKey(accessToken: string): string {
-  return `outboundContacts:${accessToken}`;
-}
-
-function loadOutboundContacts(accessToken: string | null | undefined): Record<string, { firstName: string; lastName: string }> {
-  if (!accessToken) return {};
-  try {
-    return JSON.parse(localStorage.getItem(outboundContactsKey(accessToken)) ?? "{}");
-  } catch {
-    return {};
-  }
-}
-
-// For outbound, caller/phone come ONLY from the CSV we uploaded - never
-// from n8n's callerName/from fields, which are frequently "Unknown" or
-// just echo the raw phone digits back as if they were a name. If a call's
-// phone doesn't match anything in the uploaded CSV, we show "Unknown"
-// rather than pretending the phone number is a name.
-function resolveOutboundIdentity(rawPhone: string, accessToken: string | null | undefined): { caller: string; phone: string } {
-  const contacts = loadOutboundContacts(accessToken);
-  const match = contacts[normalizePhone(rawPhone)];
-  if (match) {
-    return { caller: `${match.firstName} ${match.lastName}`.trim() || "Unknown", phone: rawPhone };
-  }
-  return { caller: "Unknown", phone: rawPhone };
-}
-
-function mapInboundCall(raw: Record<string, unknown>, direction: "inbound" | "outbound" = "inbound", accessToken?: string | null): CallLog {
-  const rawPhone = String(raw.from ?? raw.to ?? raw.phone ?? raw.phoneNumber ?? "");
-  const { caller, phone } = direction === "outbound"
-    ? resolveOutboundIdentity(rawPhone, accessToken)
-    : { caller: String(raw.callerName ?? raw.from ?? "Unknown"), phone: rawPhone };
-
+function mapInboundCall(raw: Record<string, unknown>, direction: "inbound" | "outbound" = "inbound"): CallLog {
   return {
     id: String(raw.call_id ?? raw.id ?? crypto.randomUUID()),
     time: String(raw.timestamp ?? raw.date ?? ""),
-    caller,
-    phone,
+    caller: direction === "outbound" ? "Unknown" : String(raw.callerName ?? raw.from ?? "Unknown"),
+    phone: String(raw.from ?? raw.to ?? raw.phone ?? raw.phoneNumber ?? ""),
     outcome: String(raw.status ?? ""),
     sentiment: String(raw.sentiment ?? ""),
     duration: String(raw.durationDisplay ?? raw.duration_display ?? ""),
@@ -155,17 +114,12 @@ function mapInboundCall(raw: Record<string, unknown>, direction: "inbound" | "ou
   };
 }
 
-function mapInboundTranscript(raw: Record<string, unknown>, direction: "inbound" | "outbound" = "inbound", accessToken?: string | null): Transcript {
-  const rawPhone = String(raw.from ?? raw.to ?? raw.phone ?? raw.phoneNumber ?? "");
-  const { caller, phone } = direction === "outbound"
-    ? resolveOutboundIdentity(rawPhone, accessToken)
-    : { caller: String(raw.callerName ?? "Unknown"), phone: rawPhone };
-
+function mapInboundTranscript(raw: Record<string, unknown>, direction: "inbound" | "outbound" = "inbound"): Transcript {
   return {
     id: String(raw.call_id ?? raw.id ?? crypto.randomUUID()),
     time: String(raw.timestamp ?? raw.date ?? ""),
-    caller,
-    phone,
+    caller: direction === "outbound" ? "Unknown" : String(raw.callerName ?? "Unknown"),
+    phone: String(raw.from ?? raw.to ?? raw.phone ?? raw.phoneNumber ?? ""),
     outcome: String(raw.status ?? ""),
     sentiment: String(raw.sentiment ?? ""),
     duration: String(raw.durationDisplay ?? raw.duration_display ?? ""),
@@ -173,6 +127,88 @@ function mapInboundTranscript(raw: Record<string, unknown>, direction: "inbound"
     direction,
     lines: Array.isArray(raw.transcript) ? raw.transcript as { speaker: string; text: string }[] : [],
   };
+}
+
+// Outbound caller/phone come ONLY from the CSV we uploaded, never from n8n
+// (its callerName/from fields for outbound calls are unreliable - often
+// "Unknown", and sometimes a placeholder phone number that doesn't match
+// what was actually dialed). Since we can't trust ANY field n8n returns to
+// identify which contact a given outbound call belongs to, we match calls
+// to CSV contacts by ORDER instead: each CSV upload appends its rows to a
+// FIFO queue, and each new outbound call (oldest-first) claims the next
+// unclaimed queue entry. The assignment is then remembered per call id so
+// it never changes on a later refresh once made.
+interface OutboundContact { firstName: string; lastName: string; phoneNumber: string }
+
+function outboundQueueKey(accessToken: string): string {
+  return `outboundQueue:${accessToken}`;
+}
+
+function outboundAssignmentsKey(accessToken: string): string {
+  return `outboundAssignments:${accessToken}`;
+}
+
+function loadOutboundQueue(accessToken: string): OutboundContact[] {
+  try {
+    return JSON.parse(localStorage.getItem(outboundQueueKey(accessToken)) ?? "[]");
+  } catch {
+    return [];
+  }
+}
+
+function loadOutboundAssignments(accessToken: string): Record<string, OutboundContact> {
+  try {
+    return JSON.parse(localStorage.getItem(outboundAssignmentsKey(accessToken)) ?? "{}");
+  } catch {
+    return {};
+  }
+}
+
+// Called right after a batch call is successfully started - appends the
+// submitted CSV rows (in order) to the FIFO queue future outbound calls
+// will be matched against.
+function saveOutboundContacts(accessToken: string, contacts: { phoneNumber: string; firstName: string; lastName: string }[]): void {
+  const queue = loadOutboundQueue(accessToken);
+  for (const c of contacts) queue.push({ firstName: c.firstName, lastName: c.lastName, phoneNumber: c.phoneNumber });
+  try {
+    localStorage.setItem(outboundQueueKey(accessToken), JSON.stringify(queue));
+  } catch {
+    // localStorage unavailable (private browsing, quota) - not critical, skip persisting.
+  }
+}
+
+// Assigns each outbound item (call or transcript, oldest first) its CSV
+// contact - reusing any assignment already made for that id, otherwise
+// claiming the next contact off the FIFO queue. Mutates items in place.
+function applyOutboundIdentities<T extends { id: number | string; time?: string; caller?: string; phone?: string }>(items: T[], accessToken: string | null | undefined): void {
+  if (!accessToken || items.length === 0) return;
+  const assignments = loadOutboundAssignments(accessToken);
+  const queue = loadOutboundQueue(accessToken);
+  let changed = false;
+
+  const sorted = [...items].sort((a, b) => String(a.time ?? "").localeCompare(String(b.time ?? "")));
+  for (const item of sorted) {
+    const id = String(item.id);
+    let entry = assignments[id];
+    if (!entry && queue.length > 0) {
+      entry = queue.shift()!;
+      assignments[id] = entry;
+      changed = true;
+    }
+    if (entry) {
+      item.caller = `${entry.firstName} ${entry.lastName}`.trim() || "Unknown";
+      item.phone = entry.phoneNumber;
+    }
+  }
+
+  if (changed) {
+    try {
+      localStorage.setItem(outboundAssignmentsKey(accessToken), JSON.stringify(assignments));
+      localStorage.setItem(outboundQueueKey(accessToken), JSON.stringify(queue));
+    } catch {
+      // localStorage unavailable - assignments won't persist across reloads, not critical.
+    }
+  }
 }
 
 // ── Dashboard context ─────────────────────────────────────────────────────────
@@ -1222,22 +1258,6 @@ function OutboundAnalyticsScreen() { return <AnalyticsScreen direction="outbound
 
 // ── Screen: Make a Call ───────────────────────────────────────────────────────
 interface CsvContact { phoneNumber: string; firstName: string; lastName: string; row: number; valid: boolean; reason?: string; }
-
-// Persists the uploaded CSV's phone->name mapping so outbound call logs can
-// display real patient names/numbers instead of whatever (often "Unknown")
-// the n8n tracker echoes back for a given call.
-function saveOutboundContacts(accessToken: string, contacts: CsvContact[]): void {
-  const existing = loadOutboundContacts(accessToken);
-  for (const c of contacts) {
-    const key = normalizePhone(c.phoneNumber);
-    if (key) existing[key] = { firstName: c.firstName, lastName: c.lastName };
-  }
-  try {
-    localStorage.setItem(outboundContactsKey(accessToken), JSON.stringify(existing));
-  } catch {
-    // localStorage unavailable (private browsing, quota) - not critical, skip persisting.
-  }
-}
 
 const REQUIRED_CSV_HEADERS = "phone_number, patient_first_name, patient_last_name";
 
@@ -3977,10 +3997,12 @@ export default function App() {
         setStaffTasks(requests);
         setSettings(savedSettings ?? {});
         const inboundCalls = Array.isArray(callsRes?.calls) ? callsRes.calls.map((c: Record<string, unknown>) => mapInboundCall(c, "inbound")) : [];
-        const outboundCalls = Array.isArray(outboundCallsRes?.calls) ? outboundCallsRes.calls.map((c: Record<string, unknown>) => mapInboundCall(c, "outbound", accessToken)) : [];
+        const outboundCalls = Array.isArray(outboundCallsRes?.calls) ? outboundCallsRes.calls.map((c: Record<string, unknown>) => mapInboundCall(c, "outbound")) : [];
+        applyOutboundIdentities(outboundCalls, accessToken);
         setCallLogs([...inboundCalls, ...outboundCalls]);
         const inboundTranscripts = Array.isArray(transcriptsRes?.transcripts) ? transcriptsRes.transcripts.map((t: Record<string, unknown>) => mapInboundTranscript(t, "inbound")) : [];
-        const outboundTranscripts = Array.isArray(outboundTranscriptsRes?.transcripts) ? outboundTranscriptsRes.transcripts.map((t: Record<string, unknown>) => mapInboundTranscript(t, "outbound", accessToken)) : [];
+        const outboundTranscripts = Array.isArray(outboundTranscriptsRes?.transcripts) ? outboundTranscriptsRes.transcripts.map((t: Record<string, unknown>) => mapInboundTranscript(t, "outbound")) : [];
+        applyOutboundIdentities(outboundTranscripts, accessToken);
         setTranscripts([...inboundTranscripts, ...outboundTranscripts]);
         setAnalytics(Array.isArray(analyticsRes) ? analyticsRes : []);
         setOverview(overviewRes && !overviewRes.error ? overviewRes : null);
@@ -4033,12 +4055,14 @@ export default function App() {
         .then(([callsRes, transcriptsRes, analyticsRes, overviewRes, invoicesRes, outboundOverviewRes, outboundCallsRes, outboundTranscriptsRes]) => {
           if (Array.isArray(callsRes?.calls) || Array.isArray(outboundCallsRes?.calls)) {
             const inboundCalls = Array.isArray(callsRes?.calls) ? callsRes.calls.map((c: Record<string, unknown>) => mapInboundCall(c, "inbound")) : [];
-            const outboundCalls = Array.isArray(outboundCallsRes?.calls) ? outboundCallsRes.calls.map((c: Record<string, unknown>) => mapInboundCall(c, "outbound", accessToken)) : [];
+            const outboundCalls = Array.isArray(outboundCallsRes?.calls) ? outboundCallsRes.calls.map((c: Record<string, unknown>) => mapInboundCall(c, "outbound")) : [];
+            applyOutboundIdentities(outboundCalls, accessToken);
             setCallLogs([...inboundCalls, ...outboundCalls]);
           }
           if (Array.isArray(transcriptsRes?.transcripts) || Array.isArray(outboundTranscriptsRes?.transcripts)) {
             const inboundTranscripts = Array.isArray(transcriptsRes?.transcripts) ? transcriptsRes.transcripts.map((t: Record<string, unknown>) => mapInboundTranscript(t, "inbound")) : [];
-            const outboundTranscripts = Array.isArray(outboundTranscriptsRes?.transcripts) ? outboundTranscriptsRes.transcripts.map((t: Record<string, unknown>) => mapInboundTranscript(t, "outbound", accessToken)) : [];
+            const outboundTranscripts = Array.isArray(outboundTranscriptsRes?.transcripts) ? outboundTranscriptsRes.transcripts.map((t: Record<string, unknown>) => mapInboundTranscript(t, "outbound")) : [];
+            applyOutboundIdentities(outboundTranscripts, accessToken);
             setTranscripts([...inboundTranscripts, ...outboundTranscripts]);
           }
           if (Array.isArray(analyticsRes)) setAnalytics(analyticsRes);
