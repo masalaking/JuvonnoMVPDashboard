@@ -3253,8 +3253,10 @@ interface RCall {
 interface RActivity { id: string; patientName: string; type: string; status: string; summary: string; timestamp: string; }
 interface RMetrics {
   totalOutstanding: number; activeUnpaidInvoices: number;
+  eligibleOverdue: number;
   recoveredRevenue: number; recoveredInvoices: number;
-  automatedContacts: number; staffHoursSaved: number; labourSavings: number; automationCost: number;
+  automatedContacts: number; callsAttempted: number; callsAnswered: number;
+  staffHoursSaved: number; labourSavings: number; automationCost: number;
   estimatedIncrementalRecovery: number | null; estimatedTotalSavings: number | null; roiPercent: number | null;
   lastUpdated: string;
 }
@@ -3325,9 +3327,12 @@ function mapRMetrics(r: any): RMetrics {
   return {
     totalOutstanding: pickNum(r, "totalOutstanding", "total_outstanding"),
     activeUnpaidInvoices: pickNum(r, "activeUnpaidInvoices", "active_unpaid_invoices"),
+    eligibleOverdue: pickNum(r, "eligibleOverdue", "eligible_overdue"),
     recoveredRevenue: pickNum(r, "recoveredRevenue", "recovered_revenue"),
     recoveredInvoices: pickNum(r, "recoveredInvoices", "recovered_invoices"),
     automatedContacts: pickNum(r, "automatedContacts", "automated_contacts"),
+    callsAttempted: pickNum(r, "callsAttempted", "calls_attempted"),
+    callsAnswered: pickNum(r, "callsAnswered", "calls_answered"),
     staffHoursSaved: pickNum(r, "staffHoursSaved", "staff_hours_saved"),
     labourSavings: pickNum(r, "labourSavings", "labour_savings"),
     automationCost: pickNum(r, "automationCost", "automation_cost"),
@@ -3384,6 +3389,16 @@ function PRErrorState({ onRetry }: { onRetry: () => void }) {
   );
 }
 
+function timeAgo(iso: string): string {
+  const ts = new Date(iso).getTime();
+  if (isNaN(ts)) return "—";
+  const secs = Math.max(0, Math.floor((Date.now() - ts) / 1000));
+  if (secs < 60) return "just now";
+  const mins = Math.floor(secs / 60);
+  if (mins < 60) return `${mins} min${mins === 1 ? "" : "s"} ago`;
+  const hrs = Math.floor(mins / 60);
+  return `${hrs} hr${hrs === 1 ? "" : "s"} ago`;
+}
 function fmtCurrency(n: number): string { return `$${n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`; }
 function fmtDate(iso?: string): string {
   if (!iso) return "—";
@@ -3415,35 +3430,108 @@ function PaymentRecoveryScreen() {
   const [confirm, setConfirm] = useState<{ title: string; body: string; onConfirm: () => void } | null>(null);
   const [actionBusy, setActionBusy] = useState(false);
   const [toast, setToast] = useState("");
+  const [generatedAt, setGeneratedAt] = useState<string>("");
+  const [staleWarning, setStaleWarning] = useState(false);
+  const hasLoadedOnce = useRef(false);
 
   function showToast(msg: string) { setToast(msg); setTimeout(() => setToast(""), 3000); }
 
+  // Prefers the consolidated /recovery/snapshot endpoint (one request instead
+  // of six). Falls back to the legacy six-request pattern if the snapshot
+  // route 404s/502s - e.g. the n8n workflow hasn't been updated to emit
+  // `recovery.get_snapshot` yet - so this keeps working against either
+  // workflow version instead of going blank.
+  async function loadSnapshot(signal: AbortSignal): Promise<boolean> {
+    if (!accessToken) return false;
+    const res = await fetch(`/api/link/${accessToken}/recovery/snapshot`, { signal });
+    if (!res.ok) return false;
+    const snap = await res.json().catch(() => null);
+    if (!snap || typeof snap !== "object" || snap.error) return false;
+    setMetrics(mapRMetrics(snap.metrics ?? {}));
+    setInvoices((Array.isArray(snap.invoices) ? snap.invoices : []).map(mapRInvoice));
+    setQueue((Array.isArray(snap.queue) ? snap.queue : []).map(mapRQueueItem));
+    setCalls((Array.isArray(snap.calls) ? snap.calls : []).map(mapRCall));
+    setActivity((Array.isArray(snap.activity) ? snap.activity : []).map(mapRActivity));
+    setSettings(snap.settings && typeof snap.settings === "object" ? snap.settings : {});
+    setGeneratedAt(String(snap.generated_at ?? snap.metrics?.last_updated ?? ""));
+    return true;
+  }
+
+  async function loadLegacy(signal: AbortSignal): Promise<boolean> {
+    if (!accessToken) return false;
+    const [mRaw, iRaw, qRaw, cRaw, aRaw, sRaw] = await Promise.all([
+      fetch(`/api/link/${accessToken}/recovery/overview`, { signal }).then(r => r.ok ? r.json() : Promise.reject()),
+      fetch(`/api/link/${accessToken}/recovery/invoices`, { signal }).then(r => r.ok ? r.json() : Promise.reject()),
+      fetch(`/api/link/${accessToken}/recovery/queue`, { signal }).then(r => r.ok ? r.json() : Promise.reject()),
+      fetch(`/api/link/${accessToken}/recovery/calls`, { signal }).then(r => r.ok ? r.json() : Promise.reject()),
+      fetch(`/api/link/${accessToken}/recovery/activity`, { signal }).then(r => r.ok ? r.json() : Promise.reject()),
+      fetch(`/api/link/${accessToken}/recovery/settings`, { signal }).then(r => r.ok ? r.json() : Promise.reject()),
+    ]);
+    setMetrics(mapRMetrics(mRaw));
+    setInvoices((Array.isArray(iRaw) ? iRaw : iRaw?.invoices ?? []).map(mapRInvoice));
+    setQueue((Array.isArray(qRaw) ? qRaw : qRaw?.queue ?? []).map(mapRQueueItem));
+    setCalls((Array.isArray(cRaw) ? cRaw : cRaw?.calls ?? []).map(mapRCall));
+    setActivity((Array.isArray(aRaw) ? aRaw : aRaw?.activity ?? []).map(mapRActivity));
+    setSettings(sRaw && typeof sRaw === "object" ? sRaw : {});
+    setGeneratedAt(String(mRaw?.last_updated ?? mRaw?.lastUpdated ?? ""));
+    return true;
+  }
+
+  // isBackground: a silent poll refresh - on failure, keep whatever data is
+  // already on screen (and show the stale badge) rather than blanking the
+  // whole screen with PRErrorState, per the "don't replace good data with an
+  // error" requirement.
+  async function loadRecoveryData(isBackground: boolean, signal: AbortSignal) {
+    if (!isBackground) { setLoading(!hasLoadedOnce.current); setError(false); }
+    try {
+      const ok = await loadSnapshot(signal).catch(() => false) || await loadLegacy(signal);
+      if (!ok) throw new Error("no data");
+      hasLoadedOnce.current = true;
+      setStaleWarning(false);
+    } catch (err) {
+      if ((err as any)?.name === "AbortError") return;
+      if (!hasLoadedOnce.current) setError(true);
+      else setStaleWarning(true);
+    } finally {
+      if (!isBackground) setLoading(false);
+    }
+  }
+
   useEffect(() => {
     if (!accessToken) return;
-    let cancelled = false;
-    setLoading(true);
-    setError(false);
-    Promise.all([
-      fetch(`/api/link/${accessToken}/recovery/overview`).then(r => r.ok ? r.json() : Promise.reject()),
-      fetch(`/api/link/${accessToken}/recovery/invoices`).then(r => r.ok ? r.json() : Promise.reject()),
-      fetch(`/api/link/${accessToken}/recovery/queue`).then(r => r.ok ? r.json() : Promise.reject()),
-      fetch(`/api/link/${accessToken}/recovery/calls`).then(r => r.ok ? r.json() : Promise.reject()),
-      fetch(`/api/link/${accessToken}/recovery/activity`).then(r => r.ok ? r.json() : Promise.reject()),
-      fetch(`/api/link/${accessToken}/recovery/settings`).then(r => r.ok ? r.json() : Promise.reject()),
-    ])
-      .then(([mRaw, iRaw, qRaw, cRaw, aRaw, sRaw]) => {
-        if (cancelled) return;
-        setMetrics(mapRMetrics(mRaw));
-        setInvoices((Array.isArray(iRaw) ? iRaw : iRaw?.invoices ?? []).map(mapRInvoice));
-        setQueue((Array.isArray(qRaw) ? qRaw : qRaw?.queue ?? []).map(mapRQueueItem));
-        setCalls((Array.isArray(cRaw) ? cRaw : cRaw?.calls ?? []).map(mapRCall));
-        setActivity((Array.isArray(aRaw) ? aRaw : aRaw?.activity ?? []).map(mapRActivity));
-        setSettings(sRaw && typeof sRaw === "object" ? sRaw : {});
-      })
-      .catch(() => { if (!cancelled) setError(true); })
-      .finally(() => { if (!cancelled) setLoading(false); });
-    return () => { cancelled = true; };
+    const controller = new AbortController();
+    loadRecoveryData(false, controller.signal);
+    return () => controller.abort();
   }, [accessToken, refreshTick]);
+
+  // Poll every 90s while the tab is visible; refresh immediately when it
+  // becomes visible again after being hidden.
+  useEffect(() => {
+    if (!accessToken) return;
+    const interval = setInterval(() => {
+      if (document.visibilityState === "hidden") return;
+      const controller = new AbortController();
+      loadRecoveryData(true, controller.signal);
+    }, 90000);
+    function onVisible() {
+      if (document.visibilityState === "visible") {
+        const controller = new AbortController();
+        loadRecoveryData(true, controller.signal);
+      }
+    }
+    document.addEventListener("visibilitychange", onVisible);
+    return () => { clearInterval(interval); document.removeEventListener("visibilitychange", onVisible); };
+  }, [accessToken]);
+
+  // "Data may be stale" once the last successful sync is >3 minutes old.
+  useEffect(() => {
+    const ts = generatedAt ? new Date(generatedAt).getTime() : NaN;
+    if (isNaN(ts)) return;
+    const check = () => setStaleWarning(Date.now() - ts > 3 * 60 * 1000);
+    check();
+    const t = setInterval(check, 15000);
+    return () => clearInterval(t);
+  }, [generatedAt]);
 
   function refetch() { setRefreshTick(t => t + 1); }
 
@@ -3576,9 +3664,15 @@ function PaymentRecoveryScreen() {
           <h1 className="text-lg font-semibold text-foreground">Payment Recovery</h1>
           <p className="text-xs text-muted-foreground mt-0.5">Outstanding balances, AI call recovery, and staff follow-up in one place.</p>
         </div>
-        <button onClick={refetch} className="flex items-center gap-2 bg-muted border border-border text-xs font-medium px-3 py-1.5 rounded-md hover:bg-accent transition-colors">
-          <RefreshCw size={12} /> Refresh
-        </button>
+        <div className="flex items-center gap-2">
+          {generatedAt && !isNaN(new Date(generatedAt).getTime()) && (
+            <span className="text-[10px] text-muted-foreground">Last synced {timeAgo(generatedAt)}</span>
+          )}
+          {staleWarning && <RPill label="Data may be stale" tone="amber" />}
+          <button onClick={refetch} className="flex items-center gap-2 bg-muted border border-border text-xs font-medium px-3 py-1.5 rounded-md hover:bg-accent transition-colors">
+            <RefreshCw size={12} /> Refresh
+          </button>
+        </div>
       </div>
 
       <div className="flex items-center gap-1 border-b border-border">

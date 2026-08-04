@@ -11,6 +11,11 @@ const ROOT = join(__dirname, '..');
 
 const PORT = process.env.API_PORT ?? 3001;
 const DASHBOARD_API_KEY = process.env.DASHBOARD_API_KEY ?? '';
+// Optional: shared secret n8n's Payment Recovery workflow can require via an
+// X-Dashboard-Secret header. Sent only when configured so tenants that
+// haven't set this yet keep working exactly as before (billing/recovery
+// routes all funnel through callN8n below).
+const N8N_DASHBOARD_SECRET = process.env.N8N_DASHBOARD_SECRET ?? '';
 const TENANT_LINKS_FILE = process.env.TENANT_LINKS_FILE ?? join(ROOT, 'data/tenant-links.json');
 const REQUESTS_DATA_FILE = process.env.REQUESTS_DATA_FILE ?? join(ROOT, 'data/requests.json');
 const SETTINGS_FILE = process.env.SETTINGS_FILE ?? join(ROOT, 'data/settings.json');
@@ -56,17 +61,30 @@ async function callN8n(tenant, event, payload = {}) {
     err.status = 502;
     throw err;
   }
-  const res = await fetch(tenant.n8n_webhook_url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      event,
-      client_id: tenant.client_id,
-      clinic_id: tenant.clinic_id,
-      clinic_name: tenant.clinic_name,
-      ...payload,
-    }),
-  });
+  let res;
+  try {
+    res = await fetch(tenant.n8n_webhook_url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(N8N_DASHBOARD_SECRET ? { 'X-Dashboard-Secret': N8N_DASHBOARD_SECRET } : {}),
+      },
+      body: JSON.stringify({
+        event,
+        client_id: tenant.client_id,
+        clinic_id: tenant.clinic_id,
+        clinic_name: tenant.clinic_name,
+        ...payload,
+      }),
+      signal: AbortSignal.timeout(15_000),
+    });
+  } catch (error) {
+    const err = new Error(error?.name === 'TimeoutError'
+      ? 'The payment recovery service timed out'
+      : 'The payment recovery service is unavailable');
+    err.status = error?.name === 'TimeoutError' ? 504 : 502;
+    throw err;
+  }
   const text = await res.text();
   let json;
   try { json = text ? JSON.parse(text) : {}; } catch { json = { raw: text }; }
@@ -504,6 +522,16 @@ app.post('/api/link/:accessToken/billing/tasks/:taskId/cancel', n8nRoute(async (
 // Retell call queue -> staff approval -> dispatch -> outcome -> reconciliation.
 // Same proxy pattern as callN8n - the n8n workflow just needs to listen for
 // these exact event names on the tenant's n8n_webhook_url.
+// Consolidated snapshot (metrics + invoices + queue + calls + activity +
+// settings in one response) so PaymentRecoveryScreen can make one request
+// instead of six. The individual routes below stay in place for backward
+// compatibility - nothing currently calling them breaks.
+app.get('/api/link/:accessToken/recovery/snapshot', n8nRoute(async (req, res) => {
+  const tenant = findTenant(req.params.accessToken);
+  if (!tenant) return res.status(404).json({ error: 'Invalid access token' });
+  res.json(await callN8n(tenant, 'recovery.get_snapshot'));
+}));
+
 app.get('/api/link/:accessToken/recovery/overview', n8nRoute(async (req, res) => {
   const tenant = findTenant(req.params.accessToken);
   if (!tenant) return res.status(404).json({ error: 'Invalid access token' });
