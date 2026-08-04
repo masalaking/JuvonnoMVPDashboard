@@ -3980,23 +3980,33 @@ export default function App() {
 
   // Staff Action Queue needs new requests to show up without a manual
   // refresh, so poll it quietly in the background (no loading spinner).
+  // Skipped while the tab is hidden - a background tab doesn't need live
+  // data, and every open tab runs this independently, so an 8s cadence
+  // across a few tabs was enough to trip the n8n workflow's Google Sheets
+  // rate limit (429 "too many requests" on Read Billing/Calls nodes).
   useEffect(() => {
     if (!accessToken) return;
     const interval = setInterval(() => {
+      if (document.visibilityState === "hidden") return;
       fetch(`/api/link/${accessToken}/queue/requests`)
         .then(r => r.ok ? r.json() : null)
         .then(requests => { if (requests) setStaffTasks(requests); })
         .catch(() => {});
-    }, 8000);
+    }, 20000);
     return () => clearInterval(interval);
   }, [accessToken]);
 
   // Inbound Tracker data (calls/transcripts/analytics/overview/invoices)
   // should reflect new calls without a manual refresh too - poll it quietly
-  // in the background, same pattern as the Staff Action Queue above.
+  // in the background, same pattern as the Staff Action Queue above. This
+  // fires 8 parallel n8n requests per tick, each reading one or more Google
+  // Sheets tabs, so it's the main contributor to Sheets rate-limit errors -
+  // keep this interval well above the staff-queue one and skip it entirely
+  // while the tab is hidden.
   useEffect(() => {
     if (!accessToken) return;
     const interval = setInterval(() => {
+      if (document.visibilityState === "hidden") return;
       Promise.all([
         fetch(`/api/link/${accessToken}/inbound/calls`).then(r => r.ok ? r.json() : null),
         fetch(`/api/link/${accessToken}/inbound/transcripts`).then(r => r.ok ? r.json() : null),
@@ -4024,7 +4034,7 @@ export default function App() {
           if (outboundOverviewRes && !outboundOverviewRes.error) setOutboundOverview(outboundOverviewRes);
         })
         .catch(() => {});
-    }, 20000);
+    }, 60000);
     return () => clearInterval(interval);
   }, [accessToken]);
 
