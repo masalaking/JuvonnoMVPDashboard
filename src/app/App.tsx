@@ -97,12 +97,47 @@ type UsageInvoice = {
 // Adapts the Inbound Tracker n8n workflow's response shapes (see
 // "Build Calls Response" / "Build Transcripts Response" nodes) into this
 // dashboard's existing CallLog/Transcript types.
-function mapInboundCall(raw: Record<string, unknown>, direction: "inbound" | "outbound" = "inbound"): CallLog {
+// Outbound call names/numbers are unreliable coming back from the n8n
+// tracker (often "Unknown"), but we already know exactly who was called -
+// we sent that list ourselves from the uploaded CSV. Match on phone number
+// (last 10 digits, so +1/formatting differences don't matter) instead of
+// trusting whatever the workflow echoes back.
+function normalizePhone(p: string): string {
+  return (p ?? "").replace(/\D/g, "").slice(-10);
+}
+
+function outboundContactsKey(accessToken: string): string {
+  return `outboundContacts:${accessToken}`;
+}
+
+function loadOutboundContacts(accessToken: string | null | undefined): Record<string, { firstName: string; lastName: string }> {
+  if (!accessToken) return {};
+  try {
+    return JSON.parse(localStorage.getItem(outboundContactsKey(accessToken)) ?? "{}");
+  } catch {
+    return {};
+  }
+}
+
+function mapInboundCall(raw: Record<string, unknown>, direction: "inbound" | "outbound" = "inbound", accessToken?: string | null): CallLog {
+  const rawPhone = String(raw.from ?? raw.to ?? raw.phone ?? raw.phoneNumber ?? "");
+  let caller = String(raw.callerName ?? raw.from ?? "Unknown");
+  let phone = rawPhone;
+
+  if (direction === "outbound") {
+    const contacts = loadOutboundContacts(accessToken);
+    const match = contacts[normalizePhone(rawPhone)];
+    if (match) {
+      caller = `${match.firstName} ${match.lastName}`.trim() || caller;
+      if (!phone) phone = rawPhone;
+    }
+  }
+
   return {
     id: String(raw.call_id ?? raw.id ?? crypto.randomUUID()),
     time: String(raw.timestamp ?? raw.date ?? ""),
-    caller: String(raw.callerName ?? raw.from ?? "Unknown"),
-    phone: String(raw.from ?? ""),
+    caller,
+    phone,
     outcome: String(raw.status ?? ""),
     sentiment: String(raw.sentiment ?? ""),
     duration: String(raw.durationDisplay ?? raw.duration_display ?? ""),
@@ -425,7 +460,15 @@ function num(v: unknown): number {
   return Number.isFinite(n) ? n : 0;
 }
 
-function OverviewKpiRow({ stats }: { stats: OverviewStats | null }) {
+function OverviewKpiRow({ stats, direction }: { stats: OverviewStats | null; direction: "inbound" | "outbound" }) {
+  // Total Calls is deliberately NOT read from stats.totalCalls: the n8n
+  // overview webhook scopes that count to the billing period, while the
+  // Analytics screen scopes its count to the selected chart range - two
+  // different windows that will legitimately disagree. Counting the actual
+  // fetched callLogs instead means this card always agrees with whatever
+  // the Call Logs / Analytics screens show for the same call records.
+  const { callLogs } = useDashboard();
+  const totalCalls = callLogs.filter(c => (c.direction ?? "inbound") === direction).length;
   const minutesUsed = num(stats?.minutesUsed);
   const minutesIncluded = num(stats?.minutesIncluded);
   const overageUSD = num(stats?.overageUSD);
@@ -434,7 +477,7 @@ function OverviewKpiRow({ stats }: { stats: OverviewStats | null }) {
   return (
     <div className="grid grid-cols-4 gap-4">
       <KpiCard label="Minutes Used" value={stats ? `${minutesUsed.toFixed(2)} / ${minutesIncluded}` : "—"} sub={stats ? `${pct.toFixed(2)}% of plan` : "—"} icon={Clock} color="amber" />
-      <KpiCard label="Total Calls" value={stats ? String(num(stats.totalCalls)) : "—"} sub={stats?.billingPeriod ?? "—"} icon={PhoneCall} color="purple" />
+      <KpiCard label="Total Calls" value={stats ? String(totalCalls) : "—"} sub={stats?.billingPeriod ?? "—"} icon={PhoneCall} color="purple" />
       <KpiCard label="Overage Cost" value={stats ? `$${overageUSD.toFixed(2)}` : "—"} sub={stats ? `${overageMinutes} min over` : "—"} icon={CreditCard} color={overageMinutes > 0 ? "red" : "green"} />
       <KpiCard label="Avg Call Duration" value={stats?.avgCallDisplay ?? "—"} sub="Per call" icon={Zap} color="teal" />
     </div>
@@ -491,8 +534,8 @@ function OverviewScreen() {
         </div>
       </Card>
 
-      <OverviewKpiRow stats={overview} />
-      <OverviewKpiRow stats={outboundOverview} />
+      <OverviewKpiRow stats={overview} direction="inbound" />
+      <OverviewKpiRow stats={outboundOverview} direction="outbound" />
 
       <Card className="p-5">
         <h3 className="text-sm font-semibold text-foreground mb-4">Billing Summary</h3>
@@ -1167,6 +1210,22 @@ function OutboundAnalyticsScreen() { return <AnalyticsScreen direction="outbound
 // ── Screen: Make a Call ───────────────────────────────────────────────────────
 interface CsvContact { phoneNumber: string; firstName: string; lastName: string; row: number; valid: boolean; reason?: string; }
 
+// Persists the uploaded CSV's phone->name mapping so outbound call logs can
+// display real patient names/numbers instead of whatever (often "Unknown")
+// the n8n tracker echoes back for a given call.
+function saveOutboundContacts(accessToken: string, contacts: CsvContact[]): void {
+  const existing = loadOutboundContacts(accessToken);
+  for (const c of contacts) {
+    const key = normalizePhone(c.phoneNumber);
+    if (key) existing[key] = { firstName: c.firstName, lastName: c.lastName };
+  }
+  try {
+    localStorage.setItem(outboundContactsKey(accessToken), JSON.stringify(existing));
+  } catch {
+    // localStorage unavailable (private browsing, quota) - not critical, skip persisting.
+  }
+}
+
 const REQUIRED_CSV_HEADERS = "phone_number, patient_first_name, patient_last_name";
 
 // Same E.164 check the n8n workflow itself enforces - validating here first
@@ -1248,6 +1307,7 @@ function MakeCallScreen() {
       });
       const json = await res.json().catch(() => ({}));
       if (res.ok && json.success !== false) {
+        saveOutboundContacts(accessToken, validContacts);
         setResult({ ok: true, message: `Batch call started for ${validContacts.length} contact${validContacts.length === 1 ? "" : "s"}.` });
         setContacts([]);
         setFileName("");
@@ -3904,7 +3964,7 @@ export default function App() {
         setStaffTasks(requests);
         setSettings(savedSettings ?? {});
         const inboundCalls = Array.isArray(callsRes?.calls) ? callsRes.calls.map((c: Record<string, unknown>) => mapInboundCall(c, "inbound")) : [];
-        const outboundCalls = Array.isArray(outboundCallsRes?.calls) ? outboundCallsRes.calls.map((c: Record<string, unknown>) => mapInboundCall(c, "outbound")) : [];
+        const outboundCalls = Array.isArray(outboundCallsRes?.calls) ? outboundCallsRes.calls.map((c: Record<string, unknown>) => mapInboundCall(c, "outbound", accessToken)) : [];
         setCallLogs([...inboundCalls, ...outboundCalls]);
         const inboundTranscripts = Array.isArray(transcriptsRes?.transcripts) ? transcriptsRes.transcripts.map((t: Record<string, unknown>) => mapInboundTranscript(t, "inbound")) : [];
         const outboundTranscripts = Array.isArray(outboundTranscriptsRes?.transcripts) ? outboundTranscriptsRes.transcripts.map((t: Record<string, unknown>) => mapInboundTranscript(t, "outbound")) : [];
@@ -3950,7 +4010,7 @@ export default function App() {
         .then(([callsRes, transcriptsRes, analyticsRes, overviewRes, invoicesRes, outboundOverviewRes, outboundCallsRes, outboundTranscriptsRes]) => {
           if (Array.isArray(callsRes?.calls) || Array.isArray(outboundCallsRes?.calls)) {
             const inboundCalls = Array.isArray(callsRes?.calls) ? callsRes.calls.map((c: Record<string, unknown>) => mapInboundCall(c, "inbound")) : [];
-            const outboundCalls = Array.isArray(outboundCallsRes?.calls) ? outboundCallsRes.calls.map((c: Record<string, unknown>) => mapInboundCall(c, "outbound")) : [];
+            const outboundCalls = Array.isArray(outboundCallsRes?.calls) ? outboundCallsRes.calls.map((c: Record<string, unknown>) => mapInboundCall(c, "outbound", accessToken)) : [];
             setCallLogs([...inboundCalls, ...outboundCalls]);
           }
           if (Array.isArray(transcriptsRes?.transcripts) || Array.isArray(outboundTranscriptsRes?.transcripts)) {
