@@ -9,7 +9,7 @@ import {
   MoreHorizontal, Inbox, AlertTriangle, Check, X, Volume2, List, Columns,
   Lock, Unlock, Info, UploadCloud, MessageSquare, Users, Globe, Mail,
   Building2, Wifi, WifiOff, Database, Server, Layers, ToggleLeft,
-  ToggleRight, ChevronLeft, PhoneOutgoing
+  ToggleRight, ChevronLeft, PhoneOutgoing, LogOut
 } from "lucide-react";
 import {
   LineChart, Line, BarChart, Bar, PieChart, Pie, Cell,
@@ -205,6 +205,212 @@ const DashboardContext = createContext<DashboardCtx>({
 
 function useDashboard() { return useContext(DashboardContext); }
 
+// ── Production session auth (RivaCare handoff §5) ───────────────────────────
+// Legacy /t/:token links bypass this entirely (see AppGate below) - a
+// tenant/clinic-verified server session is the new path; the old
+// access-token link is left alone as-is.
+interface ClinicOption { clinicId: string; clinicName: string; role: string }
+interface AuthSession { userId: string; tenantId: string; activeClinicId: string | null; clinics: ClinicOption[]; csrfToken: string }
+
+interface AuthCtx {
+  session: AuthSession | null;
+  authLoading: boolean;
+  login: (username: string, password: string) => Promise<{ ok: boolean; error?: string }>;
+  logout: () => Promise<void>;
+  switchClinic: (clinicId: string) => Promise<{ ok: boolean; error?: string }>;
+}
+
+const AuthContext = createContext<AuthCtx>({
+  session: null,
+  authLoading: true,
+  login: async () => ({ ok: false }),
+  logout: async () => {},
+  switchClinic: async () => ({ ok: false }),
+});
+function useAuth() { return useContext(AuthContext); }
+
+// One request helper for both identity modes: legacy access-token links hit
+// /api/link/:token/<suffix> with no cookie/CSRF machinery; a real session
+// hits /api/dashboard/<suffix> with the session cookie + CSRF header on
+// mutations. Every route suffix (inbound/*, outbound/*, settings, recovery/*,
+// queue/*) is intentionally identical between the two backends, so callers
+// don't need to know which mode they're in.
+async function apiFetch(accessToken: string | null, csrfToken: string | undefined, suffix: string, init: { method?: string; body?: unknown; signal?: AbortSignal } = {}): Promise<Response> {
+  const method = init.method ?? "GET";
+  const headers: Record<string, string> = {};
+  const fetchInit: RequestInit = { method, signal: init.signal };
+  if (init.body !== undefined) {
+    headers["Content-Type"] = "application/json";
+    fetchInit.body = JSON.stringify(init.body);
+  }
+  if (accessToken) {
+    fetchInit.headers = headers;
+    return fetch(`/api/link/${accessToken}${suffix}`, fetchInit);
+  }
+  if (method !== "GET" && csrfToken) headers["X-CSRF-Token"] = csrfToken;
+  fetchInit.headers = headers;
+  fetchInit.credentials = "include";
+  return fetch(`/api/dashboard${suffix}`, fetchInit);
+}
+
+function AuthProvider({ children }: { children: React.ReactNode }) {
+  const [session, setSession] = useState<AuthSession | null>(null);
+  const [authLoading, setAuthLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch("/api/auth/session", { credentials: "include" });
+        if (!res.ok) { if (!cancelled) setSession(null); return; }
+        const data = await res.json();
+        // /api/auth/session doesn't reissue a CSRF token (only login and
+        // active-clinic do) - the existing cookie is still valid, so a stale
+        // in-memory csrfToken from a prior login this page load is fine;
+        // a full reload with no prior login just has no CSRF token until
+        // the next login/switch-clinic response provides one.
+        if (!cancelled) setSession(prev => ({ userId: data.userId, tenantId: data.tenantId, activeClinicId: data.activeClinicId ?? null, clinics: Array.isArray(data.clinics) ? data.clinics : [], csrfToken: prev?.csrfToken ?? "" }));
+      } catch {
+        if (!cancelled) setSession(null);
+      } finally {
+        if (!cancelled) setAuthLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  async function login(username: string, password: string) {
+    try {
+      const res = await fetch("/api/auth/login", {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username, password }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) return { ok: false, error: data?.error?.message ?? "Invalid username or password." };
+      setSession({ userId: data.userId, tenantId: data.tenantId, activeClinicId: data.activeClinicId ?? null, clinics: Array.isArray(data.clinics) ? data.clinics : [], csrfToken: data.csrfToken });
+      return { ok: true };
+    } catch {
+      return { ok: false, error: "Could not reach the server." };
+    }
+  }
+
+  async function logout() {
+    if (session) {
+      await fetch("/api/auth/logout", { method: "POST", credentials: "include", headers: { "X-CSRF-Token": session.csrfToken } }).catch(() => {});
+    }
+    setSession(null);
+  }
+
+  async function switchClinic(clinicId: string) {
+    if (!session) return { ok: false, error: "Not signed in." };
+    try {
+      const res = await fetch("/api/session/active-clinic", {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json", "X-CSRF-Token": session.csrfToken },
+        body: JSON.stringify({ clinicId }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) return { ok: false, error: data?.error?.message ?? "You do not have access to this clinic." };
+      setSession(prev => (prev ? { ...prev, activeClinicId: data.activeClinicId, csrfToken: data.csrfToken } : prev));
+      return { ok: true };
+    } catch {
+      return { ok: false, error: "Could not reach the server." };
+    }
+  }
+
+  return <AuthContext.Provider value={{ session, authLoading, login, logout, switchClinic }}>{children}</AuthContext.Provider>;
+}
+
+function LoginScreen() {
+  const { login } = useAuth();
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!username || !password) return;
+    setError("");
+    setSubmitting(true);
+    const result = await login(username, password);
+    setSubmitting(false);
+    if (!result.ok) setError(result.error ?? "Sign in failed.");
+  }
+
+  return (
+    <div className="min-h-screen flex items-center justify-center bg-muted p-4">
+      <div className="w-full max-w-sm bg-card border border-border rounded-lg shadow-sm p-6 space-y-5">
+        <div>
+          <h1 className="text-lg font-semibold bg-gradient-to-r from-teal-600 to-cyan-500 bg-clip-text text-transparent">RivaCare Dashboard</h1>
+          <p className="text-xs text-muted-foreground mt-1">Sign in to continue.</p>
+        </div>
+        <form onSubmit={handleSubmit} className="space-y-3">
+          <div>
+            <label className="text-xs font-medium text-foreground">Username</label>
+            <input
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
+              autoFocus
+              className="w-full mt-1 bg-input-background border border-border rounded-md px-3 py-2 text-sm text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+            />
+          </div>
+          <div>
+            <label className="text-xs font-medium text-foreground">Password</label>
+            <input
+              type="password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              className="w-full mt-1 bg-input-background border border-border rounded-md px-3 py-2 text-sm text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+            />
+          </div>
+          {error && <p className="text-xs text-red-600">{error}</p>}
+          <button
+            type="submit"
+            disabled={submitting || !username || !password}
+            className="w-full bg-gradient-to-r from-teal-600 to-cyan-500 text-white text-sm font-medium py-2 rounded-md hover:opacity-90 transition-opacity disabled:opacity-50"
+          >
+            {submitting ? "Signing in…" : "Sign in"}
+          </button>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+// Clinic switcher shown in the top bar under session auth. Nothing is
+// rendered in legacy access-token mode (a link is already scoped to one
+// clinic, there's nothing to switch between).
+function ClinicSwitcher() {
+  const { session, switchClinic } = useAuth();
+  const [switching, setSwitching] = useState(false);
+  if (!session || session.clinics.length === 0) return null;
+
+  async function handleChange(e: React.ChangeEvent<HTMLSelectElement>) {
+    const clinicId = e.target.value;
+    if (clinicId === session!.activeClinicId) return;
+    setSwitching(true);
+    const result = await switchClinic(clinicId);
+    setSwitching(false);
+    if (result.ok) window.location.reload();
+  }
+
+  return (
+    <select
+      value={session.activeClinicId ?? ""}
+      onChange={handleChange}
+      disabled={switching}
+      className="bg-muted border border-border rounded-md px-2.5 py-1.5 text-xs font-medium text-foreground focus:outline-none focus:ring-1 focus:ring-ring disabled:opacity-50"
+    >
+      {session.clinics.map((c) => (
+        <option key={c.clinicId} value={c.clinicId}>{c.clinicName}</option>
+      ))}
+    </select>
+  );
+}
 
 // ── Small reusable UI ─────────────────────────────────────────────────────────
 function Badge({ label, variant }: { label: string; variant: string }) {
@@ -404,13 +610,18 @@ function Sidebar({ active, onNav }: { active: string; onNav: (id: string) => voi
 // ── Top Bar ───────────────────────────────────────────────────────────────────
 function TopBar() {
   const { tenantInfo } = useDashboard();
+  const { session, logout } = useAuth();
   return (
     <div className="h-14 bg-card border-b border-border flex items-center px-6 gap-4 flex-shrink-0">
-      <div className="flex items-center gap-2 bg-muted border border-border rounded-md px-3 py-1.5 min-w-[160px] cursor-pointer hover:bg-accent transition-colors">
-        <Building2 size={13} className="text-muted-foreground" />
-        <span className="text-sm font-medium text-foreground">{tenantInfo?.clinic_name ?? "—"}</span>
-        <ChevronDown size={12} className="text-muted-foreground ml-auto" />
-      </div>
+      {session ? (
+        <ClinicSwitcher />
+      ) : (
+        <div className="flex items-center gap-2 bg-muted border border-border rounded-md px-3 py-1.5 min-w-[160px] cursor-pointer hover:bg-accent transition-colors">
+          <Building2 size={13} className="text-muted-foreground" />
+          <span className="text-sm font-medium text-foreground">{tenantInfo?.clinic_name ?? "—"}</span>
+          <ChevronDown size={12} className="text-muted-foreground ml-auto" />
+        </div>
+      )}
       <div className="flex items-center gap-2 bg-muted border border-border rounded-md px-3 py-1.5 cursor-pointer hover:bg-accent transition-colors">
         <Calendar size={13} className="text-muted-foreground" />
         <span className="text-sm text-foreground">Date range</span>
@@ -431,6 +642,11 @@ function TopBar() {
         <button className="p-2 rounded-md hover:bg-muted transition-colors">
           <HelpCircle size={15} className="text-muted-foreground" />
         </button>
+        {session && (
+          <button onClick={logout} title="Sign out" className="p-2 rounded-md hover:bg-muted transition-colors">
+            <LogOut size={15} className="text-muted-foreground" />
+          </button>
+        )}
         <button className="w-7 h-7 rounded-full bg-teal-600 flex items-center justify-center text-xs text-white font-semibold">{tenantInfo ? initials(tenantInfo.receptionist_name) : "—"}</button>
       </div>
     </div>
@@ -1113,20 +1329,21 @@ function AnalyticsScreen({ direction }: { direction: "inbound" | "outbound" }) {
   // range selector (matching Build Analytics Response's range param). They
   // are genuinely separate Google Sheets, so the numbers won't match.
   const { accessToken } = useDashboard();
+  const { session } = useAuth();
   const [range, setRange] = useState(1);
   const [refreshTick, setRefreshTick] = useState(0);
   const [data, setData] = useState<AnalyticsPoint[]>([]);
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
-    if (!accessToken) { setData([]); return; }
+    if (!accessToken && !session) { setData([]); return; }
     setLoading(true);
-    fetch(`/api/link/${accessToken}/${direction}/analytics?range=${range}`)
+    apiFetch(accessToken, session?.csrfToken, `/${direction}/analytics?range=${range}`)
       .then(r => r.ok ? r.json() : [])
       .then(res => setData(Array.isArray(res) ? res : []))
       .catch(() => setData([]))
       .finally(() => setLoading(false));
-  }, [accessToken, direction, range, refreshTick]);
+  }, [accessToken, session, direction, range, refreshTick]);
 
   const totalCalls = data.reduce((sum, p) => sum + p.calls, 0);
   const totalMinutes = data.reduce((sum, p) => sum + p.minutes, 0);
@@ -3357,6 +3574,8 @@ function fmtDate(iso?: string): string {
 
 function PaymentRecoveryScreen() {
   const { accessToken } = useDashboard();
+  const { session } = useAuth();
+  const identityReady = Boolean(accessToken) || Boolean(session);
   const [activeTab, setActiveTab] = useState<"overview" | "queue" | "invoices" | "calls" | "settings">("overview");
 
   const [metrics, setMetrics] = useState<RMetrics | null>(null);
@@ -3389,10 +3608,11 @@ function PaymentRecoveryScreen() {
   // of six). Falls back to the legacy six-request pattern if the snapshot
   // route 404s/502s - e.g. the n8n workflow hasn't been updated to emit
   // `recovery.get_snapshot` yet - so this keeps working against either
-  // workflow version instead of going blank.
+  // workflow version instead of going blank. Session mode has no legacy
+  // fallback to drop to (the production recovery API only speaks snapshot).
   async function loadSnapshot(signal: AbortSignal): Promise<boolean> {
-    if (!accessToken) return false;
-    const res = await fetch(`/api/link/${accessToken}/recovery/snapshot`, { signal });
+    if (!identityReady) return false;
+    const res = await apiFetch(accessToken, session?.csrfToken, "/recovery/snapshot", { signal });
     if (!res.ok) return false;
     const snap = await res.json().catch(() => null);
     if (!snap || typeof snap !== "object" || snap.error) return false;
@@ -3433,7 +3653,7 @@ function PaymentRecoveryScreen() {
   async function loadRecoveryData(isBackground: boolean, signal: AbortSignal) {
     if (!isBackground) { setLoading(!hasLoadedOnce.current); setError(false); }
     try {
-      const ok = await loadSnapshot(signal).catch(() => false) || await loadLegacy(signal);
+      const ok = await loadSnapshot(signal).catch(() => false) || (accessToken ? await loadLegacy(signal) : false);
       if (!ok) throw new Error("no data");
       hasLoadedOnce.current = true;
       setStaleWarning(false);
@@ -3447,16 +3667,16 @@ function PaymentRecoveryScreen() {
   }
 
   useEffect(() => {
-    if (!accessToken) return;
+    if (!identityReady) return;
     const controller = new AbortController();
     loadRecoveryData(false, controller.signal);
     return () => controller.abort();
-  }, [accessToken, refreshTick]);
+  }, [identityReady, accessToken, refreshTick]);
 
   // Poll every 90s while the tab is visible; refresh immediately when it
   // becomes visible again after being hidden.
   useEffect(() => {
-    if (!accessToken) return;
+    if (!identityReady) return;
     const interval = setInterval(() => {
       if (document.visibilityState === "hidden") return;
       const controller = new AbortController();
@@ -3470,7 +3690,7 @@ function PaymentRecoveryScreen() {
     }
     document.addEventListener("visibilitychange", onVisible);
     return () => { clearInterval(interval); document.removeEventListener("visibilitychange", onVisible); };
-  }, [accessToken]);
+  }, [identityReady]);
 
   // "Data may be stale" once the last successful sync is >3 minutes old.
   useEffect(() => {
@@ -3485,14 +3705,13 @@ function PaymentRecoveryScreen() {
   function refetch() { setRefreshTick(t => t + 1); }
 
   async function postAction(path: string, body?: unknown): Promise<boolean> {
-    if (!accessToken) return false;
+    if (!identityReady) return false;
     setActionBusy(true);
     try {
-      const res = await fetch(`/api/link/${accessToken}${path}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body ?? {}),
-      });
+      // /recovery/settings is PUT in the production API (§7) but POST in the
+      // legacy one - everything else is POST in both.
+      const method = !accessToken && path === "/recovery/settings" ? "PUT" : "POST";
+      const res = await apiFetch(accessToken, session?.csrfToken, path, { method, body: body ?? {} });
       return res.ok;
     } catch {
       return false;
@@ -4005,7 +4224,29 @@ function getTokenFromURL(): string | null {
   return match ? match[1] : null;
 }
 
+// Legacy access-token links (/t/:token) bypass session auth entirely - a
+// link is already scoped to one clinic. Everyone else needs a real session.
 export default function App() {
+  return (
+    <AuthProvider>
+      <AppGate />
+    </AuthProvider>
+  );
+}
+
+function AppGate() {
+  const accessToken = getTokenFromURL();
+  const { session, authLoading } = useAuth();
+  if (accessToken) return <DashboardShell />;
+  if (authLoading) {
+    return <div className="min-h-screen flex items-center justify-center text-sm text-muted-foreground">Loading…</div>;
+  }
+  if (!session) return <LoginScreen />;
+  return <DashboardShell />;
+}
+
+function DashboardShell() {
+  const { session, logout } = useAuth();
   const [activeNav, setActiveNav] = useState("overview");
   const [accessToken] = useState<string | null>(getTokenFromURL);
   const [tenantInfo, setTenantInfo] = useState<TenantInfo | null>(null);
@@ -4019,26 +4260,49 @@ export default function App() {
   const [settings, setSettings] = useState<Record<string, unknown>>({});
   const [loading, setLoading] = useState(false);
 
+  // Legacy mode has its own /tenant + /queue/requests + /settings endpoints
+  // per access-token link; session mode derives the same information from
+  // the session itself (tenantId/activeClinicId) plus the public settings
+  // endpoint - there's no per-clinic "/tenant" concept to fetch separately.
+  const identityReady = Boolean(accessToken) || Boolean(session);
+  const csrfToken = session?.csrfToken;
+
   useEffect(() => {
-    if (!accessToken) return;
+    if (!identityReady) return;
     setLoading(true);
     Promise.all([
-      fetch(`/api/link/${accessToken}/tenant`).then(r => r.ok ? r.json() : null),
-      fetch(`/api/link/${accessToken}/queue/requests`).then(r => r.ok ? r.json() : []),
-      fetch(`/api/link/${accessToken}/settings`).then(r => r.ok ? r.json() : {}),
-      fetch(`/api/link/${accessToken}/inbound/calls`).then(r => r.ok ? r.json() : { calls: [] }),
-      fetch(`/api/link/${accessToken}/inbound/transcripts`).then(r => r.ok ? r.json() : { transcripts: [] }),
-      fetch(`/api/link/${accessToken}/inbound/analytics`).then(r => r.ok ? r.json() : []),
-      fetch(`/api/link/${accessToken}/inbound/overview`).then(r => r.ok ? r.json() : null),
-      fetch(`/api/link/${accessToken}/inbound/invoices`).then(r => r.ok ? r.json() : { invoices: [] }),
-      fetch(`/api/link/${accessToken}/outbound/overview`).then(r => r.ok ? r.json() : null).catch(() => null),
-      fetch(`/api/link/${accessToken}/outbound/calls`).then(r => r.ok ? r.json() : { calls: [] }).catch(() => ({ calls: [] })),
-      fetch(`/api/link/${accessToken}/outbound/transcripts`).then(r => r.ok ? r.json() : { transcripts: [] }).catch(() => ({ transcripts: [] })),
+      accessToken ? fetch(`/api/link/${accessToken}/tenant`).then(r => r.ok ? r.json() : null) : Promise.resolve(null),
+      apiFetch(accessToken, csrfToken, "/queue/requests").then(r => r.ok ? r.json() : []),
+      apiFetch(accessToken, csrfToken, "/settings").then(r => r.ok ? r.json() : {}),
+      apiFetch(accessToken, csrfToken, "/inbound/calls").then(r => r.ok ? r.json() : { calls: [] }),
+      apiFetch(accessToken, csrfToken, "/inbound/transcripts").then(r => r.ok ? r.json() : { transcripts: [] }),
+      apiFetch(accessToken, csrfToken, "/inbound/analytics").then(r => r.ok ? r.json() : []),
+      apiFetch(accessToken, csrfToken, "/inbound/overview").then(r => r.ok ? r.json() : null),
+      apiFetch(accessToken, csrfToken, "/inbound/invoices").then(r => r.ok ? r.json() : { invoices: [] }),
+      apiFetch(accessToken, csrfToken, "/outbound/overview").then(r => r.ok ? r.json() : null).catch(() => null),
+      apiFetch(accessToken, csrfToken, "/outbound/calls").then(r => r.ok ? r.json() : { calls: [] }).catch(() => ({ calls: [] })),
+      apiFetch(accessToken, csrfToken, "/outbound/transcripts").then(r => r.ok ? r.json() : { transcripts: [] }).catch(() => ({ transcripts: [] })),
     ])
       .then(([tenant, requests, savedSettings, callsRes, transcriptsRes, analyticsRes, overviewRes, invoicesRes, outboundOverviewRes, outboundCallsRes, outboundTranscriptsRes]) => {
-        setTenantInfo(tenant);
-        setStaffTasks(requests);
-        setSettings(savedSettings ?? {});
+        if (accessToken) {
+          if (tenant) setTenantInfo(tenant);
+          setSettings(savedSettings ?? {});
+        } else if (savedSettings && typeof savedSettings === "object") {
+          // The production public-config response is the clinic_configs row
+          // (tenant_id/clinic_name/...) plus a nested `settings` object of
+          // saved sections - not the flat per-section bag the legacy
+          // /settings endpoint returns, so both need deriving from it.
+          const cfg = savedSettings as Record<string, unknown>;
+          setTenantInfo({
+            client_id: String(cfg.tenant_id ?? session?.tenantId ?? ""),
+            clinic_id: String(cfg.clinic_id ?? session?.activeClinicId ?? ""),
+            clinic_name: String(cfg.clinic_name ?? ""),
+            receptionist_name: "Grace",
+            link_label: String(cfg.clinic_name ?? session?.activeClinicId ?? ""),
+          });
+          setSettings((cfg.settings && typeof cfg.settings === "object" ? cfg.settings : {}) as Record<string, unknown>);
+        }
+        setStaffTasks(Array.isArray(requests) ? requests : []);
         const inboundCalls = Array.isArray(callsRes?.calls) ? callsRes.calls.map((c: Record<string, unknown>) => mapInboundCall(c, "inbound")) : [];
         const outboundCalls = Array.isArray(outboundCallsRes?.calls) ? outboundCallsRes.calls.map((c: Record<string, unknown>) => mapInboundCall(c, "outbound")) : [];
         setCallLogs([...inboundCalls, ...outboundCalls]);
@@ -4052,7 +4316,7 @@ export default function App() {
       })
       .catch(() => {})
       .finally(() => setLoading(false));
-  }, [accessToken]);
+  }, [identityReady, accessToken, csrfToken]);
 
   // Staff Action Queue needs new requests to show up without a manual
   // refresh, so poll it quietly in the background (no loading spinner).
@@ -4061,16 +4325,16 @@ export default function App() {
   // across a few tabs was enough to trip the n8n workflow's Google Sheets
   // rate limit (429 "too many requests" on Read Billing/Calls nodes).
   useEffect(() => {
-    if (!accessToken) return;
+    if (!identityReady) return;
     const interval = setInterval(() => {
       if (document.visibilityState === "hidden") return;
-      fetch(`/api/link/${accessToken}/queue/requests`)
+      apiFetch(accessToken, csrfToken, "/queue/requests")
         .then(r => r.ok ? r.json() : null)
-        .then(requests => { if (requests) setStaffTasks(requests); })
+        .then(requests => { if (Array.isArray(requests)) setStaffTasks(requests); })
         .catch(() => {});
     }, 20000);
     return () => clearInterval(interval);
-  }, [accessToken]);
+  }, [identityReady, accessToken, csrfToken]);
 
   // Inbound Tracker data (calls/transcripts/analytics/overview/invoices)
   // should reflect new calls without a manual refresh too - poll it quietly
@@ -4080,18 +4344,18 @@ export default function App() {
   // keep this interval well above the staff-queue one and skip it entirely
   // while the tab is hidden.
   useEffect(() => {
-    if (!accessToken) return;
+    if (!identityReady) return;
     const interval = setInterval(() => {
       if (document.visibilityState === "hidden") return;
       Promise.all([
-        fetch(`/api/link/${accessToken}/inbound/calls`).then(r => r.ok ? r.json() : null),
-        fetch(`/api/link/${accessToken}/inbound/transcripts`).then(r => r.ok ? r.json() : null),
-        fetch(`/api/link/${accessToken}/inbound/analytics`).then(r => r.ok ? r.json() : null),
-        fetch(`/api/link/${accessToken}/inbound/overview`).then(r => r.ok ? r.json() : null),
-        fetch(`/api/link/${accessToken}/inbound/invoices`).then(r => r.ok ? r.json() : null),
-        fetch(`/api/link/${accessToken}/outbound/overview`).then(r => r.ok ? r.json() : null).catch(() => null),
-        fetch(`/api/link/${accessToken}/outbound/calls`).then(r => r.ok ? r.json() : null).catch(() => null),
-        fetch(`/api/link/${accessToken}/outbound/transcripts`).then(r => r.ok ? r.json() : null).catch(() => null),
+        apiFetch(accessToken, csrfToken, "/inbound/calls").then(r => r.ok ? r.json() : null),
+        apiFetch(accessToken, csrfToken, "/inbound/transcripts").then(r => r.ok ? r.json() : null),
+        apiFetch(accessToken, csrfToken, "/inbound/analytics").then(r => r.ok ? r.json() : null),
+        apiFetch(accessToken, csrfToken, "/inbound/overview").then(r => r.ok ? r.json() : null),
+        apiFetch(accessToken, csrfToken, "/inbound/invoices").then(r => r.ok ? r.json() : null),
+        apiFetch(accessToken, csrfToken, "/outbound/overview").then(r => r.ok ? r.json() : null).catch(() => null),
+        apiFetch(accessToken, csrfToken, "/outbound/calls").then(r => r.ok ? r.json() : null).catch(() => null),
+        apiFetch(accessToken, csrfToken, "/outbound/transcripts").then(r => r.ok ? r.json() : null).catch(() => null),
       ])
         .then(([callsRes, transcriptsRes, analyticsRes, overviewRes, invoicesRes, outboundOverviewRes, outboundCallsRes, outboundTranscriptsRes]) => {
           if (Array.isArray(callsRes?.calls) || Array.isArray(outboundCallsRes?.calls)) {
@@ -4112,16 +4376,16 @@ export default function App() {
         .catch(() => {});
     }, 60000);
     return () => clearInterval(interval);
-  }, [accessToken]);
+  }, [identityReady, accessToken, csrfToken]);
 
   const [overviewRefreshing, setOverviewRefreshing] = useState(false);
   async function refreshOverview() {
-    if (!accessToken) return;
+    if (!identityReady) return;
     setOverviewRefreshing(true);
     try {
       const [res, outboundRes] = await Promise.all([
-        fetch(`/api/link/${accessToken}/inbound/overview`),
-        fetch(`/api/link/${accessToken}/outbound/overview`).catch(() => null),
+        apiFetch(accessToken, csrfToken, "/inbound/overview"),
+        apiFetch(accessToken, csrfToken, "/outbound/overview").catch(() => null),
       ]);
       const data = res.ok ? await res.json() : null;
       setOverview(data && !data.error ? data : null);
@@ -4135,12 +4399,8 @@ export default function App() {
   }
 
   async function updateTaskStatus(id: string, status: string) {
-    if (!accessToken) return;
-    const res = await fetch(`/api/link/${accessToken}/queue/requests/${id}`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ status }),
-    });
+    if (!identityReady) return;
+    const res = await apiFetch(accessToken, csrfToken, `/queue/requests/${id}`, { method: "PATCH", body: { status } });
     if (res.ok) {
       const updated: StaffTask = await res.json();
       setStaffTasks(prev => prev.map(t => t.id === updated.id ? updated : t));
@@ -4148,54 +4408,77 @@ export default function App() {
   }
 
   async function deleteTask(id: string) {
-    if (!accessToken) return;
-    const res = await fetch(`/api/link/${accessToken}/queue/requests/${id}`, { method: 'DELETE' });
+    if (!identityReady) return;
+    const res = await apiFetch(accessToken, csrfToken, `/queue/requests/${id}`, { method: "DELETE" });
     if (res.ok) setStaffTasks(prev => prev.filter(t => t.id !== id));
   }
 
+  // Session mode has no distinct /settings/bulk or /settings-section write -
+  // the production Settings Backend workflow takes one consolidated
+  // PUT /settings body (handoff §8). Legacy still has per-section PATCH-like
+  // semantics via POST /settings, so this only special-cases the difference.
   async function saveSection(section: string, data: Record<string, unknown>): Promise<boolean> {
-    if (!accessToken) return false;
+    if (!identityReady) return false;
     try {
-      const res = await fetch(`/api/link/${accessToken}/settings`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ section, data }),
-      });
+      const res = accessToken
+        ? await fetch(`/api/link/${accessToken}/settings`, {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ section, data }),
+          })
+        : await apiFetch(accessToken, csrfToken, "/settings", { method: "PUT", body: { settings: { [section]: data } } });
       if (!res.ok) return false;
-      const updated: Record<string, unknown> = await res.json();
-      // The response echoes the server's FULL settings, but responses from
-      // different sections' saves can arrive out of order (e.g. this save
-      // and an unrelated section's save fired close together). Only trust
-      // this response for the section we actually just saved - otherwise a
-      // slightly-stale response for another section can silently overwrite
-      // newer local data for a section it never touched.
-      setSettings(prev => ({ ...prev, [section]: updated[section] }));
+      if (accessToken) {
+        // Legacy response echoes the server's FULL settings, but responses
+        // from different sections' saves can arrive out of order (e.g. this
+        // save and an unrelated section's save fired close together). Only
+        // trust this response for the section we actually just saved -
+        // otherwise a slightly-stale response for another section can
+        // silently overwrite newer local data for a section it never touched.
+        const updated: Record<string, unknown> = await res.json();
+        setSettings(prev => ({ ...prev, [section]: updated[section] }));
+      } else {
+        // The production Settings Backend's save response is a save
+        // confirmation (has_juvonno_api_key, retell assignments, etc.), not
+        // an echo of the settings JSON - apply what we already know we sent.
+        setSettings(prev => ({ ...prev, [section]: data }));
+      }
       return true;
     } catch {
       return false;
     }
   }
 
+  // No session-mode equivalent to legacy's /settings/bulk - the production
+  // save endpoint takes one section per call already via saveSection above.
+  // Bulk-saves multiple sections sequentially instead of inventing a new
+  // n8n contract for this.
   async function saveBulk(sections: Record<string, unknown>) {
-    if (!accessToken) return;
-    const res = await fetch(`/api/link/${accessToken}/settings/bulk`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ sections }),
-    });
-    if (!res.ok) return;
-    const updated: Record<string, unknown> = await res.json();
-    // Same out-of-order-response protection as saveSection: only trust this
-    // response for the sections actually included in this bulk save.
-    setSettings(prev => {
-      const next = { ...prev };
-      for (const key of Object.keys(sections)) next[key] = updated[key];
-      return next;
-    });
+    if (!identityReady) return;
+    if (accessToken) {
+      const res = await fetch(`/api/link/${accessToken}/settings/bulk`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sections }),
+      });
+      if (!res.ok) return;
+      const updated: Record<string, unknown> = await res.json();
+      // Same out-of-order-response protection as saveSection: only trust this
+      // response for the sections actually included in this bulk save.
+      setSettings(prev => {
+        const next = { ...prev };
+        for (const key of Object.keys(sections)) next[key] = updated[key];
+        return next;
+      });
+      return;
+    }
+    for (const [section, data] of Object.entries(sections)) {
+      await saveSection(section, data as Record<string, unknown>);
+    }
   }
 
   async function syncRetell(): Promise<{ ok: boolean; error?: string }> {
-    if (!accessToken) return { ok: false, error: 'No access token' };
+    if (!accessToken) return { ok: false, error: 'Not available - Retell sync is a legacy-link-only action.' };
     const res = await fetch(`/api/link/${accessToken}/settings/retell-sync`, { method: 'POST' });
     const json = await res.json();
     return res.ok ? { ok: true } : { ok: false, error: json.error ?? 'Sync failed' };
@@ -4203,7 +4486,7 @@ export default function App() {
 
   const Screen = SCREENS[activeNav] ?? OverviewScreen;
 
-  if (!accessToken) {
+  if (!identityReady) {
     return (
       <div className="flex h-screen w-screen items-center justify-center bg-background" style={{ fontFamily: "'Inter', sans-serif" }}>
         <div className="text-center space-y-3">

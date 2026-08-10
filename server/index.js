@@ -4,6 +4,9 @@ import { readFileSync, writeFileSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { randomUUID } from 'crypto';
+import { prisma } from './db.js';
+import { requireSession, requireCsrf, requireClinicAccess, requireRole, verifyCredentials, clinicsForUser, issueSession, clearSession, rateLimit } from './auth.js';
+import * as n8nProd from './n8n.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -16,6 +19,10 @@ const DASHBOARD_API_KEY = process.env.DASHBOARD_API_KEY ?? '';
 // haven't set this yet keep working exactly as before (billing/recovery
 // routes all funnel through callN8n below).
 const N8N_DASHBOARD_SECRET = process.env.N8N_DASHBOARD_SECRET ?? '';
+// Same credential n8n's production webhooks send (server/n8n.js uses this
+// pair outbound; this is the inbound direction - verifying n8n's calls TO us).
+const N8N_DASHBOARD_AUTH_HEADER = (process.env.N8N_DASHBOARD_AUTH_HEADER ?? 'Authorization').toLowerCase();
+const N8N_DASHBOARD_AUTH_VALUE = process.env.N8N_DASHBOARD_AUTH_VALUE ?? '';
 const TENANT_LINKS_FILE = process.env.TENANT_LINKS_FILE ?? join(ROOT, 'data/tenant-links.json');
 const REQUESTS_DATA_FILE = process.env.REQUESTS_DATA_FILE ?? join(ROOT, 'data/requests.json');
 const SETTINGS_FILE = process.env.SETTINGS_FILE ?? join(ROOT, 'data/settings.json');
@@ -713,6 +720,251 @@ app.post('/api/link/:accessToken/outbound/make-call', n8nRoute(async (req, res) 
   }
   const { status, json } = await postToOutboundTracker(tenant, 'make-call', { contacts: normalized, name });
   res.status(status).json(json);
+}));
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Production RivaCare API (RIVACARE-FRONTEND-DEVELOPER-HANDOFF.md) — replaces
+// the /api/link/:accessToken/* MVP surface above with server-controlled
+// sessions, verified (tenant_id, clinic_id) scoping via Prisma/Postgres, and
+// the new shared n8n webhook contracts (server/n8n.js). The legacy routes
+// above are left untouched for backward compatibility during migration
+// (handoff §3.4) — nothing that currently works stops working.
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Uniform error contract (handoff §13): { error: { code, message, retryable } }.
+// Distinct from the legacy n8nRoute() above, which keeps its old flat shape
+// so existing /api/link/* callers don't see a breaking change.
+function apiRoute(handler) {
+  return async (req, res) => {
+    try {
+      await handler(req, res);
+    } catch (err) {
+      const status = err.status ?? 502;
+      const code = err.code ?? (
+        status === 401 ? 'UNAUTHENTICATED' :
+        status === 403 ? 'FORBIDDEN' :
+        status === 400 ? 'VALIDATION_ERROR' :
+        status === 404 ? 'NOT_FOUND' :
+        status === 409 ? 'CONFLICT' :
+        status === 429 ? 'RATE_LIMITED' :
+        status >= 500 ? 'UPSTREAM_UNAVAILABLE' : 'ERROR'
+      );
+      if (status >= 500) console.error(`[api] ${req.method} ${req.originalUrl} failed:`, err.message);
+      res.status(status).json({ error: { code, message: err.message ?? 'Request failed', retryable: [429, 502, 503, 504].includes(status) } });
+    }
+  };
+}
+
+function badRequest(message, code = 'VALIDATION_ERROR') {
+  const err = new Error(message);
+  err.status = 400;
+  err.code = code;
+  return err;
+}
+
+// ── Auth (§5) ────────────────────────────────────────────────────────────────
+app.post('/api/auth/login', rateLimit('login', 10, 60_000), apiRoute(async (req, res) => {
+  const { username, password } = req.body ?? {};
+  if (!username || !password) throw badRequest('username and password are required.');
+  const user = await verifyCredentials(username, password);
+  if (!user) {
+    const err = new Error('Invalid username or password.');
+    err.status = 401;
+    err.code = 'UNAUTHENTICATED';
+    throw err;
+  }
+  const clinics = await clinicsForUser(user.id, user.tenant_id);
+  const activeClinicId = clinics[0]?.clinicId ?? null;
+  const csrfToken = issueSession(res, { userId: user.id, tenantId: user.tenant_id, activeClinicId });
+  res.json({ userId: user.id, tenantId: user.tenant_id, clinics, activeClinicId, csrfToken });
+}));
+
+app.post('/api/auth/logout', requireSession, requireCsrf, apiRoute(async (req, res) => {
+  clearSession(res);
+  res.json({ ok: true });
+}));
+
+app.get('/api/auth/session', requireSession, apiRoute(async (req, res) => {
+  const clinics = await clinicsForUser(req.session.userId, req.session.tenantId);
+  res.json({ userId: req.session.userId, tenantId: req.session.tenantId, activeClinicId: req.session.activeClinicId ?? null, clinics });
+}));
+
+// ── Clinic selection (§5, §12) ───────────────────────────────────────────────
+app.get('/api/clinics', requireSession, apiRoute(async (req, res) => {
+  const clinics = await clinicsForUser(req.session.userId, req.session.tenantId);
+  res.json({ tenantId: req.session.tenantId, clinics, activeClinicId: req.session.activeClinicId ?? clinics[0]?.clinicId ?? null });
+}));
+
+app.post('/api/session/active-clinic', requireSession, requireCsrf, apiRoute(async (req, res) => {
+  const clinicId = String(req.body?.clinicId ?? '');
+  if (!clinicId) throw badRequest('clinicId is required.');
+  const access = await prisma.user_clinic_access.findUnique({
+    where: { user_id_tenant_id_clinic_id: { user_id: req.session.userId, tenant_id: req.session.tenantId, clinic_id: clinicId } },
+  });
+  if (!access) {
+    const err = new Error('You do not have access to this clinic.');
+    err.status = 403;
+    err.code = 'FORBIDDEN';
+    throw err;
+  }
+  const csrfToken = issueSession(res, { userId: req.session.userId, tenantId: req.session.tenantId, activeClinicId: clinicId });
+  res.json({ activeClinicId: clinicId, csrfToken });
+}));
+
+// Every /api/dashboard/* route requires a valid session AND a verified
+// (tenant_id, clinic_id) the session's user actually has access to.
+const dashboardAuth = [requireSession, requireCsrf, requireClinicAccess];
+
+// ── Staff Action Queue (n8n → us) ────────────────────────────────────────────
+// The AI Receptionist workflow's "Send Booking/Reschedule/Cancellation to
+// Staff Action Queue" nodes POST here once someone points them at this
+// server's real URL and re-enables them (currently disabled, pointed at
+// https://disabled.invalid/... as a placeholder - that's an n8n-side edit,
+// not something this server controls). Backed by the `requests` table,
+// which is the production replacement for the legacy requests.json file.
+function requireN8nAuth(req, res, next) {
+  if (!N8N_DASHBOARD_AUTH_VALUE) {
+    return res.status(503).json({ error: { code: 'UPSTREAM_UNAVAILABLE', message: 'N8N_DASHBOARD_AUTH_VALUE is not configured.', retryable: false } });
+  }
+  if (req.headers[N8N_DASHBOARD_AUTH_HEADER] !== N8N_DASHBOARD_AUTH_VALUE) {
+    return res.status(401).json({ error: { code: 'UNAUTHENTICATED', message: 'Invalid or missing dashboard auth header.', retryable: false } });
+  }
+  next();
+}
+
+app.post('/api/webhooks/staff-action', requireN8nAuth, apiRoute(async (req, res) => {
+  const payload = req.body ?? {};
+  const metadata = payload.metadata ?? {};
+  const tenantId = String(metadata.client_id ?? metadata.tenant_id ?? payload.tenant_id ?? '').trim();
+  const clinicId = String(metadata.clinic_id ?? payload.clinic_id ?? '').trim();
+  if (!tenantId || !clinicId) throw badRequest('metadata.client_id/tenant_id and metadata.clinic_id are required.');
+  const row = await prisma.requests.create({
+    data: { tenant_id: tenantId, clinic_id: clinicId, status: 'New', data: payload },
+  });
+  res.status(201).json({ ok: true, id: row.id });
+}));
+
+// Flattens the Postgres row (id/status/created_at columns + `data` JSONB)
+// back into the flat shape the existing StaffTask UI already expects.
+function flattenRequestRow(row) {
+  const data = row.data && typeof row.data === 'object' ? row.data : {};
+  return { ...data, id: row.id, status: row.status, created_at: row.created_at.toISOString() };
+}
+
+app.get('/api/dashboard/queue/requests', ...dashboardAuth, apiRoute(async (req, res) => {
+  const rows = await prisma.requests.findMany({
+    where: { tenant_id: req.session.tenantId, clinic_id: req.clinicId },
+    orderBy: { created_at: 'desc' },
+  });
+  res.json(rows.map(flattenRequestRow));
+}));
+
+app.patch('/api/dashboard/queue/requests/:id', ...dashboardAuth, apiRoute(async (req, res) => {
+  const existing = await prisma.requests.findFirst({
+    where: { id: req.params.id, tenant_id: req.session.tenantId, clinic_id: req.clinicId },
+  });
+  if (!existing) {
+    const err = new Error('Request not found.');
+    err.status = 404;
+    err.code = 'NOT_FOUND';
+    throw err;
+  }
+  const currentData = existing.data && typeof existing.data === 'object' ? existing.data : {};
+  const nextData = { ...currentData, ...(req.body ?? {}) };
+  delete nextData.id;
+  delete nextData.status;
+  const status = String(req.body?.status ?? existing.status);
+  const updated = await prisma.requests.update({
+    where: { id: existing.id },
+    data: { status, data: nextData },
+  });
+  res.json(flattenRequestRow(updated));
+}));
+
+app.delete('/api/dashboard/queue/requests/:id', ...dashboardAuth, apiRoute(async (req, res) => {
+  const existing = await prisma.requests.findFirst({
+    where: { id: req.params.id, tenant_id: req.session.tenantId, clinic_id: req.clinicId },
+  });
+  if (!existing) {
+    const err = new Error('Request not found.');
+    err.status = 404;
+    err.code = 'NOT_FOUND';
+    throw err;
+  }
+  await prisma.requests.delete({ where: { id: existing.id } });
+  res.status(204).end();
+}));
+
+// ── Inbound dashboard (§6.2) ─────────────────────────────────────────────────
+app.get('/api/dashboard/inbound/overview', ...dashboardAuth, apiRoute(async (req, res) => {
+  res.json(await n8nProd.inbound.overview(req.session.tenantId, req.clinicId));
+}));
+app.get('/api/dashboard/inbound/analytics', ...dashboardAuth, apiRoute(async (req, res) => {
+  res.json(await n8nProd.inbound.analytics(req.session.tenantId, req.clinicId, req.query.range));
+}));
+app.get('/api/dashboard/inbound/calls', ...dashboardAuth, apiRoute(async (req, res) => {
+  res.json(await n8nProd.inbound.calls(req.session.tenantId, req.clinicId));
+}));
+app.get('/api/dashboard/inbound/transcripts', ...dashboardAuth, apiRoute(async (req, res) => {
+  res.json(await n8nProd.inbound.transcripts(req.session.tenantId, req.clinicId));
+}));
+app.get('/api/dashboard/inbound/invoices', ...dashboardAuth, apiRoute(async (req, res) => {
+  res.json(await n8nProd.inbound.invoices(req.session.tenantId, req.clinicId));
+}));
+
+// ── Outbound dashboard (§6.3) ────────────────────────────────────────────────
+app.get('/api/dashboard/outbound/overview', ...dashboardAuth, apiRoute(async (req, res) => {
+  res.json(await n8nProd.outbound.overview(req.session.tenantId, req.clinicId));
+}));
+app.get('/api/dashboard/outbound/analytics', ...dashboardAuth, apiRoute(async (req, res) => {
+  res.json(await n8nProd.outbound.analytics(req.session.tenantId, req.clinicId, req.query.range));
+}));
+app.get('/api/dashboard/outbound/calls', ...dashboardAuth, apiRoute(async (req, res) => {
+  res.json(await n8nProd.outbound.calls(req.session.tenantId, req.clinicId));
+}));
+app.get('/api/dashboard/outbound/transcripts', ...dashboardAuth, apiRoute(async (req, res) => {
+  res.json(await n8nProd.outbound.transcripts(req.session.tenantId, req.clinicId));
+}));
+app.get('/api/dashboard/outbound/invoices', ...dashboardAuth, apiRoute(async (req, res) => {
+  res.json(await n8nProd.outbound.invoices(req.session.tenantId, req.clinicId));
+}));
+
+// ── Settings (§6.1, §8) ──────────────────────────────────────────────────────
+// /juvonno-settings-config (internal receptionist config, decrypted Juvonno
+// key) is intentionally never proxied here - only the public/redacted read
+// and the write-only save are reachable from the browser.
+app.get('/api/dashboard/settings', ...dashboardAuth, apiRoute(async (req, res) => {
+  res.json(await n8nProd.getPublicSettings(req.session.tenantId, req.clinicId));
+}));
+app.put('/api/dashboard/settings', ...dashboardAuth, requireRole('owner', 'admin'), rateLimit('settings-save', 20, 60_000), apiRoute(async (req, res) => {
+  const payload = { ...(req.body ?? {}), tenant_id: req.session.tenantId, clinic_id: req.clinicId };
+  res.json(await n8nProd.saveSettings(payload));
+}));
+app.get('/api/dashboard/settings/retell-options', ...dashboardAuth, requireRole('owner', 'admin'), rateLimit('retell-options', 30, 5 * 60_000), apiRoute(async (req, res) => {
+  res.json(await n8nProd.getRetellOptions(req.session.tenantId, req.clinicId));
+}));
+
+// ── Payment Recovery (§6.4) ──────────────────────────────────────────────────
+app.get('/api/dashboard/recovery/snapshot', ...dashboardAuth, apiRoute(async (req, res) => {
+  res.json(await n8nProd.recoveryEvent('recovery.get_snapshot', req.session.tenantId, req.clinicId));
+}));
+app.post('/api/dashboard/recovery/queue/approve', ...dashboardAuth, rateLimit('recovery-mutate', 30, 60_000), apiRoute(async (req, res) => {
+  res.json(await n8nProd.recoveryEvent('recovery.queue.approve', req.session.tenantId, req.clinicId, { queue_ids: req.body?.queueIds ?? [] }));
+}));
+app.post('/api/dashboard/recovery/queue/reject', ...dashboardAuth, rateLimit('recovery-mutate', 30, 60_000), apiRoute(async (req, res) => {
+  res.json(await n8nProd.recoveryEvent('recovery.queue.reject', req.session.tenantId, req.clinicId, { queue_ids: req.body?.queueIds ?? [], reason: req.body?.reason }));
+}));
+function recoveryInvoiceRoute(action) {
+  return apiRoute(async (req, res) => {
+    res.json(await n8nProd.recoveryEvent(`recovery.invoice.${action}`, req.session.tenantId, req.clinicId, { invoice_id: req.params.invoiceId, reason: req.body?.reason }));
+  });
+}
+app.post('/api/dashboard/recovery/invoices/:invoiceId/hold', ...dashboardAuth, rateLimit('recovery-mutate', 30, 60_000), recoveryInvoiceRoute('hold'));
+app.post('/api/dashboard/recovery/invoices/:invoiceId/resume', ...dashboardAuth, rateLimit('recovery-mutate', 30, 60_000), recoveryInvoiceRoute('resume'));
+app.post('/api/dashboard/recovery/invoices/:invoiceId/escalate', ...dashboardAuth, rateLimit('recovery-mutate', 30, 60_000), recoveryInvoiceRoute('escalate'));
+app.post('/api/dashboard/recovery/invoices/:invoiceId/reconcile', ...dashboardAuth, rateLimit('recovery-mutate', 30, 60_000), recoveryInvoiceRoute('reconcile'));
+app.put('/api/dashboard/recovery/settings', ...dashboardAuth, rateLimit('settings-save', 20, 60_000), apiRoute(async (req, res) => {
+  res.json(await n8nProd.recoveryEvent('recovery.settings_changed', req.session.tenantId, req.clinicId, { settings: req.body ?? {} }));
 }));
 
 // Serve built frontend

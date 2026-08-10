@@ -1,0 +1,510 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DIRECT_DATABASE_URL")
+}
+
+model billing_months {
+  id                  BigInt         @id @default(autoincrement())
+  tenant_id           String
+  billing_month       String         @db.Char(7)
+  billing_key         String         @unique
+  cumulative_minutes  Decimal        @default(0) @db.Decimal(12, 2)
+  total_calls         Int            @default(0)
+  total_recordings    Int            @default(0)
+  total_transcripts   Int            @default(0)
+  included_minutes    Decimal        @default(1000) @db.Decimal(12, 2)
+  base_rate           Decimal        @default(500) @db.Decimal(12, 2)
+  client_rate_per_min Decimal        @default(0.50) @db.Decimal(12, 4)
+  overage_rate        Decimal        @default(0.70) @db.Decimal(12, 4)
+  last_notified_at    Decimal        @default(0) @db.Decimal(12, 2)
+  overage_alert_sent  Boolean        @default(false)
+  created_at          DateTime       @default(now()) @db.Timestamptz(6)
+  updated_at          DateTime       @default(now()) @db.Timestamptz(6)
+  clinic_id           String
+  clinic_configs      clinic_configs @relation(fields: [tenant_id, clinic_id], references: [tenant_id, clinic_id], onDelete: Cascade, onUpdate: NoAction, map: "billing_months_tenant_clinic_fk")
+  tenants             tenants        @relation(fields: [tenant_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@unique([tenant_id, clinic_id, billing_month], map: "billing_months_tenant_clinic_month_uidx")
+  @@index([tenant_id, billing_month(sort: Desc)], map: "billing_months_tenant_month_idx")
+}
+
+model calls {
+  id                BigInt         @id @default(autoincrement())
+  tenant_id         String
+  retell_call_id    String
+  call_key          String         @unique
+  retell_agent_id   String?
+  from_number       String?
+  call_status       String?
+  disconnect_reason String?
+  started_at        DateTime?      @db.Timestamptz(6)
+  duration_seconds  Int            @default(0)
+  duration_minutes  Decimal        @default(0) @db.Decimal(12, 2)
+  summary           String?
+  sentiment         String?
+  transcript        String?
+  recording_url     String?
+  metadata          Json           @default("{}")
+  created_at        DateTime       @default(now()) @db.Timestamptz(6)
+  updated_at        DateTime       @default(now()) @db.Timestamptz(6)
+  clinic_id         String
+  to_number         String?
+  clinic_configs    clinic_configs @relation(fields: [tenant_id, clinic_id], references: [tenant_id, clinic_id], onDelete: NoAction, onUpdate: NoAction, map: "calls_tenant_clinic_fk")
+  tenants           tenants        @relation(fields: [tenant_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@unique([tenant_id, retell_call_id])
+  @@index([tenant_id, clinic_id, started_at(sort: Desc)], map: "calls_tenant_clinic_started_idx")
+  @@index([tenant_id, started_at(sort: Desc)], map: "calls_tenant_started_at_idx")
+  @@index([tenant_id, call_status], map: "calls_tenant_status_idx")
+}
+
+model clinic_configs {
+  tenant_id                        String
+  client_id                        String
+  clinic_id                        String
+  juvonno_base_url                 String?
+  juvonno_credential_ref           String?
+  retell_agent_id                  String?
+  retell_phone_number              String?                           @unique
+  retell_credential_ref            String?
+  default_branch_code              String?
+  included_minutes                 Decimal                           @default(1000) @db.Decimal(12, 2)
+  base_rate                        Decimal                           @default(500) @db.Decimal(12, 2)
+  client_rate_per_min              Decimal                           @default(0.50) @db.Decimal(12, 4)
+  overage_rate                     Decimal                           @default(0.70) @db.Decimal(12, 4)
+  settings                         Json                              @default("{}")
+  created_at                       DateTime                          @default(now()) @db.Timestamptz(6)
+  updated_at                       DateTime                          @default(now()) @db.Timestamptz(6)
+  id                               BigInt                            @id @default(autoincrement())
+  clinic_name                      String?
+  status                           String                            @default("active")
+  timezone                         String?
+  clinic_phone                     String?
+  clinic_email                     String?
+  payment_portal_url               String?
+  juvonno_auth_style               String                            @default("header")
+  juvonno_api_key_encrypted        Bytes?
+  retell_receptionist_agent_id     String?
+  retell_receptionist_phone_number String?
+  retell_outbound_agent_id         String?
+  retell_outbound_phone_number     String?
+  retell_recovery_agent_id         String?
+  retell_recovery_phone_number     String?
+  billing_months                   billing_months[]
+  calls                            calls[]
+  tenants                          tenants                           @relation(fields: [tenant_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  clinic_settings                  clinic_settings[]
+  invoices                         invoices[]
+  outbound_billing_months          outbound_billing_months[]
+  outbound_calls                   outbound_calls[]
+  outbound_invoices                outbound_invoices[]
+  payment_recovery_call_queue      payment_recovery_call_queue[]
+  payment_recovery_clinics         payment_recovery_clinics?
+  payment_recovery_communications  payment_recovery_communications[]
+  payment_recovery_followup_tasks  payment_recovery_followup_tasks[]
+  payment_recovery_invoices        payment_recovery_invoices[]
+  payment_recovery_metrics         payment_recovery_metrics[]
+  requests                         requests[]
+  user_clinic_access               user_clinic_access[]
+  webhook_events                   webhook_events[]
+
+  @@unique([tenant_id, clinic_id], map: "clinic_configs_tenant_clinic_uidx")
+  @@index([tenant_id, status, clinic_id], map: "clinic_configs_tenant_status_idx")
+}
+
+model clinic_settings {
+  id             BigInt         @id @default(autoincrement())
+  tenant_id      String
+  clinic_id      String
+  section        String
+  data           Json           @default("{}")
+  version        Int            @default(1)
+  created_at     DateTime       @default(now()) @db.Timestamptz(6)
+  updated_at     DateTime       @default(now()) @db.Timestamptz(6)
+  clinic_configs clinic_configs @relation(fields: [tenant_id, clinic_id], references: [tenant_id, clinic_id], onDelete: Cascade, onUpdate: NoAction)
+  tenants        tenants        @relation(fields: [tenant_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@unique([tenant_id, clinic_id, section])
+  @@index([tenant_id, clinic_id, section], map: "clinic_settings_lookup_idx")
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model invoices {
+  id              BigInt         @id @default(autoincrement())
+  tenant_id       String
+  invoice_id      String
+  billing_month   String         @db.Char(7)
+  status          String         @default("pending")
+  base_amount     Decimal        @default(0) @db.Decimal(12, 2)
+  overage_minutes Decimal        @default(0) @db.Decimal(12, 2)
+  overage_amount  Decimal        @default(0) @db.Decimal(12, 2)
+  total_amount    Decimal        @default(0) @db.Decimal(12, 2)
+  generated_at    DateTime       @default(now()) @db.Timestamptz(6)
+  due_at          DateTime?      @db.Timestamptz(6)
+  paid_at         DateTime?      @db.Timestamptz(6)
+  details         Json           @default("{}")
+  clinic_id       String
+  clinic_configs  clinic_configs @relation(fields: [tenant_id, clinic_id], references: [tenant_id, clinic_id], onDelete: Cascade, onUpdate: NoAction, map: "invoices_tenant_clinic_fk")
+  tenants         tenants        @relation(fields: [tenant_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@unique([tenant_id, clinic_id, billing_month], map: "invoices_tenant_clinic_month_uidx")
+  @@index([tenant_id, billing_month(sort: Desc)], map: "invoices_tenant_month_idx")
+}
+
+model outbound_billing_months {
+  id                  BigInt         @id @default(autoincrement())
+  tenant_id           String
+  billing_month       String         @db.Char(7)
+  billing_key         String         @unique
+  cumulative_minutes  Decimal        @default(0) @db.Decimal(12, 2)
+  total_calls         Int            @default(0)
+  total_recordings    Int            @default(0)
+  total_transcripts   Int            @default(0)
+  included_minutes    Decimal        @default(1000) @db.Decimal(12, 2)
+  base_rate           Decimal        @default(500) @db.Decimal(12, 2)
+  client_rate_per_min Decimal        @default(0.50) @db.Decimal(12, 4)
+  overage_rate        Decimal        @default(0.70) @db.Decimal(12, 4)
+  last_notified_at    Decimal        @default(0) @db.Decimal(12, 2)
+  overage_alert_sent  Boolean        @default(false)
+  created_at          DateTime       @default(now()) @db.Timestamptz(6)
+  updated_at          DateTime       @default(now()) @db.Timestamptz(6)
+  clinic_id           String
+  clinic_configs      clinic_configs @relation(fields: [tenant_id, clinic_id], references: [tenant_id, clinic_id], onDelete: Cascade, onUpdate: NoAction, map: "outbound_billing_months_tenant_clinic_fk")
+  tenants             tenants        @relation(fields: [tenant_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@unique([tenant_id, clinic_id, billing_month], map: "outbound_billing_months_tenant_clinic_month_uidx")
+  @@index([tenant_id, billing_month(sort: Desc)], map: "outbound_billing_tenant_month_idx")
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model outbound_calls {
+  id                 BigInt         @id @default(autoincrement())
+  tenant_id          String
+  clinic_id          String
+  retell_call_id     String
+  call_key           String         @unique
+  retell_agent_id    String?
+  patient_first_name String?
+  patient_last_name  String?
+  from_number        String?
+  to_number          String?
+  call_direction     String         @default("outbound")
+  call_status        String?
+  disconnect_reason  String?
+  started_at         DateTime?      @db.Timestamptz(6)
+  duration_seconds   Int            @default(0)
+  duration_minutes   Decimal        @default(0) @db.Decimal(12, 2)
+  summary            String?
+  sentiment          String?
+  transcript         String?
+  recording_url      String?
+  metadata           Json           @default("{}")
+  created_at         DateTime       @default(now()) @db.Timestamptz(6)
+  updated_at         DateTime       @default(now()) @db.Timestamptz(6)
+  clinic_configs     clinic_configs @relation(fields: [tenant_id, clinic_id], references: [tenant_id, clinic_id], onDelete: NoAction, onUpdate: NoAction, map: "outbound_calls_tenant_clinic_fk")
+  tenants            tenants        @relation(fields: [tenant_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@unique([tenant_id, retell_call_id])
+  @@index([tenant_id, patient_last_name, patient_first_name], map: "outbound_calls_patient_name_idx")
+  @@index([tenant_id, clinic_id, started_at(sort: Desc)], map: "outbound_calls_tenant_clinic_started_at_idx")
+  @@index([tenant_id, clinic_id, started_at(sort: Desc)], map: "outbound_calls_tenant_clinic_started_idx")
+  @@index([tenant_id, started_at(sort: Desc)], map: "outbound_calls_tenant_started_at_idx")
+  @@index([tenant_id, to_number], map: "outbound_calls_to_number_idx")
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model outbound_invoices {
+  id              BigInt         @id @default(autoincrement())
+  tenant_id       String
+  invoice_id      String
+  billing_month   String         @db.Char(7)
+  status          String         @default("pending")
+  base_amount     Decimal        @default(0) @db.Decimal(12, 2)
+  overage_minutes Decimal        @default(0) @db.Decimal(12, 2)
+  overage_amount  Decimal        @default(0) @db.Decimal(12, 2)
+  total_amount    Decimal        @default(0) @db.Decimal(12, 2)
+  generated_at    DateTime       @default(now()) @db.Timestamptz(6)
+  due_at          DateTime?      @db.Timestamptz(6)
+  paid_at         DateTime?      @db.Timestamptz(6)
+  details         Json           @default("{}")
+  clinic_id       String
+  clinic_configs  clinic_configs @relation(fields: [tenant_id, clinic_id], references: [tenant_id, clinic_id], onDelete: Cascade, onUpdate: NoAction, map: "outbound_invoices_tenant_clinic_fk")
+  tenants         tenants        @relation(fields: [tenant_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@unique([tenant_id, clinic_id, billing_month], map: "outbound_invoices_tenant_clinic_month_uidx")
+  @@index([tenant_id, billing_month(sort: Desc)], map: "outbound_invoices_tenant_month_idx")
+}
+
+model payment_recovery_call_queue {
+  id                BigInt         @id @default(autoincrement())
+  tenant_id         String
+  clinic_id         String
+  queue_id          String
+  patient_key       String?
+  patient_name      String?
+  patient_phone     String?
+  invoice_ids       String?
+  invoice_numbers   String?
+  amount_due        Decimal        @default(0) @db.Decimal
+  due_date          DateTime?      @db.Date
+  days_overdue      Int            @default(0)
+  call_stage        String?
+  scheduled_for     DateTime?      @db.Timestamptz(6)
+  approval_status   String         @default("pending")
+  queue_status      String         @default("pending")
+  batch_id          String?
+  call_id           String?
+  call_outcome      String?
+  attempt_count     Int            @default(0)
+  last_error        String?
+  first_eligible_at DateTime?      @db.Timestamptz(6)
+  last_verified_at  DateTime?      @db.Timestamptz(6)
+  completed_at      DateTime?      @db.Timestamptz(6)
+  created_at        DateTime       @default(now()) @db.Timestamptz(6)
+  updated_at        DateTime       @default(now()) @db.Timestamptz(6)
+  clinic_configs    clinic_configs @relation(fields: [tenant_id, clinic_id], references: [tenant_id, clinic_id], onDelete: Cascade, onUpdate: NoAction, map: "payment_recovery_call_queue_tenant_clinic_fk")
+
+  @@unique([tenant_id, clinic_id, queue_id], map: "payment_recovery_queue_scope_uidx")
+}
+
+model payment_recovery_clinics {
+  clinic_id                   String
+  tenant_id                   String
+  clinic_name                 String
+  juvonno_domain              String?
+  branch_code                 String?
+  clinic_phone                String?
+  billing_from_email          String?
+  payment_portal_url          String?
+  enable_sms                  Boolean        @default(false)
+  enable_email                Boolean        @default(true)
+  timezone                    String         @default("America/Toronto")
+  juvonno_api_key             String?
+  enable_ai_calls             Boolean        @default(false)
+  retell_from_number          String?
+  retell_agent_id             String?
+  call_day_7_enabled          Boolean        @default(true)
+  call_day_14_enabled         Boolean        @default(true)
+  day_14_minimum_balance      Decimal        @default(0) @db.Decimal(12, 2)
+  manual_batch_approval       Boolean        @default(true)
+  manual_minutes_per_followup Decimal        @default(5) @db.Decimal(12, 2)
+  loaded_staff_hourly_cost    Decimal        @default(30) @db.Decimal(12, 2)
+  monthly_platform_cost       Decimal        @default(0) @db.Decimal(12, 2)
+  call_window_start           String         @default("10")
+  call_window_end             String         @default("18")
+  weekend_calls_enabled       Boolean        @default(false)
+  created_at                  DateTime       @default(now()) @db.Timestamptz(6)
+  updated_at                  DateTime       @default(now()) @db.Timestamptz(6)
+  id                          BigInt         @id @default(autoincrement())
+  clinic_configs              clinic_configs @relation(fields: [tenant_id, clinic_id], references: [tenant_id, clinic_id], onDelete: Cascade, onUpdate: NoAction, map: "payment_recovery_clinics_tenant_clinic_fk")
+  tenants                     tenants        @relation(fields: [tenant_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@unique([tenant_id, clinic_id], map: "payment_recovery_clinics_tenant_clinic_uidx")
+  @@unique([tenant_id, clinic_id])
+}
+
+model payment_recovery_communications {
+  id               BigInt         @id @default(autoincrement())
+  tenant_id        String
+  clinic_id        String
+  communication_id String
+  task_id          String?
+  queue_id         String?
+  invoice_id       String?
+  channel          String?
+  direction        String?
+  recipient        String?
+  message          String?
+  provider         String?
+  provider_id      String?
+  status           String?
+  outcome          String?
+  cost             Decimal?       @db.Decimal
+  timestamp        DateTime       @default(now()) @db.Timestamptz(6)
+  created_at       DateTime       @default(now()) @db.Timestamptz(6)
+  updated_at       DateTime       @default(now()) @db.Timestamptz(6)
+  clinic_configs   clinic_configs @relation(fields: [tenant_id, clinic_id], references: [tenant_id, clinic_id], onDelete: Cascade, onUpdate: NoAction, map: "payment_recovery_communications_tenant_clinic_fk")
+
+  @@unique([tenant_id, clinic_id, communication_id], map: "payment_recovery_communication_scope_uidx")
+}
+
+model payment_recovery_followup_tasks {
+  id             BigInt         @id @default(autoincrement())
+  tenant_id      String
+  clinic_id      String
+  task_id        String
+  invoice_id     String?
+  patient_phone  String?
+  patient_email  String?
+  reminder_type  String?
+  scheduled_time DateTime?      @db.Timestamptz(6)
+  status         String         @default("pending_manual")
+  attempt_count  Int            @default(0)
+  created_at     DateTime       @default(now()) @db.Timestamptz(6)
+  updated_at     DateTime       @default(now()) @db.Timestamptz(6)
+  clinic_configs clinic_configs @relation(fields: [tenant_id, clinic_id], references: [tenant_id, clinic_id], onDelete: Cascade, onUpdate: NoAction, map: "payment_recovery_followup_tasks_tenant_clinic_fk")
+
+  @@unique([tenant_id, clinic_id, task_id], map: "payment_recovery_task_scope_uidx")
+}
+
+model payment_recovery_invoices {
+  id                            BigInt         @id @default(autoincrement())
+  tenant_id                     String
+  clinic_id                     String
+  invoice_id                    String
+  invoice_number                String?
+  customer_id                   String?
+  patient_name                  String?
+  patient_phone                 String?
+  patient_email                 String?
+  original_amount               Decimal        @default(0) @db.Decimal
+  amount_due                    Decimal        @default(0) @db.Decimal
+  payer_type                    String         @default("patient")
+  status                        String         @default("unpaid")
+  due_date                      DateTime?      @db.Date
+  days_overdue                  Int            @default(0)
+  recovery_stage                String         @default("new")
+  manual_hold                   Boolean        @default(false)
+  opt_out                       Boolean        @default(false)
+  recovery_program_entry_amount Decimal        @default(0) @db.Decimal
+  paid_at                       DateTime?      @db.Timestamptz(6)
+  last_verified_at              DateTime?      @db.Timestamptz(6)
+  last_updated                  DateTime       @default(now()) @db.Timestamptz(6)
+  created_at                    DateTime       @default(now()) @db.Timestamptz(6)
+  updated_at                    DateTime       @default(now()) @db.Timestamptz(6)
+  clinic_configs                clinic_configs @relation(fields: [tenant_id, clinic_id], references: [tenant_id, clinic_id], onDelete: Cascade, onUpdate: NoAction, map: "payment_recovery_invoices_tenant_clinic_fk")
+
+  @@unique([tenant_id, clinic_id, invoice_id], map: "payment_recovery_invoice_scope_uidx")
+}
+
+model payment_recovery_metrics {
+  id                             BigInt         @id @default(autoincrement())
+  tenant_id                      String
+  clinic_id                      String
+  metric_date                    DateTime       @db.Date
+  total_outstanding              Decimal        @default(0) @db.Decimal
+  eligible_overdue               Decimal        @default(0) @db.Decimal
+  recovered_revenue              Decimal        @default(0) @db.Decimal
+  recovered_invoices             Int            @default(0)
+  automated_contacts             Int            @default(0)
+  calls_attempted                Int            @default(0)
+  calls_answered                 Int            @default(0)
+  staff_hours_saved              Decimal        @default(0) @db.Decimal
+  labour_savings                 Decimal        @default(0) @db.Decimal
+  automation_cost                Decimal        @default(0) @db.Decimal
+  estimated_incremental_recovery Decimal        @default(0) @db.Decimal
+  estimated_total_savings        Decimal        @default(0) @db.Decimal
+  roi_percent                    Decimal?       @db.Decimal
+  last_updated                   DateTime       @default(now()) @db.Timestamptz(6)
+  created_at                     DateTime       @default(now()) @db.Timestamptz(6)
+  updated_at                     DateTime       @default(now()) @db.Timestamptz(6)
+  clinic_configs                 clinic_configs @relation(fields: [tenant_id, clinic_id], references: [tenant_id, clinic_id], onDelete: Cascade, onUpdate: NoAction, map: "payment_recovery_metrics_tenant_clinic_fk")
+
+  @@unique([tenant_id, clinic_id, metric_date])
+}
+
+model requests {
+  id             String         @id @default(dbgenerated("(gen_random_uuid())::text"))
+  tenant_id      String
+  status         String         @default("New")
+  data           Json           @default("{}")
+  created_at     DateTime       @default(now()) @db.Timestamptz(6)
+  updated_at     DateTime       @default(now()) @db.Timestamptz(6)
+  clinic_id      String
+  clinic_configs clinic_configs @relation(fields: [tenant_id, clinic_id], references: [tenant_id, clinic_id], onDelete: Cascade, onUpdate: NoAction, map: "requests_tenant_clinic_fk")
+  tenants        tenants        @relation(fields: [tenant_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([tenant_id, status], map: "requests_tenant_status_idx")
+}
+
+model rivacare_internal_secrets {
+  key_name     String    @id
+  secret_value String
+  created_at   DateTime  @default(now()) @db.Timestamptz(6)
+  rotated_at   DateTime? @db.Timestamptz(6)
+}
+
+model settings {
+  id         String   @id @default(dbgenerated("(gen_random_uuid())::text"))
+  tenant_id  String
+  section    String
+  data       Json     @default("{}")
+  updated_at DateTime @default(now()) @db.Timestamptz(6)
+  tenants    tenants  @relation(fields: [tenant_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@unique([tenant_id, section])
+  @@index([tenant_id])
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model tenants {
+  id                       String                     @id
+  slug                     String                     @unique
+  name                     String
+  status                   String                     @default("onboarding")
+  timezone                 String                     @default("America/Toronto")
+  created_at               DateTime                   @default(now()) @db.Timestamptz(6)
+  updated_at               DateTime                   @default(now()) @db.Timestamptz(6)
+  billing_months           billing_months[]
+  calls                    calls[]
+  clinic_configs           clinic_configs[]
+  clinic_settings          clinic_settings[]
+  invoices                 invoices[]
+  outbound_billing_months  outbound_billing_months[]
+  outbound_calls           outbound_calls[]
+  outbound_invoices        outbound_invoices[]
+  payment_recovery_clinics payment_recovery_clinics[]
+  requests                 requests[]
+  settings                 settings[]
+  user_clinic_access       user_clinic_access[]
+  users                    users?
+  webhook_events           webhook_events[]
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model user_clinic_access {
+  user_id        String
+  tenant_id      String
+  clinic_id      String
+  role           String         @default("viewer")
+  created_at     DateTime       @default(now()) @db.Timestamptz(6)
+  clinic_configs clinic_configs @relation(fields: [tenant_id, clinic_id], references: [tenant_id, clinic_id], onDelete: Cascade, onUpdate: NoAction)
+  tenants        tenants        @relation(fields: [tenant_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  users          users          @relation(fields: [user_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@id([user_id, tenant_id, clinic_id])
+}
+
+model users {
+  id                 String               @id @default(dbgenerated("(gen_random_uuid())::text"))
+  tenant_id          String               @unique
+  username           String               @unique
+  password_hash      String
+  created_at         DateTime             @default(now()) @db.Timestamptz(6)
+  user_clinic_access user_clinic_access[]
+  tenants            tenants              @relation(fields: [tenant_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model webhook_events {
+  id                BigInt          @id @default(autoincrement())
+  tenant_id         String?
+  provider          String
+  event_type        String
+  external_event_id String
+  received_at       DateTime        @default(now()) @db.Timestamptz(6)
+  processed_at      DateTime?       @db.Timestamptz(6)
+  processing_status String          @default("received")
+  error_message     String?
+  payload           Json            @default("{}")
+  clinic_id         String
+  clinic_configs    clinic_configs? @relation(fields: [tenant_id, clinic_id], references: [tenant_id, clinic_id], onDelete: Cascade, onUpdate: NoAction, map: "webhook_events_tenant_clinic_fk")
+  tenants           tenants?        @relation(fields: [tenant_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@unique([provider, external_event_id])
+  @@index([processing_status, received_at], map: "webhook_events_status_idx")
+}
