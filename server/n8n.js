@@ -6,6 +6,14 @@
 const N8N_BASE_URL = (process.env.N8N_BASE_URL ?? '').replace(/\/+$/, '');
 const N8N_DASHBOARD_AUTH_HEADER = process.env.N8N_DASHBOARD_AUTH_HEADER ?? 'Authorization';
 const N8N_DASHBOARD_AUTH_VALUE = process.env.N8N_DASHBOARD_AUTH_VALUE ?? '';
+// Dedicated webhook (FRONTEND-BFF-HANDOFF.md) - separate from N8N_BASE_URL
+// because it's the ONLY thing allowed to touch the `requests` /
+// `appointment_events` tables for staff-queue actions. It joins against
+// user_clinic_access itself and does the Juvonno cancellation call with
+// row-level locking, so this server proxies to it rather than querying
+// Postgres directly for this domain (same "browser never talks to n8n or
+// Postgres directly" boundary, one hop further in).
+const N8N_APPOINTMENT_REQUESTS_URL = process.env.N8N_APPOINTMENT_REQUESTS_URL ?? '';
 
 function authHeaders() {
   const headers = { 'Content-Type': 'application/json' };
@@ -106,4 +114,38 @@ export const outbound = {
   calls: (t, c) => n8nGet('juvonno-outbound/calls', t, c),
   transcripts: (t, c) => n8nGet('juvonno-outbound/transcripts', t, c),
   invoices: (t, c) => n8nGet('juvonno-outbound/invoices', t, c),
+};
+
+// ── Appointment Requests / Staff Action Queue (FRONTEND-BFF-HANDOFF.md) ─────
+// user_id/tenant_id/clinic_id must always be the verified session values
+// (never anything from the request body) - callers pass them explicitly so
+// that's visible at every call site instead of buried in here.
+async function appointmentRequestsAction(action, userId, tenantId, clinicId, extra = {}) {
+  if (!N8N_APPOINTMENT_REQUESTS_URL) {
+    const err = new Error('N8N_APPOINTMENT_REQUESTS_URL is not configured');
+    err.status = 503;
+    throw err;
+  }
+  const res = await withTimeoutFetch(N8N_APPOINTMENT_REQUESTS_URL, {
+    method: 'POST',
+    headers: authHeaders(),
+    body: JSON.stringify({ action, user_id: userId, tenant_id: tenantId, clinic_id: clinicId, ...extra }),
+  });
+  const json = await parseJsonSafe(res);
+  if (!res.ok) throw n8nError(json, res.status);
+  return json;
+}
+
+export const appointmentRequests = {
+  list: (u, t, c, status) => appointmentRequestsAction('appointment_request.list', u, t, c, { status }),
+  get: (u, t, c, requestId) => appointmentRequestsAction('appointment_request.get', u, t, c, { request_id: requestId }),
+  approve: (u, t, c, requestId) => appointmentRequestsAction('appointment_request.approve', u, t, c, { request_id: requestId }),
+  reject: (u, t, c, requestId, resolutionCode, resolutionNote) =>
+    appointmentRequestsAction('appointment_request.reject', u, t, c, { request_id: requestId, resolution_code: resolutionCode, resolution_note: resolutionNote }),
+  assign: (u, t, c, requestId, assignedUserId) =>
+    appointmentRequestsAction('appointment_request.assign', u, t, c, { request_id: requestId, assigned_user_id: assignedUserId }),
+  archive: (u, t, c, requestId, resolutionNote) =>
+    appointmentRequestsAction('appointment_request.archive', u, t, c, { request_id: requestId, resolution_note: resolutionNote }),
+  eventsList: (u, t, c, params = {}) => appointmentRequestsAction('appointment_event.list', u, t, c, params),
+  eventGet: (u, t, c, eventId) => appointmentRequestsAction('appointment_event.get', u, t, c, { event_id: eventId }),
 };

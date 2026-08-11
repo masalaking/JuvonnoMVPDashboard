@@ -161,6 +161,23 @@ interface TenantInfo {
   link_label: string;
 }
 
+// Connection status fields live at the TOP LEVEL of the production public
+// settings response (clinic_configs columns), separate from the nested
+// `settings` JSONB sections (clinic_profile/clinic_hours/etc.) - captured
+// here specifically for the Production Readiness checklist (§12), since
+// nothing else in the app reads Juvonno/Retell connection state today.
+interface ConnectionStatus {
+  hasJuvonnoApiKey: boolean;
+  juvonnoBaseUrl: string;
+  defaultBranchCode: string;
+  retellReceptionistAgentId: string;
+  retellReceptionistPhoneNumber: string;
+  retellOutboundAgentId: string;
+  retellOutboundPhoneNumber: string;
+  retellRecoveryAgentId: string;
+  retellRecoveryPhoneNumber: string;
+}
+
 interface DashboardCtx {
   accessToken: string | null;
   tenantInfo: TenantInfo | null;
@@ -175,8 +192,11 @@ interface DashboardCtx {
   invoices: UsageInvoice[];
   loading: boolean;
   settings: Record<string, unknown>;
-  updateTaskStatus: (id: string, status: string) => Promise<void>;
-  deleteTask: (id: string) => Promise<void>;
+  connectionStatus: ConnectionStatus | null;
+  approveTask: (id: string) => Promise<{ success: boolean; response?: string; errorCode?: string }>;
+  rejectTask: (id: string, resolutionCode?: string, resolutionNote?: string) => Promise<boolean>;
+  assignTask: (id: string, assignedUserId: string) => Promise<boolean>;
+  archiveTask: (id: string, resolutionNote?: string) => Promise<void>;
   saveSection: (section: string, data: Record<string, unknown>) => Promise<boolean>;
   saveBulk: (sections: Record<string, unknown>) => Promise<void>;
   syncRetell: () => Promise<{ ok: boolean; error?: string }>;
@@ -196,8 +216,11 @@ const DashboardContext = createContext<DashboardCtx>({
   invoices: [],
   loading: false,
   settings: {},
-  updateTaskStatus: async () => {},
-  deleteTask: async () => {},
+  connectionStatus: null,
+  approveTask: async () => ({ success: false }),
+  rejectTask: async () => false,
+  assignTask: async () => false,
+  archiveTask: async () => {},
   saveSection: async () => false,
   saveBulk: async () => {},
   syncRetell: async () => ({ ok: false }),
@@ -492,6 +515,35 @@ function Card({ children, className = "" }: { children: React.ReactNode; classNa
   return <div className={`bg-card border border-border rounded-lg shadow-sm ${className}`}>{children}</div>;
 }
 
+// Reusable confirmation dialog for any destructive/state-changing action
+// (Approve/Reject/Archive in Staff Queue, Approve/Reject in Payment
+// Recovery's queue). `children` lets a caller embed extra inline inputs
+// (e.g. a rejection-reason field) between the body text and the buttons.
+function ConfirmModal({ title, body, confirmLabel = "Confirm", danger, busy, onConfirm, onCancel, children }: {
+  title: string; body: string; confirmLabel?: string; danger?: boolean; busy?: boolean;
+  onConfirm: () => void; onCancel: () => void; children?: React.ReactNode;
+}) {
+  return (
+    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
+      <Card className="p-6 max-w-sm w-full mx-4 space-y-4">
+        <h3 className="text-sm font-semibold text-foreground">{title}</h3>
+        <p className="text-xs text-muted-foreground">{body}</p>
+        {children}
+        <div className="flex gap-2 justify-end">
+          <button onClick={onCancel} disabled={busy} className="text-xs border border-border px-3 py-1.5 rounded-md hover:bg-muted transition-colors disabled:opacity-50">Cancel</button>
+          <button
+            onClick={onConfirm}
+            disabled={busy}
+            className={`text-xs px-3 py-1.5 rounded-md hover:opacity-90 disabled:opacity-50 ${danger ? "bg-destructive text-destructive-foreground" : "bg-primary text-primary-foreground"}`}
+          >
+            {busy ? "Working…" : confirmLabel}
+          </button>
+        </div>
+      </Card>
+    </div>
+  );
+}
+
 // ── Sidebar ───────────────────────────────────────────────────────────────────
 // `group` clusters related nav items under a shared header in the sidebar. Items
 // with no group render as a plain top-level link.
@@ -503,6 +555,7 @@ const navItems = [
   { id: "recordings", label: "Recordings", icon: Mic, group: "Inbound" },
   { id: "analytics", label: "Analytics", icon: BarChart2, group: "Inbound" },
   { id: "staff-queue", label: "Staff Action Queue", icon: ClipboardList, group: "Inbound" },
+  { id: "activity", label: "Activity", icon: Bell, group: "Inbound" },
   { id: "settings", label: "Settings", icon: Settings, group: "Inbound" },
 
   { id: "outbound-make-call", label: "Make a Call", icon: PhoneOutgoing, group: "Outbound" },
@@ -1706,7 +1759,43 @@ function Moon({ size = 24, ...props }: any) {
 }
 
 // ── Screen: Staff Queue ───────────────────────────────────────────────────────
-const STAFF_TASK_STATUSES = ["New", "In Progress", "Completed"] as const;
+// The AI Receptionist's "APPOINTMENT REQUESTS AUDIT READY" workflow only
+// ever inserts cancellation requests into `requests` now (bookings/lookups/
+// reschedules go to the separate appointment_events audit stream instead,
+// per FRONTEND-BFF-HANDOFF.md - they don't need staff action, so they don't
+// land here). Rows come back from GET /api/dashboard/queue/requests shaped
+// like the Postgres row (id/status/priority/data JSONB), not the old flat
+// dashboard_payload shape - this flattens it into the existing StaffTask
+// fields so the rest of this screen's rendering code didn't need a rewrite.
+const REQUEST_STATUS_LABEL: Record<string, string> = {
+  pending: "Pending", in_progress: "In Progress", completed: "Completed",
+  failed: "Failed", rejected: "Rejected", archived: "Archived",
+};
+
+function mapAppointmentRequest(row: Record<string, unknown>): StaffTask {
+  const data = row.data && typeof row.data === "object" ? row.data as Record<string, unknown> : {};
+  const patient = data.patient && typeof data.patient === "object" ? data.patient as Record<string, unknown> : {};
+  const appointment = data.appointment && typeof data.appointment === "object" ? data.appointment as Record<string, unknown> : {};
+  const rawStatus = String(row.status ?? "pending");
+  return {
+    id: String(row.id),
+    status: REQUEST_STATUS_LABEL[rawStatus] ?? rawStatus,
+    raw_status: rawStatus,
+    type: "Cancellation Request",
+    patient: safeText(patient.display_name) || [safeText(patient.first_name), safeText(patient.last_name)].filter(Boolean).join(" ") || "Unknown",
+    patient_phone: safeText(patient.phone),
+    phone: safeText(patient.phone),
+    summary: safeText(data.reason),
+    due: safeText(appointment.starts_at),
+    created_at: safeText(row.created_at),
+    priority: safeText(row.priority),
+    assignee: safeText(row.assigned_user_id),
+    appointment_id: safeText(appointment.id) || safeText(row.juvonno_appointment_id),
+    practitioner_name: safeText(appointment.practitioner_name),
+    duration_minutes: appointment.duration_minutes,
+    requires_staff_action: row.requires_staff_action,
+  };
+}
 
 // Some staff-queue entries were saved by n8n workflows with fields as nested
 // objects instead of plain strings (e.g. patient: {full_name: "..."}).
@@ -1767,9 +1856,12 @@ function getPatientFlags(task: StaffTask) {
 }
 
 const STATUS_ACCENT: Record<string, string> = {
-  New: "bg-blue-50 border-blue-100",
+  Pending: "bg-blue-50 border-blue-100",
   "In Progress": "bg-teal-50 border-teal-100",
   Completed: "bg-emerald-50 border-emerald-100",
+  Rejected: "bg-slate-50 border-slate-200",
+  Failed: "bg-red-50 border-red-100",
+  Archived: "bg-slate-50 border-slate-200",
 };
 
 // n8n sends a lot of overlapping field names for the same concept (e.g.
@@ -1821,50 +1913,82 @@ function formatRelativeTime(value: unknown): string {
   return `${diffDay}d ago`;
 }
 
+// Pending/In Progress/Failed are exact statuses; History groups every
+// resolved terminal state (Completed + Rejected) into one tab - archived
+// rows never appear here at all once archived (the n8n list query excludes
+// archived_at IS NOT NULL unconditionally), so History isn't "everything",
+// it's "resolved but not yet archived".
+const STAFF_QUEUE_TABS: { id: string; label: string; match: (t: StaffTask) => boolean }[] = [
+  { id: "pending", label: "Pending", match: (t) => t.status === "Pending" },
+  { id: "in_progress", label: "In Progress", match: (t) => t.status === "In Progress" },
+  { id: "failed", label: "Failed", match: (t) => t.status === "Failed" },
+  { id: "history", label: "History", match: (t) => t.status === "Completed" || t.status === "Rejected" },
+];
+
 function StaffQueueScreen() {
-  const { staffTasks, updateTaskStatus, deleteTask } = useDashboard();
-  const [filter, setFilter] = useState("All");
+  const { staffTasks, approveTask, rejectTask, assignTask, archiveTask } = useDashboard();
+  const { session } = useAuth();
+  const [tab, setTab] = useState("pending");
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [confirmingId, setConfirmingId] = useState<string | null>(null);
+  const [pendingModal, setPendingModal] = useState<{ type: "approve" | "reject" | "archive"; id: string } | null>(null);
+  const [rejectNote, setRejectNote] = useState("");
+  const [actionBusy, setActionBusy] = useState(false);
+  const [actionMessage, setActionMessage] = useState<{ text: string; error?: boolean } | null>(null);
   // DOB/gender are sensitive - require an explicit click to reveal them each
   // time a different request is opened, rather than showing them by default.
   const [revealSensitiveId, setRevealSensitiveId] = useState<string | null>(null);
 
-  function handleDelete(id: string) {
-    if (confirmingId === id) {
-      deleteTask(id);
-      setConfirmingId(null);
-      if (selectedId === id) setSelectedId(null);
+  async function confirmPendingAction() {
+    if (!pendingModal) return;
+    const { type, id } = pendingModal;
+    setActionBusy(true);
+    if (type === "approve") {
+      const result = await approveTask(id);
+      setActionMessage({ text: result.response || (result.success ? "Cancellation confirmed in Juvonno." : "Could not confirm the cancellation."), error: !result.success });
+    } else if (type === "reject") {
+      const ok = await rejectTask(id, "staff_rejected", rejectNote || undefined);
+      setActionMessage({ text: ok ? "Request rejected." : "Could not reject the request.", error: !ok });
     } else {
-      setConfirmingId(id);
+      await archiveTask(id);
+      if (selectedId === id) setSelectedId(null);
     }
+    setActionBusy(false);
+    setPendingModal(null);
+    setRejectNote("");
   }
 
-  const filters = ["All", "New", "In Progress", "Completed"];
-  const visibleTasks = filter === "All" ? staffTasks : staffTasks.filter(t => t.status === filter);
-  const sortedTasks = [...visibleTasks].sort((a, b) => {
-    const completedDiff = (a.status === "Completed" ? 1 : 0) - (b.status === "Completed" ? 1 : 0);
-    if (completedDiff !== 0) return completedDiff;
-    return new Date(safeText(b.created_at)).getTime() - new Date(safeText(a.created_at)).getTime();
-  });
+  async function handleAssignToMe(id: string) {
+    if (!session?.userId) return;
+    setActionBusy(true);
+    const ok = await assignTask(id, session.userId);
+    setActionBusy(false);
+    setActionMessage({ text: ok ? "Assigned to you." : "Could not assign the request.", error: !ok });
+  }
+
+  const visibleTasks = staffTasks.filter(STAFF_QUEUE_TABS.find(t => t.id === tab)?.match ?? (() => true));
+  const sortedTasks = [...visibleTasks].sort((a, b) => new Date(safeText(b.created_at)).getTime() - new Date(safeText(a.created_at)).getTime());
   const selectedTask = staffTasks.find(t => t.id === selectedId) ?? null;
+
+  useEffect(() => {
+    setActionMessage(null);
+  }, [selectedId]);
 
   return (
     <div className="p-6 space-y-4">
       <div>
         <h1 className="text-lg font-semibold text-foreground">Staff Action Queue</h1>
-        <p className="text-xs text-muted-foreground">{staffTasks.filter(t => t.status !== "Completed").length} open tasks</p>
+        <p className="text-xs text-muted-foreground">{staffTasks.filter(t => t.status === "Pending").length} pending cancellation requests</p>
       </div>
 
-      {/* Filters */}
+      {/* Tabs */}
       <div className="flex items-center gap-2">
-        {filters.map((f) => (
+        {STAFF_QUEUE_TABS.map((t) => (
           <button
-            key={f}
-            onClick={() => setFilter(f)}
-            className={`text-xs px-2.5 py-1.5 rounded-md border transition-colors font-medium ${filter === f ? "bg-primary text-white border-primary" : "border-border hover:bg-muted"}`}
+            key={t.id}
+            onClick={() => setTab(t.id)}
+            className={`text-xs px-2.5 py-1.5 rounded-md border transition-colors font-medium ${tab === t.id ? "bg-primary text-white border-primary" : "border-border hover:bg-muted"}`}
           >
-            {f}
+            {t.label} <span className="opacity-70">({staffTasks.filter(t.match).length})</span>
           </button>
         ))}
       </div>
@@ -2039,21 +2163,44 @@ function StaffQueueScreen() {
               )}
             </div>
 
-            <div className="border-t border-border px-5 py-4 space-y-2">
-              <div className="flex items-center gap-2">
-                <select
-                  value={selectedTask.status}
-                  onChange={(e) => updateTaskStatus(selectedTask.id, e.target.value)}
-                  className="flex-1 text-xs font-medium border border-border rounded-md px-2.5 py-2 bg-card hover:bg-muted focus:outline-none focus:ring-1 focus:ring-ring cursor-pointer"
-                >
-                  {STAFF_TASK_STATUSES.map(s => <option key={s} value={s}>{s}</option>)}
-                </select>
+            <div className="border-t border-border px-5 py-4 space-y-3">
+              {actionMessage && (
+                <p className={`text-xs rounded-md px-3 py-2 ${actionMessage.error ? "bg-destructive/10 text-destructive" : "bg-emerald-50 text-emerald-700"}`}>
+                  {actionMessage.text}
+                </p>
+              )}
+
+              <div className="flex items-center gap-2 flex-wrap">
+                {selectedTask.status === "Pending" && (
+                  <>
+                    <button
+                      disabled={actionBusy}
+                      onClick={() => setPendingModal({ type: "approve", id: selectedTask.id })}
+                      className="flex items-center gap-1.5 text-xs font-medium px-3 py-2 rounded-md bg-emerald-600 text-white hover:opacity-90 transition-opacity disabled:opacity-50"
+                    >
+                      <Check size={12} /> Approve Cancellation
+                    </button>
+                    <button
+                      disabled={actionBusy}
+                      onClick={() => setPendingModal({ type: "reject", id: selectedTask.id })}
+                      className="flex items-center gap-1.5 text-xs font-medium px-3 py-2 rounded-md border border-border text-muted-foreground hover:bg-muted transition-colors disabled:opacity-50"
+                    >
+                      <X size={12} /> Reject
+                    </button>
+                    <button
+                      disabled={actionBusy}
+                      onClick={() => handleAssignToMe(selectedTask.id)}
+                      className="flex items-center gap-1.5 text-xs font-medium px-3 py-2 rounded-md border border-border text-muted-foreground hover:bg-muted transition-colors disabled:opacity-50"
+                    >
+                      <User size={12} /> Assign to Me
+                    </button>
+                  </>
+                )}
                 <button
-                  onClick={() => handleDelete(selectedTask.id)}
-                  onBlur={() => setConfirmingId(null)}
-                  className={`flex items-center gap-1.5 text-xs font-medium px-3 py-2 rounded-md border transition-colors ${confirmingId === selectedTask.id ? "bg-destructive/10 text-destructive border-destructive/30" : "border-border text-muted-foreground hover:text-destructive hover:bg-muted"}`}
+                  onClick={() => setPendingModal({ type: "archive", id: selectedTask.id })}
+                  className="flex items-center gap-1.5 text-xs font-medium px-3 py-2 rounded-md border border-border text-muted-foreground hover:text-destructive hover:bg-muted transition-colors ml-auto"
                 >
-                  <Trash2 size={12} /> {confirmingId === selectedTask.id ? "Confirm Delete" : "Delete"}
+                  <Trash2 size={12} /> Archive
                 </button>
               </div>
             </div>
@@ -2061,6 +2208,287 @@ function StaffQueueScreen() {
         </>
         );
       })()}
+
+      {pendingModal && pendingModal.type === "approve" && (
+        <ConfirmModal
+          title="Approve this cancellation?"
+          body="This will cancel the appointment in Juvonno. The patient will not be notified automatically by this action."
+          confirmLabel="Approve"
+          busy={actionBusy}
+          onConfirm={confirmPendingAction}
+          onCancel={() => setPendingModal(null)}
+        />
+      )}
+      {pendingModal && pendingModal.type === "reject" && (
+        <ConfirmModal
+          title="Reject this cancellation request?"
+          body="The appointment stays active. This just clears the request from the staff queue."
+          confirmLabel="Reject"
+          danger
+          busy={actionBusy}
+          onConfirm={confirmPendingAction}
+          onCancel={() => setPendingModal(null)}
+        >
+          <input
+            autoFocus
+            value={rejectNote}
+            onChange={(e) => setRejectNote(e.target.value)}
+            placeholder="Reason for rejecting (optional)"
+            className="w-full text-xs border border-border rounded-md px-2.5 py-2 bg-card focus:outline-none focus:ring-1 focus:ring-ring"
+          />
+        </ConfirmModal>
+      )}
+      {pendingModal && pendingModal.type === "archive" && (
+        <ConfirmModal
+          title="Archive this request?"
+          body="This removes it from the active queue. It stays available for audit history but won't show up here again."
+          confirmLabel="Archive"
+          danger
+          busy={actionBusy}
+          onConfirm={confirmPendingAction}
+          onCancel={() => setPendingModal(null)}
+        />
+      )}
+
+    </div>
+  );
+}
+
+// ── Screen: Activity ─────────────────────────────────────────────────────────
+// Append-only notification/audit stream (appointment_events) - a separate
+// source from the Staff Action Queue above. Only cancellation_requested and
+// change_failed events have any staff-actionable follow-up; everything else
+// is informational (FRONTEND-BFF-HANDOFF.md).
+interface ActivityEvent {
+  id: string;
+  event_type: string;
+  status: string;
+  request_id?: string | null;
+  juvonno_appointment_id?: string | null;
+  patient_external_id?: string | null;
+  retell_call_id?: string | null;
+  previous_start_at?: string | null;
+  new_start_at?: string | null;
+  duration_minutes?: number | null;
+  actor_type?: string | null;
+  provider?: string | null;
+  error_code?: string | null;
+  data?: Record<string, unknown> | null;
+  created_at: string;
+  completed_at?: string | null;
+}
+
+const ACTIVITY_EVENT_LABEL: Record<string, string> = {
+  booking_created: "Appointment Booked",
+  appointment_lookup: "Appointment Looked Up",
+  cancellation_requested: "Cancellation Requested",
+  cancellation_rejected: "Cancellation Rejected",
+  reschedule_attempted: "Reschedule Started",
+  rescheduled: "Appointment Rescheduled",
+  cancellation_completed: "Appointment Cancelled",
+  change_failed: "Appointment Action Failed",
+};
+const ACTIVITY_EVENT_TYPES = Object.keys(ACTIVITY_EVENT_LABEL);
+const ACTIVITY_NEEDS_ACTION = new Set(["cancellation_requested", "change_failed"]);
+const ACTIVITY_BADGE_VARIANT: Record<string, string> = {
+  booking_created: "Completed",
+  appointment_lookup: "Neutral",
+  cancellation_requested: "Staff Action",
+  cancellation_rejected: "Neutral",
+  reschedule_attempted: "In Progress",
+  rescheduled: "Completed",
+  cancellation_completed: "Completed",
+  change_failed: "Failed",
+};
+
+function DetailRow({ label, value }: { label: string; value: React.ReactNode }) {
+  return (
+    <div className="flex items-center justify-between px-3 py-2">
+      <span className="text-muted-foreground">{label}</span>
+      <span className="font-medium text-foreground">{value}</span>
+    </div>
+  );
+}
+
+function ActivityScreen() {
+  const { accessToken } = useDashboard();
+  const { session } = useAuth();
+  const identityReady = Boolean(accessToken) || Boolean(session);
+  const [events, setEvents] = useState<ActivityEvent[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(false);
+  const [eventTypeFilter, setEventTypeFilter] = useState("");
+  const [statusFilter, setStatusFilter] = useState("");
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [selectedEvent, setSelectedEvent] = useState<ActivityEvent | null>(null);
+  const [detailLoading, setDetailLoading] = useState(false);
+  const hasLoadedOnce = useRef(false);
+
+  async function loadEvents(isBackground: boolean, signal?: AbortSignal) {
+    if (!identityReady) return;
+    if (!isBackground) { setLoading(!hasLoadedOnce.current); setError(false); }
+    const params = new URLSearchParams();
+    if (eventTypeFilter) params.set("eventType", eventTypeFilter);
+    if (statusFilter) params.set("status", statusFilter);
+    params.set("limit", "50");
+    try {
+      const res = await apiFetch(accessToken, session?.csrfToken, `/activity?${params.toString()}`, { signal });
+      if (!res.ok) throw new Error("failed");
+      const json = await res.json().catch(() => []);
+      setEvents(Array.isArray(json) ? json : []);
+      hasLoadedOnce.current = true;
+    } catch (err) {
+      if ((err as any)?.name === "AbortError") return;
+      if (!hasLoadedOnce.current) setError(true);
+    } finally {
+      if (!isBackground) setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    if (!identityReady) return;
+    const controller = new AbortController();
+    loadEvents(false, controller.signal);
+    return () => controller.abort();
+  }, [identityReady, accessToken, eventTypeFilter, statusFilter]);
+
+  // First page only, every 25s while visible - never load full history on a
+  // poll tick (FRONTEND-BFF-HANDOFF.md).
+  useEffect(() => {
+    if (!identityReady) return;
+    const interval = setInterval(() => {
+      if (document.visibilityState === "hidden") return;
+      loadEvents(true);
+    }, 25000);
+    return () => clearInterval(interval);
+  }, [identityReady, accessToken, eventTypeFilter, statusFilter]);
+
+  useEffect(() => {
+    if (!selectedId) { setSelectedEvent(null); return; }
+    let cancelled = false;
+    setDetailLoading(true);
+    apiFetch(accessToken, session?.csrfToken, `/activity/${selectedId}`)
+      .then(r => r.ok ? r.json() : null)
+      .then(json => { if (!cancelled) setSelectedEvent(json?.event ?? null); })
+      .catch(() => { if (!cancelled) setSelectedEvent(null); })
+      .finally(() => { if (!cancelled) setDetailLoading(false); });
+    return () => { cancelled = true; };
+  }, [selectedId]);
+
+  return (
+    <div className="p-6 space-y-4">
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-lg font-semibold text-foreground">Activity</h1>
+          <p className="text-xs text-muted-foreground">Bookings, lookups, reschedules, and cancellations across the AI receptionist.</p>
+        </div>
+        <button onClick={() => loadEvents(false)} className="flex items-center gap-2 text-xs font-medium border border-border px-3 py-1.5 rounded-md hover:bg-muted transition-colors">
+          <RefreshCw size={12} /> Refresh
+        </button>
+      </div>
+
+      <div className="flex items-center gap-2">
+        <select value={eventTypeFilter} onChange={(e) => setEventTypeFilter(e.target.value)} className="text-xs border border-border rounded-md px-2.5 py-1.5 bg-card">
+          <option value="">All event types</option>
+          {ACTIVITY_EVENT_TYPES.map(t => <option key={t} value={t}>{ACTIVITY_EVENT_LABEL[t]}</option>)}
+        </select>
+        <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} className="text-xs border border-border rounded-md px-2.5 py-1.5 bg-card">
+          <option value="">All statuses</option>
+          <option value="pending">Pending</option>
+          <option value="completed">Completed</option>
+          <option value="failed">Failed</option>
+        </select>
+      </div>
+
+      {loading ? (
+        <div className="p-10 text-center text-xs text-muted-foreground">Loading…</div>
+      ) : error ? (
+        <div className="p-10 text-center text-xs text-muted-foreground">
+          Could not load activity. <button onClick={() => loadEvents(false)} className="text-primary hover:underline">Try again</button>
+        </div>
+      ) : (
+        <Card className="overflow-hidden">
+          {events.length === 0 ? (
+            <p className="text-xs text-muted-foreground py-10 text-center">No activity yet.</p>
+          ) : (
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="border-b border-border bg-muted/40">
+                  {["Event", "Status", "Patient / Appointment", "When", ""].map(h => (
+                    <th key={h} className="text-left px-4 py-2.5 text-muted-foreground font-medium">{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {events.map((event) => (
+                  <tr
+                    key={event.id}
+                    onClick={() => setSelectedId(event.id)}
+                    className="border-b border-border last:border-0 hover:bg-muted/30 transition-colors cursor-pointer"
+                  >
+                    <td className="px-4 py-3 text-foreground">
+                      <div className="flex items-center gap-2">
+                        {ACTIVITY_EVENT_LABEL[event.event_type] ?? event.event_type}
+                        {ACTIVITY_NEEDS_ACTION.has(event.event_type) && <Badge label="Needs Action" variant="Staff Action" />}
+                      </div>
+                    </td>
+                    <td className="px-4 py-3"><Badge label={event.status} variant={ACTIVITY_BADGE_VARIANT[event.event_type] ?? "Neutral"} /></td>
+                    <td className="px-4 py-3 font-mono text-muted-foreground">{event.patient_external_id || event.juvonno_appointment_id || "—"}</td>
+                    <td className="px-4 py-3 text-muted-foreground">{formatRelativeTime(event.created_at)}</td>
+                    <td className="px-4 py-3 text-muted-foreground"><ChevronRight size={14} /></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </Card>
+      )}
+
+      {selectedId && (
+        <>
+          <div className="fixed inset-0 bg-black/30 z-40" onClick={() => setSelectedId(null)} />
+          <div className="fixed inset-y-0 right-0 w-full max-w-md bg-card border-l border-border shadow-xl z-50 flex flex-col">
+            <div className="flex items-center justify-between px-5 py-4 border-b border-border">
+              <span className="text-sm font-semibold text-foreground">
+                {selectedEvent ? (ACTIVITY_EVENT_LABEL[selectedEvent.event_type] ?? selectedEvent.event_type) : "Event"}
+              </span>
+              <button onClick={() => setSelectedId(null)} className="p-1 text-muted-foreground hover:text-foreground transition-colors">
+                <X size={16} />
+              </button>
+            </div>
+            <div className="flex-1 overflow-y-auto px-5 py-4 space-y-3 text-xs">
+              {detailLoading ? (
+                <p className="text-muted-foreground">Loading…</p>
+              ) : !selectedEvent ? (
+                <p className="text-muted-foreground">Could not load this event.</p>
+              ) : (
+                <>
+                  <div className="rounded-md border border-border divide-y divide-border">
+                    <DetailRow label="Status" value={<Badge label={selectedEvent.status} variant={ACTIVITY_BADGE_VARIANT[selectedEvent.event_type] ?? "Neutral"} />} />
+                    {selectedEvent.request_id && <DetailRow label="Linked Request" value={selectedEvent.request_id} />}
+                    {selectedEvent.juvonno_appointment_id && <DetailRow label="Appointment ID" value={selectedEvent.juvonno_appointment_id} />}
+                    {selectedEvent.patient_external_id && <DetailRow label="Patient ID" value={selectedEvent.patient_external_id} />}
+                    {selectedEvent.duration_minutes != null && <DetailRow label="Duration" value={`${selectedEvent.duration_minutes} min`} />}
+                    {selectedEvent.previous_start_at && <DetailRow label="Previous Time" value={formatDateTime(selectedEvent.previous_start_at)} />}
+                    {selectedEvent.new_start_at && <DetailRow label="New Time" value={formatDateTime(selectedEvent.new_start_at)} />}
+                    {selectedEvent.provider && <DetailRow label="Provider" value={selectedEvent.provider} />}
+                    {selectedEvent.error_code && <DetailRow label="Error" value={selectedEvent.error_code} />}
+                    <DetailRow label="Created" value={formatDateTime(selectedEvent.created_at)} />
+                    {selectedEvent.completed_at && <DetailRow label="Completed" value={formatDateTime(selectedEvent.completed_at)} />}
+                  </div>
+                  {ACTIVITY_NEEDS_ACTION.has(selectedEvent.event_type) && (
+                    <p className="text-amber-700 bg-amber-50 border border-amber-100 rounded-md px-3 py-2">
+                      {selectedEvent.event_type === "cancellation_requested"
+                        ? "This has a linked request in the Staff Action Queue."
+                        : "This action failed and needs manual reconciliation."}
+                    </p>
+                  )}
+                </>
+              )}
+            </div>
+          </div>
+        </>
+      )}
     </div>
   );
 }
@@ -2235,7 +2663,7 @@ const SETTINGS_SECTION_META: Record<string, { icon: any; subtitle: string; optio
 };
 
 function SettingsScreen() {
-  const { tenantInfo, settings, saveSection } = useDashboard();
+  const { tenantInfo, settings, connectionStatus, saveSection } = useDashboard();
   const [activeSection, setActiveSection] = useState("Overview");
   const [saving, setSaving] = useState(false);
   const [saveResult, setSaveResult] = useState<{ section: string; ok: boolean } | null>(null);
@@ -2381,6 +2809,26 @@ function SettingsScreen() {
   const completedCount = requiredSections.filter(s => sectionComplete[s]).length;
   const setupComplete = completedCount === requiredSections.length;
   const firstIncompleteSection = requiredSections.find(s => !sectionComplete[s]) ?? null;
+
+  // Production Readiness (handoff doc §12) - a stricter, deploy-gating
+  // checklist beyond the setup sections above. `ok: null` means this
+  // dashboard genuinely has no way to check the item (either the data isn't
+  // exposed by any BFF route yet, or it's deliberately admin-only) - those
+  // render as "Confirm manually" rather than a fabricated pass/fail, and
+  // block the overall Ready state same as a real failure would.
+  type ReadinessItem = { label: string; ok: boolean | null; note?: string };
+  const productionReadiness: ReadinessItem[] = [
+    { label: "Clinic hours configured", ok: sectionComplete["Clinic Hours"] },
+    { label: "Transfer number is valid E.164", ok: /^\+[1-9]\d{6,14}$/.test(draft.transfer_escalation.transfer_number ?? "") },
+    { label: "Minimum booking notice configured", ok: null, note: "Not yet exposed in Settings UI - confirm in clinic_configs" },
+    { label: "Maximum booking window configured", ok: null, note: "Not yet exposed in Settings UI - confirm in clinic_configs" },
+    { label: "Juvonno base URL, branch code, and API key connected", ok: Boolean(connectionStatus?.juvonnoBaseUrl && connectionStatus?.defaultBranchCode && connectionStatus?.hasJuvonnoApiKey) },
+    { label: "Practitioner/service/duration mappings configured", ok: sectionComplete["Practitioners"] },
+    { label: "Retell receptionist agent and phone number mapped", ok: Boolean(connectionStatus?.retellReceptionistAgentId && connectionStatus?.retellReceptionistPhoneNumber) },
+    { label: "Authorized owner/admin/manager has clinic access", ok: null, note: "Confirm in user_clinic_access" },
+    { label: "Cancellation strategy sandbox-validated", ok: null, note: "Administrator-only - required before enabling cancellation approval" },
+  ];
+  const productionReady = productionReadiness.every(i => i.ok === true);
 
   // Dispatches to whichever save handler the currently active section
   // actually uses - same three handlers as before, just called from one
@@ -2618,6 +3066,35 @@ function SettingsScreen() {
                     </button>
                   );
                 })}
+              </div>
+            </Card>
+
+            <Card className="overflow-hidden">
+              <div className="px-4 py-2.5 border-b border-border bg-muted/40 flex items-center justify-between">
+                <div>
+                  <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">Production Readiness</p>
+                  <p className="text-[10px] text-muted-foreground mt-0.5">Deploy-gating checks, stricter than the setup sections above.</p>
+                </div>
+                <span className={`text-[10px] font-medium px-2 py-1 rounded-full flex-shrink-0 ${productionReady ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}`}>
+                  {productionReady ? "Production Ready" : "Not Production Ready"}
+                </span>
+              </div>
+              <div className="divide-y divide-border">
+                {productionReadiness.map((item) => (
+                  <div key={item.label} className="flex items-center justify-between px-4 py-3">
+                    <div>
+                      <p className="text-xs font-medium text-foreground">{item.label}</p>
+                      {item.note && <p className="text-[10px] text-muted-foreground mt-0.5">{item.note}</p>}
+                    </div>
+                    {item.ok === true ? (
+                      <span className="text-[10px] text-emerald-600 font-medium flex items-center gap-1 flex-shrink-0"><CheckCircle2 size={11} /> OK</span>
+                    ) : item.ok === false ? (
+                      <span className="text-[10px] text-amber-600 font-medium flex items-center gap-1 flex-shrink-0"><AlertCircle size={11} /> Missing</span>
+                    ) : (
+                      <span className="text-[10px] text-muted-foreground font-medium flex items-center gap-1 flex-shrink-0"><Info size={11} /> Confirm manually</span>
+                    )}
+                  </div>
+                ))}
               </div>
             </Card>
           </div>
@@ -4209,6 +4686,7 @@ const SCREENS: Record<string, React.FC> = {
   "recordings": InboundRecordingsScreen,
   "analytics": InboundAnalyticsScreen,
   "staff-queue": StaffQueueScreen,
+  "activity": ActivityScreen,
   "settings": SettingsScreen,
   "outbound-make-call": MakeCallScreen,
   "outbound-call-logs": OutboundCallLogsScreen,
@@ -4258,6 +4736,7 @@ function DashboardShell() {
   const [outboundOverview, setOutboundOverview] = useState<OverviewStats | null>(null);
   const [invoices, setInvoices] = useState<UsageInvoice[]>([]);
   const [settings, setSettings] = useState<Record<string, unknown>>({});
+  const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus | null>(null);
   const [loading, setLoading] = useState(false);
 
   // Legacy mode has its own /tenant + /queue/requests + /settings endpoints
@@ -4301,8 +4780,19 @@ function DashboardShell() {
             link_label: String(cfg.clinic_name ?? session?.activeClinicId ?? ""),
           });
           setSettings((cfg.settings && typeof cfg.settings === "object" ? cfg.settings : {}) as Record<string, unknown>);
+          setConnectionStatus({
+            hasJuvonnoApiKey: cfg.has_juvonno_api_key === true,
+            juvonnoBaseUrl: String(cfg.juvonno_base_url ?? ""),
+            defaultBranchCode: String(cfg.default_branch_code ?? ""),
+            retellReceptionistAgentId: String(cfg.retell_receptionist_agent_id ?? ""),
+            retellReceptionistPhoneNumber: String(cfg.retell_receptionist_phone_number ?? ""),
+            retellOutboundAgentId: String(cfg.retell_outbound_agent_id ?? ""),
+            retellOutboundPhoneNumber: String(cfg.retell_outbound_phone_number ?? ""),
+            retellRecoveryAgentId: String(cfg.retell_recovery_agent_id ?? ""),
+            retellRecoveryPhoneNumber: String(cfg.retell_recovery_phone_number ?? ""),
+          });
         }
-        setStaffTasks(Array.isArray(requests) ? requests : []);
+        setStaffTasks(Array.isArray(requests) ? requests.map(mapAppointmentRequest) : []);
         const inboundCalls = Array.isArray(callsRes?.calls) ? callsRes.calls.map((c: Record<string, unknown>) => mapInboundCall(c, "inbound")) : [];
         const outboundCalls = Array.isArray(outboundCallsRes?.calls) ? outboundCallsRes.calls.map((c: Record<string, unknown>) => mapInboundCall(c, "outbound")) : [];
         setCallLogs([...inboundCalls, ...outboundCalls]);
@@ -4330,7 +4820,7 @@ function DashboardShell() {
       if (document.visibilityState === "hidden") return;
       apiFetch(accessToken, csrfToken, "/queue/requests")
         .then(r => r.ok ? r.json() : null)
-        .then(requests => { if (Array.isArray(requests)) setStaffTasks(requests); })
+        .then(requests => { if (Array.isArray(requests)) setStaffTasks(requests.map(mapAppointmentRequest)); })
         .catch(() => {});
     }, 20000);
     return () => clearInterval(interval);
@@ -4398,18 +4888,39 @@ function DashboardShell() {
     }
   }
 
-  async function updateTaskStatus(id: string, status: string) {
-    if (!identityReady) return;
-    const res = await apiFetch(accessToken, csrfToken, `/queue/requests/${id}`, { method: "PATCH", body: { status } });
-    if (res.ok) {
-      const updated: StaffTask = await res.json();
-      setStaffTasks(prev => prev.map(t => t.id === updated.id ? updated : t));
-    }
+  // Approve is cancellation-approval only - it re-fetches the appointment
+  // from Juvonno, cancels it if not already, and verifies the cancelled
+  // state before marking the request completed. A 200 response alone isn't
+  // success; only trust request_status==="completed" && provider_confirmed.
+  async function approveTask(id: string): Promise<{ success: boolean; response?: string; errorCode?: string }> {
+    if (!identityReady) return { success: false };
+    const res = await apiFetch(accessToken, csrfToken, `/queue/requests/${id}/approve`, { method: "POST" });
+    const json = await res.json().catch(() => ({}));
+    const ok = res.ok && json.success === true && json.request_status === "completed" && json.provider_confirmed === true;
+    if (ok) setStaffTasks(prev => prev.map(t => t.id === id ? { ...t, status: "Completed" } : t));
+    return { success: ok, response: json.response, errorCode: json.error_code };
   }
 
-  async function deleteTask(id: string) {
+  async function rejectTask(id: string, resolutionCode?: string, resolutionNote?: string): Promise<boolean> {
+    if (!identityReady) return false;
+    const res = await apiFetch(accessToken, csrfToken, `/queue/requests/${id}/reject`, { method: "POST", body: { resolutionCode, resolutionNote } });
+    const ok = res.ok;
+    if (ok) setStaffTasks(prev => prev.map(t => t.id === id ? { ...t, status: "Rejected" } : t));
+    return ok;
+  }
+
+  async function assignTask(id: string, assignedUserId: string): Promise<boolean> {
+    if (!identityReady) return false;
+    const res = await apiFetch(accessToken, csrfToken, `/queue/requests/${id}/assign`, { method: "POST", body: { assignedUserId } });
+    if (res.ok) setStaffTasks(prev => prev.map(t => t.id === id ? { ...t, status: "In Progress", assignee: assignedUserId } : t));
+    return res.ok;
+  }
+
+  // Archive replaces delete - there is no hard-delete route for requests
+  // anymore (FRONTEND-BFF-HANDOFF.md).
+  async function archiveTask(id: string, resolutionNote?: string) {
     if (!identityReady) return;
-    const res = await apiFetch(accessToken, csrfToken, `/queue/requests/${id}`, { method: "DELETE" });
+    const res = await apiFetch(accessToken, csrfToken, `/queue/requests/${id}/archive`, { method: "POST", body: { resolutionNote } });
     if (res.ok) setStaffTasks(prev => prev.filter(t => t.id !== id));
   }
 
@@ -4501,7 +5012,7 @@ function DashboardShell() {
   }
 
   return (
-    <DashboardContext.Provider value={{ accessToken, tenantInfo, staffTasks, callLogs, transcripts, analytics, overview, outboundOverview, overviewRefreshing, refreshOverview, invoices, loading, settings, updateTaskStatus, deleteTask, saveSection, saveBulk, syncRetell }}>
+    <DashboardContext.Provider value={{ accessToken, tenantInfo, staffTasks, callLogs, transcripts, analytics, overview, outboundOverview, overviewRefreshing, refreshOverview, invoices, loading, settings, connectionStatus, approveTask, rejectTask, assignTask, archiveTask, saveSection, saveBulk, syncRetell }}>
       <div
         className="flex h-screen w-screen overflow-hidden bg-background"
         style={{ fontFamily: "'Inter', sans-serif" }}

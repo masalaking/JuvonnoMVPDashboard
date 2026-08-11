@@ -19,10 +19,6 @@ const DASHBOARD_API_KEY = process.env.DASHBOARD_API_KEY ?? '';
 // haven't set this yet keep working exactly as before (billing/recovery
 // routes all funnel through callN8n below).
 const N8N_DASHBOARD_SECRET = process.env.N8N_DASHBOARD_SECRET ?? '';
-// Same credential n8n's production webhooks send (server/n8n.js uses this
-// pair outbound; this is the inbound direction - verifying n8n's calls TO us).
-const N8N_DASHBOARD_AUTH_HEADER = (process.env.N8N_DASHBOARD_AUTH_HEADER ?? 'Authorization').toLowerCase();
-const N8N_DASHBOARD_AUTH_VALUE = process.env.N8N_DASHBOARD_AUTH_VALUE ?? '';
 const TENANT_LINKS_FILE = process.env.TENANT_LINKS_FILE ?? join(ROOT, 'data/tenant-links.json');
 const REQUESTS_DATA_FILE = process.env.REQUESTS_DATA_FILE ?? join(ROOT, 'data/requests.json');
 const SETTINGS_FILE = process.env.SETTINGS_FILE ?? join(ROOT, 'data/settings.json');
@@ -824,84 +820,67 @@ app.post('/api/session/active-clinic', requireSession, requireCsrf, apiRoute(asy
 // (tenant_id, clinic_id) the session's user actually has access to.
 const dashboardAuth = [requireSession, requireCsrf, requireClinicAccess];
 
-// ── Staff Action Queue (n8n → us) ────────────────────────────────────────────
-// The AI Receptionist workflow's "Send Booking/Reschedule/Cancellation to
-// Staff Action Queue" nodes POST here once someone points them at this
-// server's real URL and re-enables them (currently disabled, pointed at
-// https://disabled.invalid/... as a placeholder - that's an n8n-side edit,
-// not something this server controls). Backed by the `requests` table,
-// which is the production replacement for the legacy requests.json file.
-function requireN8nAuth(req, res, next) {
-  if (!N8N_DASHBOARD_AUTH_VALUE) {
-    return res.status(503).json({ error: { code: 'UPSTREAM_UNAVAILABLE', message: 'N8N_DASHBOARD_AUTH_VALUE is not configured.', retryable: false } });
-  }
-  if (req.headers[N8N_DASHBOARD_AUTH_HEADER] !== N8N_DASHBOARD_AUTH_VALUE) {
-    return res.status(401).json({ error: { code: 'UNAUTHENTICATED', message: 'Invalid or missing dashboard auth header.', retryable: false } });
-  }
-  next();
-}
-
-app.post('/api/webhooks/staff-action', requireN8nAuth, apiRoute(async (req, res) => {
-  const payload = req.body ?? {};
-  const metadata = payload.metadata ?? {};
-  const tenantId = String(metadata.client_id ?? metadata.tenant_id ?? payload.tenant_id ?? '').trim();
-  const clinicId = String(metadata.clinic_id ?? payload.clinic_id ?? '').trim();
-  if (!tenantId || !clinicId) throw badRequest('metadata.client_id/tenant_id and metadata.clinic_id are required.');
-  const row = await prisma.requests.create({
-    data: { tenant_id: tenantId, clinic_id: clinicId, status: 'New', data: payload },
-  });
-  res.status(201).json({ ok: true, id: row.id });
-}));
-
-// Flattens the Postgres row (id/status/created_at columns + `data` JSONB)
-// back into the flat shape the existing StaffTask UI already expects.
-function flattenRequestRow(row) {
-  const data = row.data && typeof row.data === 'object' ? row.data : {};
-  return { ...data, id: row.id, status: row.status, created_at: row.created_at.toISOString() };
-}
-
+// ── Staff Action Queue / Appointment Requests (FRONTEND-BFF-HANDOFF.md) ─────
+// The AI Receptionist workflow now writes cancellation requests straight
+// into Postgres itself (its own Postgres credential, with idempotency keys
+// and row-level locking for the actual Juvonno cancellation call) - this
+// server no longer receives a push webhook for it and must NOT read/write
+// the `requests` / `appointment_events` tables directly, because the n8n
+// webhook below is the only thing that knows how to do that safely (it
+// joins against user_clinic_access itself, and `approve` does a locked
+// re-fetch + cancel + verify against Juvonno that has no business being
+// reimplemented in this Express server). Every action here is a thin proxy.
+// Status filter defaults to "" (all non-archived statuses) rather than
+// "pending" so the dashboard's own filter tabs (Pending/In Progress/
+// Completed/etc.) can do client-side filtering across one fetched set,
+// same as the legacy queue screen always worked.
 app.get('/api/dashboard/queue/requests', ...dashboardAuth, apiRoute(async (req, res) => {
-  const rows = await prisma.requests.findMany({
-    where: { tenant_id: req.session.tenantId, clinic_id: req.clinicId },
-    orderBy: { created_at: 'desc' },
-  });
-  res.json(rows.map(flattenRequestRow));
+  const result = await n8nProd.appointmentRequests.list(req.session.userId, req.session.tenantId, req.clinicId, req.query.status ?? '');
+  res.json(result.requests ?? []);
 }));
 
-app.patch('/api/dashboard/queue/requests/:id', ...dashboardAuth, apiRoute(async (req, res) => {
-  const existing = await prisma.requests.findFirst({
-    where: { id: req.params.id, tenant_id: req.session.tenantId, clinic_id: req.clinicId },
-  });
-  if (!existing) {
-    const err = new Error('Request not found.');
-    err.status = 404;
-    err.code = 'NOT_FOUND';
-    throw err;
-  }
-  const currentData = existing.data && typeof existing.data === 'object' ? existing.data : {};
-  const nextData = { ...currentData, ...(req.body ?? {}) };
-  delete nextData.id;
-  delete nextData.status;
-  const status = String(req.body?.status ?? existing.status);
-  const updated = await prisma.requests.update({
-    where: { id: existing.id },
-    data: { status, data: nextData },
-  });
-  res.json(flattenRequestRow(updated));
+app.get('/api/dashboard/queue/requests/:id', ...dashboardAuth, apiRoute(async (req, res) => {
+  res.json(await n8nProd.appointmentRequests.get(req.session.userId, req.session.tenantId, req.clinicId, req.params.id));
 }));
 
-app.delete('/api/dashboard/queue/requests/:id', ...dashboardAuth, apiRoute(async (req, res) => {
-  const existing = await prisma.requests.findFirst({
-    where: { id: req.params.id, tenant_id: req.session.tenantId, clinic_id: req.clinicId },
+// Approve is cancellation-approval only (per the n8n contract): it re-fetches
+// the appointment from Juvonno, cancels it if not already cancelled, verifies
+// the cancelled state, and only then marks the request completed - never
+// treat a 200 here as done without checking request_status/provider_confirmed.
+app.post('/api/dashboard/queue/requests/:id/approve', ...dashboardAuth, rateLimit('queue-mutate', 30, 60_000), apiRoute(async (req, res) => {
+  res.json(await n8nProd.appointmentRequests.approve(req.session.userId, req.session.tenantId, req.clinicId, req.params.id));
+}));
+
+app.post('/api/dashboard/queue/requests/:id/reject', ...dashboardAuth, rateLimit('queue-mutate', 30, 60_000), apiRoute(async (req, res) => {
+  res.json(await n8nProd.appointmentRequests.reject(req.session.userId, req.session.tenantId, req.clinicId, req.params.id, req.body?.resolutionCode, req.body?.resolutionNote));
+}));
+
+app.post('/api/dashboard/queue/requests/:id/assign', ...dashboardAuth, rateLimit('queue-mutate', 30, 60_000), apiRoute(async (req, res) => {
+  res.json(await n8nProd.appointmentRequests.assign(req.session.userId, req.session.tenantId, req.clinicId, req.params.id, req.body?.assignedUserId));
+}));
+
+// Archive replaces delete outright - there is no hard-delete route for
+// requests anymore (FRONTEND-BFF-HANDOFF.md: "Remove every hard-delete
+// endpoint/button for requests").
+app.post('/api/dashboard/queue/requests/:id/archive', ...dashboardAuth, rateLimit('queue-mutate', 30, 60_000), apiRoute(async (req, res) => {
+  res.json(await n8nProd.appointmentRequests.archive(req.session.userId, req.session.tenantId, req.clinicId, req.params.id, req.body?.resolutionNote));
+}));
+
+// Append-only activity/notifications feed (bookings, lookups, reschedules,
+// cancellations, failures) - a separate stream from the actionable queue
+// above; only cancellation_requested events have a linked `requests` row.
+app.get('/api/dashboard/activity', ...dashboardAuth, apiRoute(async (req, res) => {
+  const result = await n8nProd.appointmentRequests.eventsList(req.session.userId, req.session.tenantId, req.clinicId, {
+    event_type: req.query.eventType,
+    status: req.query.status,
+    limit: req.query.limit,
+    offset: req.query.offset,
   });
-  if (!existing) {
-    const err = new Error('Request not found.');
-    err.status = 404;
-    err.code = 'NOT_FOUND';
-    throw err;
-  }
-  await prisma.requests.delete({ where: { id: existing.id } });
-  res.status(204).end();
+  res.json(result.events ?? []);
+}));
+
+app.get('/api/dashboard/activity/:id', ...dashboardAuth, apiRoute(async (req, res) => {
+  res.json(await n8nProd.appointmentRequests.eventGet(req.session.userId, req.session.tenantId, req.clinicId, req.params.id));
 }));
 
 // ── Inbound dashboard (§6.2) ─────────────────────────────────────────────────
