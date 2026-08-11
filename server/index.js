@@ -744,6 +744,14 @@ function apiRoute(handler) {
     try {
       await handler(req, res);
     } catch (err) {
+      // err.status is only ever set by errors WE threw on purpose (badRequest,
+      // the 401 in /auth/login, requireClinicAccess, etc.) with a message
+      // that's already safe to show a user. Anything else - a raw Prisma
+      // exception, a network failure, a bug - is unexpected and its message
+      // can contain internal details (hostnames, query shapes, stack-adjacent
+      // text) that must never reach the browser, so it gets a generic message
+      // instead. The real error still goes to the server log either way.
+      const isKnown = typeof err.status === 'number';
       const status = err.status ?? 502;
       const code = err.code ?? (
         status === 401 ? 'UNAUTHENTICATED' :
@@ -754,8 +762,9 @@ function apiRoute(handler) {
         status === 429 ? 'RATE_LIMITED' :
         status >= 500 ? 'UPSTREAM_UNAVAILABLE' : 'ERROR'
       );
-      if (status >= 500) console.error(`[api] ${req.method} ${req.originalUrl} failed:`, err.message);
-      res.status(status).json({ error: { code, message: err.message ?? 'Request failed', retryable: [429, 502, 503, 504].includes(status) } });
+      if (status >= 500) console.error(`[api] ${req.method} ${req.originalUrl} failed:`, err);
+      const message = isKnown ? (err.message ?? 'Request failed') : 'Something went wrong. Please try again.';
+      res.status(status).json({ error: { code, message, retryable: [429, 502, 503, 504].includes(status) } });
     }
   };
 }
