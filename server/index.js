@@ -976,8 +976,13 @@ app.put('/api/dashboard/recovery/settings', ...dashboardAuth, rateLimit('setting
   res.json(await n8nProd.recoveryEvent('recovery.settings_changed', req.session.tenantId, req.clinicId, { settings: req.body ?? {} }));
 }));
 
-// Serve built frontend
+// Serve built frontend - only the bare root URL serves the app shell.
+// Static assets (JS/CSS/favicon under dist/) still resolve via their own
+// real paths; everything else (old /t/:token links, typos, probes) 404s
+// instead of silently rendering the SPA, so there is exactly one entry
+// point into the dashboard.
 app.use(express.static(join(ROOT, 'dist')));
-app.get('*', (_req, res) => res.sendFile(join(ROOT, 'dist/index.html')));
+app.get('/', (_req, res) => res.sendFile(join(ROOT, 'dist/index.html')));
+app.use((_req, res) => res.status(404).send('Not found'));
 
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
