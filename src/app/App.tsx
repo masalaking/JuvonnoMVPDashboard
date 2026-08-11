@@ -4219,13 +4219,11 @@ const SCREENS: Record<string, React.FC> = {
   "billing": BillingScreen,
 };
 
-function getTokenFromURL(): string | null {
-  const match = window.location.pathname.match(/^\/t\/([^/]+)/);
-  return match ? match[1] : null;
-}
-
-// Legacy access-token links (/t/:token) bypass session auth entirely - a
-// link is already scoped to one clinic. Everyone else needs a real session.
+// Legacy access-token links (/t/:token) are retired (server/index.js 410s
+// the whole /api/link/* surface) - the dashboard is session-only now.
+// Visiting an old /t/:token URL still loads this SPA (it's just a path,
+// unhandled by any router), but AppGate no longer treats it specially, so
+// it renders the same login gate as every other URL.
 export default function App() {
   return (
     <AuthProvider>
@@ -4235,9 +4233,7 @@ export default function App() {
 }
 
 function AppGate() {
-  const accessToken = getTokenFromURL();
   const { session, authLoading } = useAuth();
-  if (accessToken) return <DashboardShell />;
   if (authLoading) {
     return <div className="min-h-screen flex items-center justify-center text-sm text-muted-foreground">Loading…</div>;
   }
@@ -4248,7 +4244,11 @@ function AppGate() {
 function DashboardShell() {
   const { session, logout } = useAuth();
   const [activeNav, setActiveNav] = useState("overview");
-  const [accessToken] = useState<string | null>(getTokenFromURL);
+  // Always null now that /t/:token access is retired - kept as a variable
+  // (rather than deleted outright) because apiFetch/identityReady below
+  // still branch on it, and a null accessToken is exactly what routes them
+  // through the session-based /api/dashboard/* path.
+  const accessToken: string | null = null;
   const [tenantInfo, setTenantInfo] = useState<TenantInfo | null>(null);
   const [staffTasks, setStaffTasks] = useState<StaffTask[]>([]);
   const [callLogs, setCallLogs] = useState<CallLog[]>([]);
@@ -4493,8 +4493,8 @@ function DashboardShell() {
           <div className="w-12 h-12 rounded-full bg-muted flex items-center justify-center mx-auto">
             <Lock size={20} className="text-muted-foreground" />
           </div>
-          <h1 className="text-sm font-semibold text-foreground">No dashboard link</h1>
-          <p className="text-xs text-muted-foreground max-w-xs">Open this dashboard using your unique link, e.g. <span className="font-mono">/t/your-token</span></p>
+          <h1 className="text-sm font-semibold text-foreground">Not signed in</h1>
+          <p className="text-xs text-muted-foreground max-w-xs">Sign in to view this dashboard.</p>
         </div>
       </div>
     );

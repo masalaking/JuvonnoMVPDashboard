@@ -261,6 +261,15 @@ function buildN8nAllSettings(allSettings) {
 
 app.get('/health', (_req, res) => res.json({ ok: true }));
 
+// The entire /api/link/:accessToken/* MVP surface below is retired - the
+// dashboard is session-only now (real login, per-clinic authorization via
+// user_clinic_access). This blanket 410 sits before every /api/link route
+// definition so none of them are reachable anymore, without deleting the
+// route bodies themselves (kept only as reference/rollback material).
+app.use('/api/link', (_req, res) => {
+  res.status(410).json({ error: { code: 'GONE', message: 'Access-token links have been retired. Please sign in.', retryable: false } });
+});
+
 // Frontend fetches tenant info (clinic name, receptionist, etc.)
 app.get('/api/link/:accessToken/tenant', (req, res) => {
   const tenant = findTenant(req.params.accessToken);
