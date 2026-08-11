@@ -196,7 +196,7 @@ interface DashboardCtx {
   approveTask: (id: string) => Promise<{ success: boolean; response?: string; errorCode?: string }>;
   rejectTask: (id: string, resolutionCode?: string, resolutionNote?: string) => Promise<boolean>;
   assignTask: (id: string, assignedUserId: string) => Promise<boolean>;
-  archiveTask: (id: string, resolutionNote?: string) => Promise<void>;
+  archiveTask: (id: string, resolutionNote?: string) => Promise<boolean>;
   saveSection: (section: string, data: Record<string, unknown>) => Promise<boolean>;
   saveBulk: (sections: Record<string, unknown>) => Promise<void>;
   syncRetell: () => Promise<{ ok: boolean; error?: string }>;
@@ -220,7 +220,7 @@ const DashboardContext = createContext<DashboardCtx>({
   approveTask: async () => ({ success: false }),
   rejectTask: async () => false,
   assignTask: async () => false,
-  archiveTask: async () => {},
+  archiveTask: async () => false,
   saveSection: async () => false,
   saveBulk: async () => {},
   syncRetell: async () => ({ ok: false }),
@@ -274,6 +274,27 @@ async function apiFetch(accessToken: string | null, csrfToken: string | undefine
   fetchInit.headers = headers;
   fetchInit.credentials = "include";
   return fetch(`/api/dashboard${suffix}`, fetchInit);
+}
+
+// A non-ok response and an empty-but-successful response mean completely
+// different things ("something's broken" vs. "there's nothing here yet"),
+// but plain `r.ok ? r.json() : <empty fallback>` collapses them into the
+// same UI state. This preserves the distinction so callers can show a real
+// error instead of silently rendering an empty/zeroed screen.
+async function safeJson(res: Response): Promise<{ ok: boolean; status: number; json: any }> {
+  const json = await res.json().catch(() => null);
+  return { ok: res.ok, status: res.status, json };
+}
+
+// One human-readable message per failure category (handoff §5's
+// 401/403/502-504/network split), so a failed fetch never gets presented as
+// "this clinic just has no data".
+function describeLoadFailure(status: number): string {
+  if (status === 401) return "Your session expired. Please sign in again.";
+  if (status === 403) return "You don't have access to this clinic's data.";
+  if (status === 404) return "Some dashboard data could not be found.";
+  if (status >= 500 || status === 0) return "The integration is temporarily unavailable. Some data may be missing.";
+  return "Some dashboard data could not be loaded.";
 }
 
 function AuthProvider({ children }: { children: React.ReactNode }) {
@@ -1949,8 +1970,9 @@ function StaffQueueScreen() {
       const ok = await rejectTask(id, "staff_rejected", rejectNote || undefined);
       setActionMessage({ text: ok ? "Request rejected." : "Could not reject the request.", error: !ok });
     } else {
-      await archiveTask(id);
-      if (selectedId === id) setSelectedId(null);
+      const ok = await archiveTask(id);
+      setActionMessage({ text: ok ? "Request archived." : "Could not archive the request.", error: !ok });
+      if (ok && selectedId === id) setSelectedId(null);
     }
     setActionBusy(false);
     setPendingModal(null);
@@ -4738,6 +4760,7 @@ function DashboardShell() {
   const [settings, setSettings] = useState<Record<string, unknown>>({});
   const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus | null>(null);
   const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   // Legacy mode has its own /tenant + /queue/requests + /settings endpoints
   // per access-token link; session mode derives the same information from
@@ -4749,20 +4772,22 @@ function DashboardShell() {
   useEffect(() => {
     if (!identityReady) return;
     setLoading(true);
+    const failed = { ok: false, status: 0, json: null as any };
     Promise.all([
-      accessToken ? fetch(`/api/link/${accessToken}/tenant`).then(r => r.ok ? r.json() : null) : Promise.resolve(null),
-      apiFetch(accessToken, csrfToken, "/queue/requests").then(r => r.ok ? r.json() : []),
-      apiFetch(accessToken, csrfToken, "/settings").then(r => r.ok ? r.json() : {}),
-      apiFetch(accessToken, csrfToken, "/inbound/calls").then(r => r.ok ? r.json() : { calls: [] }),
-      apiFetch(accessToken, csrfToken, "/inbound/transcripts").then(r => r.ok ? r.json() : { transcripts: [] }),
-      apiFetch(accessToken, csrfToken, "/inbound/analytics").then(r => r.ok ? r.json() : []),
-      apiFetch(accessToken, csrfToken, "/inbound/overview").then(r => r.ok ? r.json() : null),
-      apiFetch(accessToken, csrfToken, "/inbound/invoices").then(r => r.ok ? r.json() : { invoices: [] }),
-      apiFetch(accessToken, csrfToken, "/outbound/overview").then(r => r.ok ? r.json() : null).catch(() => null),
-      apiFetch(accessToken, csrfToken, "/outbound/calls").then(r => r.ok ? r.json() : { calls: [] }).catch(() => ({ calls: [] })),
-      apiFetch(accessToken, csrfToken, "/outbound/transcripts").then(r => r.ok ? r.json() : { transcripts: [] }).catch(() => ({ transcripts: [] })),
+      accessToken ? fetch(`/api/link/${accessToken}/tenant`).then(r => r.ok ? r.json() : null).catch(() => null) : Promise.resolve(null),
+      apiFetch(accessToken, csrfToken, "/queue/requests").then(safeJson).catch(() => failed),
+      apiFetch(accessToken, csrfToken, "/settings").then(safeJson).catch(() => failed),
+      apiFetch(accessToken, csrfToken, "/inbound/calls").then(safeJson).catch(() => failed),
+      apiFetch(accessToken, csrfToken, "/inbound/transcripts").then(safeJson).catch(() => failed),
+      apiFetch(accessToken, csrfToken, "/inbound/analytics").then(safeJson).catch(() => failed),
+      apiFetch(accessToken, csrfToken, "/inbound/overview").then(safeJson).catch(() => failed),
+      apiFetch(accessToken, csrfToken, "/inbound/invoices").then(safeJson).catch(() => failed),
+      apiFetch(accessToken, csrfToken, "/outbound/overview").then(safeJson).catch(() => failed),
+      apiFetch(accessToken, csrfToken, "/outbound/calls").then(safeJson).catch(() => failed),
+      apiFetch(accessToken, csrfToken, "/outbound/transcripts").then(safeJson).catch(() => failed),
     ])
-      .then(([tenant, requests, savedSettings, callsRes, transcriptsRes, analyticsRes, overviewRes, invoicesRes, outboundOverviewRes, outboundCallsRes, outboundTranscriptsRes]) => {
+      .then(([tenant, queueRes, settingsRes, callsRes, transcriptsRes, analyticsRes, overviewRes, invoicesRes, outboundOverviewRes, outboundCallsRes, outboundTranscriptsRes]) => {
+        const savedSettings = settingsRes.json;
         if (accessToken) {
           if (tenant) setTenantInfo(tenant);
           setSettings(savedSettings ?? {});
@@ -4792,19 +4817,38 @@ function DashboardShell() {
             retellRecoveryPhoneNumber: String(cfg.retell_recovery_phone_number ?? ""),
           });
         }
+        const requests = queueRes.json;
         setStaffTasks(Array.isArray(requests) ? requests.map(mapAppointmentRequest) : []);
-        const inboundCalls = Array.isArray(callsRes?.calls) ? callsRes.calls.map((c: Record<string, unknown>) => mapInboundCall(c, "inbound")) : [];
-        const outboundCalls = Array.isArray(outboundCallsRes?.calls) ? outboundCallsRes.calls.map((c: Record<string, unknown>) => mapInboundCall(c, "outbound")) : [];
+        const callsJson = callsRes.json, transcriptsJson = transcriptsRes.json, analyticsJson = analyticsRes.json;
+        const overviewJson = overviewRes.json, invoicesJson = invoicesRes.json, outboundOverviewJson = outboundOverviewRes.json;
+        const outboundCallsJson = outboundCallsRes.json, outboundTranscriptsJson = outboundTranscriptsRes.json;
+        const inboundCalls = Array.isArray(callsJson?.calls) ? callsJson.calls.map((c: Record<string, unknown>) => mapInboundCall(c, "inbound")) : [];
+        const outboundCalls = Array.isArray(outboundCallsJson?.calls) ? outboundCallsJson.calls.map((c: Record<string, unknown>) => mapInboundCall(c, "outbound")) : [];
         setCallLogs([...inboundCalls, ...outboundCalls]);
-        const inboundTranscripts = Array.isArray(transcriptsRes?.transcripts) ? transcriptsRes.transcripts.map((t: Record<string, unknown>) => mapInboundTranscript(t, "inbound")) : [];
-        const outboundTranscripts = Array.isArray(outboundTranscriptsRes?.transcripts) ? outboundTranscriptsRes.transcripts.map((t: Record<string, unknown>) => mapInboundTranscript(t, "outbound")) : [];
+        const inboundTranscripts = Array.isArray(transcriptsJson?.transcripts) ? transcriptsJson.transcripts.map((t: Record<string, unknown>) => mapInboundTranscript(t, "inbound")) : [];
+        const outboundTranscripts = Array.isArray(outboundTranscriptsJson?.transcripts) ? outboundTranscriptsJson.transcripts.map((t: Record<string, unknown>) => mapInboundTranscript(t, "outbound")) : [];
         setTranscripts([...inboundTranscripts, ...outboundTranscripts]);
-        setAnalytics(Array.isArray(analyticsRes) ? analyticsRes : []);
-        setOverview(overviewRes && !overviewRes.error ? overviewRes : null);
-        setInvoices(Array.isArray(invoicesRes?.invoices) ? invoicesRes.invoices : []);
-        setOutboundOverview(outboundOverviewRes && !outboundOverviewRes.error ? outboundOverviewRes : null);
+        setAnalytics(Array.isArray(analyticsJson) ? analyticsJson : []);
+        setOverview(overviewJson && !overviewJson.error ? overviewJson : null);
+        setInvoices(Array.isArray(invoicesJson?.invoices) ? invoicesJson.invoices : []);
+        setOutboundOverview(outboundOverviewJson && !outboundOverviewJson.error ? outboundOverviewJson : null);
+
+        // A failed fetch and a genuinely empty clinic must never look the
+        // same - surface one prioritized error banner instead of silently
+        // rendering dashes/"no data yet" for what's actually an integration
+        // or access failure (handoff §5). 401 takes priority over 403 over
+        // everything else, since "you're logged out" is the most actionable.
+        const coreResults = [queueRes, settingsRes, overviewRes, callsRes];
+        const failures = coreResults.filter(r => !r.ok);
+        if (failures.length > 0) {
+          const rank = (s: number) => (s === 401 ? 0 : s === 403 ? 1 : 2);
+          const worst = [...failures].sort((a, b) => rank(a.status) - rank(b.status))[0];
+          setLoadError(describeLoadFailure(worst.status));
+        } else {
+          setLoadError(null);
+        }
       })
-      .catch(() => {})
+      .catch(() => setLoadError("Some dashboard data could not be loaded."))
       .finally(() => setLoading(false));
   }, [identityReady, accessToken, csrfToken]);
 
@@ -4901,10 +4945,16 @@ function DashboardShell() {
     return { success: ok, response: json.response, errorCode: json.error_code };
   }
 
+  // An HTTP 200 from n8n does not mean the mutation actually happened - the
+  // envelope can be { success: false, error_code: ... } (not found, wrong
+  // status, forbidden, etc.) inside a 200. Only json.success === true means
+  // the row actually changed; res.ok alone was updating the UI on requests
+  // n8n had silently refused.
   async function rejectTask(id: string, resolutionCode?: string, resolutionNote?: string): Promise<boolean> {
     if (!identityReady) return false;
     const res = await apiFetch(accessToken, csrfToken, `/queue/requests/${id}/reject`, { method: "POST", body: { resolutionCode, resolutionNote } });
-    const ok = res.ok;
+    const json = await res.json().catch(() => ({}));
+    const ok = res.ok && json.success === true;
     if (ok) setStaffTasks(prev => prev.map(t => t.id === id ? { ...t, status: "Rejected" } : t));
     return ok;
   }
@@ -4912,16 +4962,21 @@ function DashboardShell() {
   async function assignTask(id: string, assignedUserId: string): Promise<boolean> {
     if (!identityReady) return false;
     const res = await apiFetch(accessToken, csrfToken, `/queue/requests/${id}/assign`, { method: "POST", body: { assignedUserId } });
-    if (res.ok) setStaffTasks(prev => prev.map(t => t.id === id ? { ...t, status: "In Progress", assignee: assignedUserId } : t));
-    return res.ok;
+    const json = await res.json().catch(() => ({}));
+    const ok = res.ok && json.success === true;
+    if (ok) setStaffTasks(prev => prev.map(t => t.id === id ? { ...t, status: "In Progress", assignee: assignedUserId } : t));
+    return ok;
   }
 
   // Archive replaces delete - there is no hard-delete route for requests
   // anymore (FRONTEND-BFF-HANDOFF.md).
-  async function archiveTask(id: string, resolutionNote?: string) {
-    if (!identityReady) return;
+  async function archiveTask(id: string, resolutionNote?: string): Promise<boolean> {
+    if (!identityReady) return false;
     const res = await apiFetch(accessToken, csrfToken, `/queue/requests/${id}/archive`, { method: "POST", body: { resolutionNote } });
-    if (res.ok) setStaffTasks(prev => prev.filter(t => t.id !== id));
+    const json = await res.json().catch(() => ({}));
+    const ok = res.ok && json.success === true;
+    if (ok) setStaffTasks(prev => prev.filter(t => t.id !== id));
+    return ok;
   }
 
   // Session mode has no distinct /settings/bulk or /settings-section write -
@@ -5020,6 +5075,12 @@ function DashboardShell() {
         <Sidebar active={activeNav} onNav={setActiveNav} />
         <div className="flex flex-col flex-1 min-w-0 overflow-hidden">
           <TopBar />
+          {loadError && !loading && (
+            <div className="flex items-center gap-2 bg-destructive/10 border-b border-destructive/30 text-destructive text-xs px-4 py-2">
+              <AlertTriangle size={13} className="flex-shrink-0" />
+              <span>{loadError}</span>
+            </div>
+          )}
           <main className="flex-1 overflow-y-auto">
             {loading ? (
               <div className="flex items-center justify-center h-full">

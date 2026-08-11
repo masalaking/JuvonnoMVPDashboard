@@ -829,6 +829,22 @@ app.post('/api/session/active-clinic', requireSession, requireCsrf, apiRoute(asy
 // (tenant_id, clinic_id) the session's user actually has access to.
 const dashboardAuth = [requireSession, requireCsrf, requireClinicAccess];
 
+// n8n's appointment-requests webhook always responds HTTP 200, even when the
+// business operation was refused (wrong clinic access, missing metadata,
+// etc.) - it signals that via `success: false` + `error_code` inside the
+// body, not the status code. Reads that did `res.json(result.events ?? [])`
+// were swallowing that refusal and turning it into an indistinguishable
+// empty collection, so the dashboard showed "no activity" for what was
+// actually an access/config failure. This turns success:false into a real
+// thrown error instead, same as any other upstream failure.
+function requireN8nSuccess(result, fallbackMessage) {
+  if (result?.success === true) return result;
+  const err = new Error(result?.message || fallbackMessage);
+  err.status = result?.error_code === 'CLINIC_ACCESS_FORBIDDEN' ? 403 : 502;
+  err.code = result?.error_code || 'N8N_UPSTREAM_FAILED';
+  throw err;
+}
+
 // ── Staff Action Queue / Appointment Requests (FRONTEND-BFF-HANDOFF.md) ─────
 // The AI Receptionist workflow now writes cancellation requests straight
 // into Postgres itself (its own Postgres credential, with idempotency keys
@@ -844,12 +860,19 @@ const dashboardAuth = [requireSession, requireCsrf, requireClinicAccess];
 // Completed/etc.) can do client-side filtering across one fetched set,
 // same as the legacy queue screen always worked.
 app.get('/api/dashboard/queue/requests', ...dashboardAuth, apiRoute(async (req, res) => {
-  const result = await n8nProd.appointmentRequests.list(req.session.userId, req.session.tenantId, req.clinicId, req.query.status ?? '');
+  const result = requireN8nSuccess(
+    await n8nProd.appointmentRequests.list(req.session.userId, req.session.tenantId, req.clinicId, req.query.status ?? ''),
+    'The appointment request queue could not be loaded.',
+  );
   res.json(result.requests ?? []);
 }));
 
 app.get('/api/dashboard/queue/requests/:id', ...dashboardAuth, apiRoute(async (req, res) => {
-  res.json(await n8nProd.appointmentRequests.get(req.session.userId, req.session.tenantId, req.clinicId, req.params.id));
+  const result = requireN8nSuccess(
+    await n8nProd.appointmentRequests.get(req.session.userId, req.session.tenantId, req.clinicId, req.params.id),
+    'The request could not be loaded.',
+  );
+  res.json(result);
 }));
 
 // Approve is cancellation-approval only (per the n8n contract): it re-fetches
@@ -879,17 +902,24 @@ app.post('/api/dashboard/queue/requests/:id/archive', ...dashboardAuth, rateLimi
 // cancellations, failures) - a separate stream from the actionable queue
 // above; only cancellation_requested events have a linked `requests` row.
 app.get('/api/dashboard/activity', ...dashboardAuth, apiRoute(async (req, res) => {
-  const result = await n8nProd.appointmentRequests.eventsList(req.session.userId, req.session.tenantId, req.clinicId, {
-    event_type: req.query.eventType,
-    status: req.query.status,
-    limit: req.query.limit,
-    offset: req.query.offset,
-  });
+  const result = requireN8nSuccess(
+    await n8nProd.appointmentRequests.eventsList(req.session.userId, req.session.tenantId, req.clinicId, {
+      event_type: req.query.eventType,
+      status: req.query.status,
+      limit: req.query.limit,
+      offset: req.query.offset,
+    }),
+    'Appointment activity could not be loaded.',
+  );
   res.json(result.events ?? []);
 }));
 
 app.get('/api/dashboard/activity/:id', ...dashboardAuth, apiRoute(async (req, res) => {
-  res.json(await n8nProd.appointmentRequests.eventGet(req.session.userId, req.session.tenantId, req.clinicId, req.params.id));
+  const result = requireN8nSuccess(
+    await n8nProd.appointmentRequests.eventGet(req.session.userId, req.session.tenantId, req.clinicId, req.params.id),
+    'The activity record could not be loaded.',
+  );
+  res.json(result);
 }));
 
 // ── Inbound dashboard (§6.2) ─────────────────────────────────────────────────
