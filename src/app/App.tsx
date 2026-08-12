@@ -176,6 +176,14 @@ interface ConnectionStatus {
   retellOutboundPhoneNumber: string;
   retellRecoveryAgentId: string;
   retellRecoveryPhoneNumber: string;
+  // IANA identifier (e.g. "America/Toronto") straight from clinic_configs -
+  // NOT the same as the "America/Toronto (EST/EDT)" display string the
+  // Clinic Profile timezone dropdown stores, which Intl can't use directly.
+  // This is the one source of truth for rendering appointment times, so a
+  // 9:00 AM appointment never shows as 10:00 AM just because a staff
+  // member's browser is in a different zone than the clinic (FRONTEND-
+  // POLISH-REVIEW-2026-08-12.md P0#2).
+  timezone: string;
 }
 
 interface DashboardCtx {
@@ -193,6 +201,7 @@ interface DashboardCtx {
   loading: boolean;
   settings: Record<string, unknown>;
   connectionStatus: ConnectionStatus | null;
+  loadError: string | null;
   approveTask: (id: string) => Promise<{ success: boolean; response?: string; errorCode?: string }>;
   rejectTask: (id: string, resolutionCode?: string, resolutionNote?: string) => Promise<boolean>;
   assignTask: (id: string, assignedUserId: string) => Promise<boolean>;
@@ -217,6 +226,7 @@ const DashboardContext = createContext<DashboardCtx>({
   loading: false,
   settings: {},
   connectionStatus: null,
+  loadError: null,
   approveTask: async () => ({ success: false }),
   rejectTask: async () => false,
   assignTask: async () => false,
@@ -770,7 +780,13 @@ function OverviewScreen() {
   // analytics mixed in, so every number on this screen traces back to one
   // of those two sources. No outbound tracker workflow exists yet, so
   // outboundOverview stays null (rendered as "—") until one is wired up.
-  const { overview, outboundOverview, overviewRefreshing, refreshOverview } = useDashboard();
+  const { overview, outboundOverview, overviewRefreshing, refreshOverview, loadError } = useDashboard();
+  // A dash means "nothing here" everywhere on this screen - that's only true
+  // when the load actually succeeded and came back empty. If it failed, every
+  // dash below is really "unknown", not "zero" (FRONTEND-POLISH-REVIEW-
+  // 2026-08-12.md P1#6), so surface the real reason instead of letting staff
+  // read a failed integration as an idle clinic.
+  const noData = !overview && !outboundOverview;
 
   const combinedUsed = (overview?.minutesUsed ?? 0) + (outboundOverview?.minutesUsed ?? 0);
   const combinedIncluded = (overview?.minutesIncluded ?? 0) + (outboundOverview?.minutesIncluded ?? 0);
@@ -792,6 +808,13 @@ function OverviewScreen() {
           <RefreshCw size={13} className={overviewRefreshing ? "animate-spin" : ""} /> Refresh
         </button>
       </div>
+
+      {noData && (
+        <div className={`text-xs rounded-md px-3 py-2.5 flex items-center justify-between ${loadError ? "bg-destructive/10 text-destructive" : "bg-muted text-muted-foreground"}`}>
+          <span>{loadError ? `Could not load usage data — ${loadError}` : "No usage recorded yet for this clinic."}</span>
+          {loadError && <button onClick={refreshOverview} className="font-medium hover:underline flex-shrink-0 ml-3">Retry</button>}
+        </div>
+      )}
 
       <Card className="p-5">
         <div className="flex items-center justify-between mb-2">
@@ -1919,6 +1942,30 @@ function formatDateTime(value: unknown): string {
   return date.toLocaleString(undefined, { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
 }
 
+// For APPOINTMENT times specifically (never for "when did this event happen"
+// timestamps) - always renders in the clinic's own timezone, never the
+// viewing staff member's browser timezone, so a 9:00 AM Juvonno appointment
+// never displays as 10:00 AM to a staff member in a different zone
+// (FRONTEND-POLISH-REVIEW-2026-08-12.md P0#2). Falls back to formatDateTime's
+// browser-local behavior only when no clinic timezone is known yet.
+function formatClinicTime(value: unknown, timezone?: string | null): string {
+  const text = safeText(value);
+  if (!text) return "";
+  const date = new Date(text);
+  if (isNaN(date.getTime())) return text;
+  if (!timezone) return formatDateTime(value);
+  try {
+    const formatted = date.toLocaleString(undefined, {
+      weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit", timeZone: timezone,
+    });
+    const abbrev = new Intl.DateTimeFormat("en-US", { timeZone: timezone, timeZoneName: "short" })
+      .formatToParts(date).find(p => p.type === "timeZoneName")?.value;
+    return abbrev ? `${formatted} ${abbrev}` : formatted;
+  } catch {
+    return formatDateTime(value);
+  }
+}
+
 function formatRelativeTime(value: unknown): string {
   const text = safeText(value);
   if (!text) return "";
@@ -1947,14 +1994,15 @@ const STAFF_QUEUE_TABS: { id: string; label: string; match: (t: StaffTask) => bo
 ];
 
 function StaffQueueScreen() {
-  const { staffTasks, approveTask, rejectTask, assignTask, archiveTask } = useDashboard();
+  const { staffTasks, approveTask, rejectTask, assignTask, archiveTask, connectionStatus } = useDashboard();
+  const clinicTimezone = connectionStatus?.timezone || null;
   const { session } = useAuth();
   const [tab, setTab] = useState("pending");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [pendingModal, setPendingModal] = useState<{ type: "approve" | "reject" | "archive"; id: string } | null>(null);
   const [rejectNote, setRejectNote] = useState("");
   const [actionBusy, setActionBusy] = useState(false);
-  const [actionMessage, setActionMessage] = useState<{ text: string; error?: boolean } | null>(null);
+  const [actionMessage, setActionMessage] = useState<{ text: string; error?: boolean; code?: string } | null>(null);
   // DOB/gender are sensitive - require an explicit click to reveal them each
   // time a different request is opened, rather than showing them by default.
   const [revealSensitiveId, setRevealSensitiveId] = useState<string | null>(null);
@@ -1965,7 +2013,18 @@ function StaffQueueScreen() {
     setActionBusy(true);
     if (type === "approve") {
       const result = await approveTask(id);
-      setActionMessage({ text: result.response || (result.success ? "Cancellation confirmed in Juvonno." : "Could not confirm the cancellation."), error: !result.success });
+      // Never claim success without provider_confirmed (approveTask's own
+      // three-field gate already enforces this) - a safety refusal like
+      // CANCELLATION_STRATEGY_NOT_VALIDATED still comes back as a normal
+      // response, so the copy has to be unambiguous that Juvonno was NOT
+      // touched (FRONTEND-POLISH-REVIEW-2026-08-12.md P1#5).
+      setActionMessage({
+        text: result.success
+          ? (result.response || "Cancellation confirmed in Juvonno.")
+          : (result.response || "The appointment is still active in Juvonno. The cancellation was not confirmed."),
+        error: !result.success,
+        code: result.success ? undefined : result.errorCode,
+      });
     } else if (type === "reject") {
       const ok = await rejectTask(id, "staff_rejected", rejectNote || undefined);
       setActionMessage({ text: ok ? "Request rejected." : "Could not reject the request.", error: !ok });
@@ -2047,7 +2106,7 @@ function StaffQueueScreen() {
                       </div>
                     </td>
                     <td className="px-4 py-3 font-mono text-muted-foreground">{safeText(task.phone) || "—"}</td>
-                    <td className="px-4 py-3 text-muted-foreground">{formatDateTime(task.due) || "—"}</td>
+                    <td className="px-4 py-3 text-muted-foreground">{formatClinicTime(task.due, clinicTimezone) || "—"}</td>
                     <td className="px-4 py-3 text-muted-foreground">{formatRelativeTime(task.created_at) || "—"}</td>
                     <td className="px-4 py-3"><Badge label={task.status} variant={task.status} /></td>
                     <td className="px-4 py-3 text-muted-foreground"><ChevronRight size={14} /></td>
@@ -2136,7 +2195,7 @@ function StaffQueueScreen() {
                     <Calendar size={11} />
                     <p className="text-[10px] font-semibold uppercase tracking-wide">Requested For</p>
                   </div>
-                  <p className="text-xs font-medium text-foreground">{formatDateTime(selectedTask.due) || "—"}</p>
+                  <p className="text-xs font-medium text-foreground">{formatClinicTime(selectedTask.due, clinicTimezone) || "—"}</p>
                 </div>
                 <div className="rounded-md border border-border p-3">
                   <div className="flex items-center gap-1.5 text-muted-foreground mb-1">
@@ -2187,9 +2246,15 @@ function StaffQueueScreen() {
 
             <div className="border-t border-border px-5 py-4 space-y-3">
               {actionMessage && (
-                <p className={`text-xs rounded-md px-3 py-2 ${actionMessage.error ? "bg-destructive/10 text-destructive" : "bg-emerald-50 text-emerald-700"}`}>
-                  {actionMessage.text}
-                </p>
+                <div className={`text-xs rounded-md px-3 py-2 ${actionMessage.error ? "bg-destructive/10 text-destructive" : "bg-emerald-50 text-emerald-700"}`}>
+                  <p>{actionMessage.text}</p>
+                  {actionMessage.code && (
+                    <details className="mt-1">
+                      <summary className="cursor-pointer text-[10px] font-medium opacity-80 hover:opacity-100">Technical details</summary>
+                      <p className="mt-1 font-mono text-[10px] opacity-80">{actionMessage.code}</p>
+                    </details>
+                  )}
+                </div>
               )}
 
               <div className="flex items-center gap-2 flex-wrap">
@@ -2332,8 +2397,35 @@ function DetailRow({ label, value }: { label: string; value: React.ReactNode }) 
   );
 }
 
+// Patient identity fallback order per FRONTEND-POLISH-REVIEW-2026-08-12.md
+// P1#3: data.patient_name (lookup/booking events) -> data.patient.display_name
+// (cancellation events, same nested shape mapAppointmentRequest reads) ->
+// the external chart ID -> the provider appointment ID -> nothing. Chart/
+// appointment IDs are shown as a secondary line whenever a real name is
+// available, so staff aren't left staring at a bare number.
+function activityPatientLabel(event: ActivityEvent): { primary: string; secondary: string } {
+  const data = event.data ?? {};
+  const patientObj = data.patient && typeof data.patient === "object" ? data.patient as Record<string, unknown> : {};
+  const primary = safeText(data.patient_name) || safeText(patientObj.display_name) || safeText(event.patient_external_id) || safeText(event.juvonno_appointment_id) || "—";
+  const idParts: string[] = [];
+  if (event.patient_external_id) idParts.push(`Chart ${event.patient_external_id}`);
+  if (event.juvonno_appointment_id) idParts.push(`Appointment ${event.juvonno_appointment_id}`);
+  return { primary, secondary: idParts.join(" · ") };
+}
+
+// cancellation_requested rows are always status "completed" in Postgres -
+// that's the audit WRITE succeeding, not the cancellation itself happening.
+// Showing "Completed" next to a "Needs Action" badge reads as "already
+// handled", so this event type gets its own delivery-vs-workflow label split
+// (FRONTEND-POLISH-REVIEW-2026-08-12.md P1#4) instead of the raw DB status.
+function activityStatusLabel(event: ActivityEvent): string {
+  if (event.event_type === "cancellation_requested") return "Recorded";
+  return event.status ? event.status[0].toUpperCase() + event.status.slice(1) : event.status;
+}
+
 function ActivityScreen() {
-  const { accessToken } = useDashboard();
+  const { accessToken, connectionStatus, staffTasks } = useDashboard();
+  const clinicTimezone = connectionStatus?.timezone || null;
   const { session } = useAuth();
   const identityReady = Boolean(accessToken) || Boolean(session);
   const [events, setEvents] = useState<ActivityEvent[]>([]);
@@ -2442,7 +2534,9 @@ function ActivityScreen() {
                 </tr>
               </thead>
               <tbody>
-                {events.map((event) => (
+                {events.map((event) => {
+                  const patient = activityPatientLabel(event);
+                  return (
                   <tr
                     key={event.id}
                     onClick={() => setSelectedId(event.id)}
@@ -2454,12 +2548,16 @@ function ActivityScreen() {
                         {ACTIVITY_NEEDS_ACTION.has(event.event_type) && <Badge label="Needs Action" variant="Staff Action" />}
                       </div>
                     </td>
-                    <td className="px-4 py-3"><Badge label={event.status} variant={ACTIVITY_BADGE_VARIANT[event.event_type] ?? "Neutral"} /></td>
-                    <td className="px-4 py-3 font-mono text-muted-foreground">{event.patient_external_id || event.juvonno_appointment_id || "—"}</td>
+                    <td className="px-4 py-3"><Badge label={activityStatusLabel(event)} variant={ACTIVITY_BADGE_VARIANT[event.event_type] ?? "Neutral"} /></td>
+                    <td className="px-4 py-3 text-foreground">
+                      <p className="font-medium">{patient.primary}</p>
+                      {patient.secondary && <p className="text-[10px] text-muted-foreground font-mono mt-0.5">{patient.secondary}</p>}
+                    </td>
                     <td className="px-4 py-3 text-muted-foreground">{formatRelativeTime(event.created_at)}</td>
                     <td className="px-4 py-3 text-muted-foreground"><ChevronRight size={14} /></td>
                   </tr>
-                ))}
+                  );
+                })}
               </tbody>
             </table>
           )}
@@ -2485,14 +2583,26 @@ function ActivityScreen() {
                 <p className="text-muted-foreground">Could not load this event.</p>
               ) : (
                 <>
+                  {(() => {
+                    const patient = activityPatientLabel(selectedEvent);
+                    return (
+                      <div>
+                        <p className="text-sm font-semibold text-foreground">{patient.primary}</p>
+                        {patient.secondary && <p className="text-[10px] text-muted-foreground font-mono mt-0.5">{patient.secondary}</p>}
+                      </div>
+                    );
+                  })()}
                   <div className="rounded-md border border-border divide-y divide-border">
-                    <DetailRow label="Status" value={<Badge label={selectedEvent.status} variant={ACTIVITY_BADGE_VARIANT[selectedEvent.event_type] ?? "Neutral"} />} />
-                    {selectedEvent.request_id && <DetailRow label="Linked Request" value={selectedEvent.request_id} />}
+                    <DetailRow label="Event Delivery" value={<Badge label={activityStatusLabel(selectedEvent)} variant={ACTIVITY_BADGE_VARIANT[selectedEvent.event_type] ?? "Neutral"} />} />
+                    {selectedEvent.request_id && (() => {
+                      const linked = staffTasks.find(t => t.id === selectedEvent.request_id);
+                      return <DetailRow label="Request State" value={linked ? <Badge label={linked.status} variant={linked.status} /> : selectedEvent.request_id} />;
+                    })()}
                     {selectedEvent.juvonno_appointment_id && <DetailRow label="Appointment ID" value={selectedEvent.juvonno_appointment_id} />}
                     {selectedEvent.patient_external_id && <DetailRow label="Patient ID" value={selectedEvent.patient_external_id} />}
                     {selectedEvent.duration_minutes != null && <DetailRow label="Duration" value={`${selectedEvent.duration_minutes} min`} />}
-                    {selectedEvent.previous_start_at && <DetailRow label="Previous Time" value={formatDateTime(selectedEvent.previous_start_at)} />}
-                    {selectedEvent.new_start_at && <DetailRow label="New Time" value={formatDateTime(selectedEvent.new_start_at)} />}
+                    {selectedEvent.previous_start_at && <DetailRow label="Previous Time" value={formatClinicTime(selectedEvent.previous_start_at, clinicTimezone)} />}
+                    {selectedEvent.new_start_at && <DetailRow label="New Time" value={formatClinicTime(selectedEvent.new_start_at, clinicTimezone)} />}
                     {selectedEvent.provider && <DetailRow label="Provider" value={selectedEvent.provider} />}
                     {selectedEvent.error_code && <DetailRow label="Error" value={selectedEvent.error_code} />}
                     <DetailRow label="Created" value={formatDateTime(selectedEvent.created_at)} />
@@ -2501,8 +2611,8 @@ function ActivityScreen() {
                   {ACTIVITY_NEEDS_ACTION.has(selectedEvent.event_type) && (
                     <p className="text-amber-700 bg-amber-50 border border-amber-100 rounded-md px-3 py-2">
                       {selectedEvent.event_type === "cancellation_requested"
-                        ? "This has a linked request in the Staff Action Queue."
-                        : "This action failed and needs manual reconciliation."}
+                        ? "The appointment is still active in Juvonno. This has a linked request in the Staff Action Queue awaiting approval."
+                        : "This action failed and needs manual reconciliation. The appointment was not changed."}
                     </p>
                   )}
                 </>
@@ -2686,6 +2796,14 @@ const SETTINGS_SECTION_META: Record<string, { icon: any; subtitle: string; optio
 
 function SettingsScreen() {
   const { tenantInfo, settings, connectionStatus, saveSection } = useDashboard();
+  const { session } = useAuth();
+  // Only an owner is plausibly able to go confirm these directly (clinic_configs,
+  // user_clinic_access, the sandbox-validated cancellation strategy - none of
+  // which any clinic-level role can see from this dashboard). Everyone else
+  // gets told who to contact instead of a "Confirm manually" that implies
+  // they have somewhere to go check (FRONTEND-POLISH-REVIEW-2026-08-12.md P1#7).
+  const currentClinicRole = session?.clinics.find(c => c.clinicId === session.activeClinicId)?.role ?? null;
+  const canConfirmManually = currentClinicRole === "owner";
   const [activeSection, setActiveSection] = useState("Overview");
   const [saving, setSaving] = useState(false);
   const [saveResult, setSaveResult] = useState<{ section: string; ok: boolean } | null>(null);
@@ -2838,14 +2956,14 @@ function SettingsScreen() {
   // exposed by any BFF route yet, or it's deliberately admin-only) - those
   // render as "Confirm manually" rather than a fabricated pass/fail, and
   // block the overall Ready state same as a real failure would.
-  type ReadinessItem = { label: string; ok: boolean | null; note?: string };
+  type ReadinessItem = { label: string; ok: boolean | null; note?: string; section?: string };
   const productionReadiness: ReadinessItem[] = [
-    { label: "Clinic hours configured", ok: sectionComplete["Clinic Hours"] },
-    { label: "Transfer number is valid E.164", ok: /^\+[1-9]\d{6,14}$/.test(draft.transfer_escalation.transfer_number ?? "") },
+    { label: "Clinic hours configured", ok: sectionComplete["Clinic Hours"], section: "Clinic Hours" },
+    { label: "Transfer number is valid E.164", ok: /^\+[1-9]\d{6,14}$/.test(draft.transfer_escalation.transfer_number ?? ""), section: "Transfer & Escalation" },
     { label: "Minimum booking notice configured", ok: null, note: "Not yet exposed in Settings UI - confirm in clinic_configs" },
     { label: "Maximum booking window configured", ok: null, note: "Not yet exposed in Settings UI - confirm in clinic_configs" },
     { label: "Juvonno base URL, branch code, and API key connected", ok: Boolean(connectionStatus?.juvonnoBaseUrl && connectionStatus?.defaultBranchCode && connectionStatus?.hasJuvonnoApiKey) },
-    { label: "Practitioner/service/duration mappings configured", ok: sectionComplete["Practitioners"] },
+    { label: "Practitioner/service/duration mappings configured", ok: sectionComplete["Practitioners"], section: "Practitioners" },
     { label: "Retell receptionist agent and phone number mapped", ok: Boolean(connectionStatus?.retellReceptionistAgentId && connectionStatus?.retellReceptionistPhoneNumber) },
     { label: "Authorized owner/admin/manager has clinic access", ok: null, note: "Confirm in user_clinic_access" },
     { label: "Cancellation strategy sandbox-validated", ok: null, note: "Administrator-only - required before enabling cancellation approval" },
@@ -3111,9 +3229,20 @@ function SettingsScreen() {
                     {item.ok === true ? (
                       <span className="text-[10px] text-emerald-600 font-medium flex items-center gap-1 flex-shrink-0"><CheckCircle2 size={11} /> OK</span>
                     ) : item.ok === false ? (
-                      <span className="text-[10px] text-amber-600 font-medium flex items-center gap-1 flex-shrink-0"><AlertCircle size={11} /> Missing</span>
-                    ) : (
+                      item.section ? (
+                        <button
+                          onClick={() => setActiveSection(item.section!)}
+                          className="text-[10px] text-amber-600 font-medium flex items-center gap-1 flex-shrink-0 hover:underline"
+                        >
+                          <AlertCircle size={11} /> Missing — Fix in {item.section}
+                        </button>
+                      ) : (
+                        <span className="text-[10px] text-amber-600 font-medium flex items-center gap-1 flex-shrink-0"><AlertCircle size={11} /> Missing</span>
+                      )
+                    ) : canConfirmManually ? (
                       <span className="text-[10px] text-muted-foreground font-medium flex items-center gap-1 flex-shrink-0"><Info size={11} /> Confirm manually</span>
+                    ) : (
+                      <span className="text-[10px] text-muted-foreground font-medium flex items-center gap-1 flex-shrink-0"><Info size={11} /> Contact RivaCare administrator</span>
                     )}
                   </div>
                 ))}
@@ -3781,7 +3910,7 @@ function SettingsScreen() {
 
 // ── Screen: Billing & Usage ───────────────────────────────────────────────────
 function BillingScreen() {
-  const { invoices } = useDashboard();
+  const { invoices, loadError } = useDashboard();
   // Build Invoices Response already sorts newest period first.
   const latest = invoices[0] ?? null;
   const latestMinutesUsed = num(latest?.minutesUsed);
@@ -3799,6 +3928,12 @@ function BillingScreen() {
           <Download size={12} /> Download Invoice
         </button>
       </div>
+
+      {invoices.length === 0 && (
+        <div className={`text-xs rounded-md px-3 py-2.5 ${loadError ? "bg-destructive/10 text-destructive" : "bg-muted text-muted-foreground"}`}>
+          {loadError ? `Could not load billing data — ${loadError}` : "No usage recorded yet — a plan may not be configured for this clinic."}
+        </div>
+      )}
 
       <div className="grid grid-cols-4 gap-4">
         <KpiCard label="Current Plan" value={latest ? `$${num(latest.baseRate).toFixed(0)}/mo` : "—"} sub={latest ? `${latestIncludedMinutes.toLocaleString()} min included` : "—"} icon={Star} color="purple" />
@@ -4815,6 +4950,7 @@ function DashboardShell() {
             retellOutboundPhoneNumber: String(cfg.retell_outbound_phone_number ?? ""),
             retellRecoveryAgentId: String(cfg.retell_recovery_agent_id ?? ""),
             retellRecoveryPhoneNumber: String(cfg.retell_recovery_phone_number ?? ""),
+            timezone: String(cfg.timezone ?? ""),
           });
         }
         const requests = queueRes.json;
@@ -5067,7 +5203,7 @@ function DashboardShell() {
   }
 
   return (
-    <DashboardContext.Provider value={{ accessToken, tenantInfo, staffTasks, callLogs, transcripts, analytics, overview, outboundOverview, overviewRefreshing, refreshOverview, invoices, loading, settings, connectionStatus, approveTask, rejectTask, assignTask, archiveTask, saveSection, saveBulk, syncRetell }}>
+    <DashboardContext.Provider value={{ accessToken, tenantInfo, staffTasks, callLogs, transcripts, analytics, overview, outboundOverview, overviewRefreshing, refreshOverview, invoices, loading, settings, connectionStatus, loadError, approveTask, rejectTask, assignTask, archiveTask, saveSection, saveBulk, syncRetell }}>
       <div
         className="flex h-screen w-screen overflow-hidden bg-background"
         style={{ fontFamily: "'Inter', sans-serif" }}
