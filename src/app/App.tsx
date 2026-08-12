@@ -1942,24 +1942,52 @@ function formatDateTime(value: unknown): string {
   return date.toLocaleString(undefined, { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
 }
 
+function clinicTimezoneAbbrev(timezone: string, date: Date): string {
+  try {
+    return new Intl.DateTimeFormat("en-US", { timeZone: timezone, timeZoneName: "short" })
+      .formatToParts(date).find(p => p.type === "timeZoneName")?.value ?? "";
+  } catch {
+    return "";
+  }
+}
+
 // For APPOINTMENT times specifically (never for "when did this event happen"
-// timestamps) - always renders in the clinic's own timezone, never the
-// viewing staff member's browser timezone, so a 9:00 AM Juvonno appointment
-// never displays as 10:00 AM to a staff member in a different zone
-// (FRONTEND-POLISH-REVIEW-2026-08-12.md P0#2). Falls back to formatDateTime's
-// browser-local behavior only when no clinic timezone is known yet.
+// timestamps). Defaults to America/Toronto when no clinic timezone is known
+// yet (RivaCare Frontend Appointment-Time Fix, 2026-08-13).
+//
+// Deliberately reads the Y-M-D/H:M digits straight out of the string instead
+// of doing real offset-aware date math: appointment 5867 was confirmed by
+// Juvonno/the AI receptionist for 10:00 AM, the provider returned
+// "...T10:00:00-05:00", and re-rendering that through real America/Toronto
+// DST math (-04:00 in August) shifted it to 11:00 AM. The attached offset is
+// evidently sometimes wrong/stale on the provider side (a proper fix belongs
+// in a BFF normalization step that returns a canonical UTC instant instead),
+// but until that lands, trusting the literal wall-clock numbers the provider
+// wrote is the only way to guarantee the dashboard shows the same hour
+// Juvonno and the caller actually agreed on.
 function formatClinicTime(value: unknown, timezone?: string | null): string {
   const text = safeText(value);
   if (!text) return "";
+  const tz = timezone || "America/Toronto";
+  const naive = text.match(/^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})/);
+  if (naive) {
+    const [, y, mo, d, h, mi] = naive;
+    const localDate = new Date(Number(y), Number(mo) - 1, Number(d));
+    const weekday = localDate.toLocaleDateString(undefined, { weekday: "short" });
+    const monthDay = localDate.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+    const hour24 = Number(h);
+    const hour12 = hour24 % 12 || 12;
+    const ampm = hour24 < 12 ? "AM" : "PM";
+    const abbrev = clinicTimezoneAbbrev(tz, localDate);
+    return `${weekday}, ${monthDay}, ${hour12}:${mi} ${ampm}${abbrev ? ` ${abbrev}` : ""}`;
+  }
   const date = new Date(text);
   if (isNaN(date.getTime())) return text;
-  if (!timezone) return formatDateTime(value);
   try {
     const formatted = date.toLocaleString(undefined, {
-      weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit", timeZone: timezone,
+      weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit", timeZone: tz,
     });
-    const abbrev = new Intl.DateTimeFormat("en-US", { timeZone: timezone, timeZoneName: "short" })
-      .formatToParts(date).find(p => p.type === "timeZoneName")?.value;
+    const abbrev = clinicTimezoneAbbrev(tz, date);
     return abbrev ? `${formatted} ${abbrev}` : formatted;
   } catch {
     return formatDateTime(value);
