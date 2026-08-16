@@ -94,7 +94,9 @@ model clinic_configs {
   retell_outbound_phone_number     String?
   retell_recovery_agent_id         String?
   retell_recovery_phone_number     String?
+  appointment_events               appointment_events[]
   billing_months                   billing_months[]
+  booking_slot_locks               booking_slot_locks[]
   calls                            calls[]
   tenants                          tenants                           @relation(fields: [tenant_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
   clinic_settings                  clinic_settings[]
@@ -129,7 +131,6 @@ model clinic_settings {
   tenants        tenants        @relation(fields: [tenant_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
 
   @@unique([tenant_id, clinic_id, section])
-  @@index([tenant_id, clinic_id, section], map: "clinic_settings_lookup_idx")
 }
 
 /// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
@@ -209,11 +210,10 @@ model outbound_calls {
   tenants            tenants        @relation(fields: [tenant_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
 
   @@unique([tenant_id, retell_call_id])
-  @@index([tenant_id, patient_last_name, patient_first_name], map: "outbound_calls_patient_name_idx")
+  @@index([tenant_id, clinic_id, patient_last_name, patient_first_name], map: "outbound_calls_patient_name_idx")
   @@index([tenant_id, clinic_id, started_at(sort: Desc)], map: "outbound_calls_tenant_clinic_started_at_idx")
-  @@index([tenant_id, clinic_id, started_at(sort: Desc)], map: "outbound_calls_tenant_clinic_started_idx")
   @@index([tenant_id, started_at(sort: Desc)], map: "outbound_calls_tenant_started_at_idx")
-  @@index([tenant_id, to_number], map: "outbound_calls_to_number_idx")
+  @@index([tenant_id, clinic_id, to_number], map: "outbound_calls_to_number_idx")
 }
 
 /// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
@@ -303,7 +303,6 @@ model payment_recovery_clinics {
   clinic_configs              clinic_configs @relation(fields: [tenant_id, clinic_id], references: [tenant_id, clinic_id], onDelete: Cascade, onUpdate: NoAction, map: "payment_recovery_clinics_tenant_clinic_fk")
   tenants                     tenants        @relation(fields: [tenant_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
 
-  @@unique([tenant_id, clinic_id], map: "payment_recovery_clinics_tenant_clinic_uidx")
   @@unique([tenant_id, clinic_id])
 }
 
@@ -408,17 +407,33 @@ model payment_recovery_metrics {
 }
 
 model requests {
-  id             String         @id @default(dbgenerated("(gen_random_uuid())::text"))
-  tenant_id      String
-  status         String         @default("New")
-  data           Json           @default("{}")
-  created_at     DateTime       @default(now()) @db.Timestamptz(6)
-  updated_at     DateTime       @default(now()) @db.Timestamptz(6)
-  clinic_id      String
-  clinic_configs clinic_configs @relation(fields: [tenant_id, clinic_id], references: [tenant_id, clinic_id], onDelete: Cascade, onUpdate: NoAction, map: "requests_tenant_clinic_fk")
-  tenants        tenants        @relation(fields: [tenant_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  id                     String               @id @default(dbgenerated("(gen_random_uuid())::text"))
+  tenant_id              String
+  status                 String               @default("pending")
+  data                   Json                 @default("{}")
+  created_at             DateTime             @default(now()) @db.Timestamptz(6)
+  updated_at             DateTime             @default(now()) @db.Timestamptz(6)
+  clinic_id              String
+  request_type           String               @default("general")
+  idempotency_key        String?
+  juvonno_appointment_id String?
+  patient_external_id    String?
+  retell_call_id         String?
+  requires_staff_action  Boolean              @default(true)
+  priority               String               @default("normal")
+  source                 String               @default("integration")
+  assigned_user_id       String?
+  resolution_code        String?
+  resolution_note        String?
+  resolved_at            DateTime?            @db.Timestamptz(6)
+  archived_at            DateTime?            @db.Timestamptz(6)
+  appointment_events     appointment_events[]
+  users                  users?               @relation(fields: [assigned_user_id], references: [id], onUpdate: NoAction, map: "requests_assigned_user_fk")
+  clinic_configs         clinic_configs       @relation(fields: [tenant_id, clinic_id], references: [tenant_id, clinic_id], onDelete: Cascade, onUpdate: NoAction, map: "requests_tenant_clinic_fk")
+  tenants                tenants              @relation(fields: [tenant_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
 
   @@index([tenant_id, status], map: "requests_tenant_status_idx")
+  @@index([tenant_id, clinic_id, juvonno_appointment_id], map: "requests_appointment_lookup_idx")
 }
 
 model rivacare_internal_secrets {
@@ -449,6 +464,7 @@ model tenants {
   timezone                 String                     @default("America/Toronto")
   created_at               DateTime                   @default(now()) @db.Timestamptz(6)
   updated_at               DateTime                   @default(now()) @db.Timestamptz(6)
+  appointment_events       appointment_events[]
   billing_months           billing_months[]
   calls                    calls[]
   clinic_configs           clinic_configs[]
@@ -461,7 +477,7 @@ model tenants {
   requests                 requests[]
   settings                 settings[]
   user_clinic_access       user_clinic_access[]
-  users                    users?
+  users                    users[]
   webhook_events           webhook_events[]
 }
 
@@ -481,12 +497,15 @@ model user_clinic_access {
 
 model users {
   id                 String               @id @default(dbgenerated("(gen_random_uuid())::text"))
-  tenant_id          String               @unique
+  tenant_id          String
   username           String               @unique
   password_hash      String
   created_at         DateTime             @default(now()) @db.Timestamptz(6)
+  requests           requests[]
   user_clinic_access user_clinic_access[]
   tenants            tenants              @relation(fields: [tenant_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([tenant_id], map: "users_tenant_idx")
 }
 
 /// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
@@ -507,4 +526,49 @@ model webhook_events {
 
   @@unique([provider, external_event_id])
   @@index([processing_status, received_at], map: "webhook_events_status_idx")
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model appointment_events {
+  id                     BigInt         @id @default(autoincrement())
+  tenant_id              String
+  clinic_id              String
+  request_id             String?
+  event_type             String
+  idempotency_key        String
+  juvonno_appointment_id String?
+  patient_external_id    String?
+  retell_call_id         String?
+  previous_start_at      DateTime?      @db.Timestamptz(6)
+  new_start_at           DateTime?      @db.Timestamptz(6)
+  duration_minutes       Int?
+  actor_type             String
+  provider               String         @default("juvonno")
+  status                 String
+  error_code             String?
+  data                   Json           @default("{}")
+  created_at             DateTime       @default(now()) @db.Timestamptz(6)
+  completed_at           DateTime?      @db.Timestamptz(6)
+  requests               requests?      @relation(fields: [request_id], references: [id], onUpdate: NoAction)
+  clinic_configs         clinic_configs @relation(fields: [tenant_id, clinic_id], references: [tenant_id, clinic_id], onDelete: Cascade, onUpdate: NoAction, map: "appointment_events_tenant_clinic_fk")
+  tenants                tenants        @relation(fields: [tenant_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@unique([tenant_id, clinic_id, idempotency_key], map: "appointment_events_clinic_idempotency_uidx")
+  @@index([tenant_id, clinic_id, juvonno_appointment_id, created_at(sort: Desc)], map: "appointment_events_appointment_idx")
+  @@index([tenant_id, clinic_id, status, created_at(sort: Desc)], map: "appointment_events_status_idx")
+}
+
+model booking_slot_locks {
+  tenant_id       String
+  clinic_id       String
+  staff_num       String
+  slot_start_at   DateTime       @db.Timestamptz(6)
+  idempotency_key String
+  expires_at      DateTime       @db.Timestamptz(6)
+  created_at      DateTime       @default(now()) @db.Timestamptz(6)
+  clinic_configs  clinic_configs @relation(fields: [tenant_id, clinic_id], references: [tenant_id, clinic_id], onDelete: Cascade, onUpdate: NoAction, map: "booking_slot_locks_tenant_clinic_fk")
+
+  @@id([tenant_id, clinic_id, staff_num, slot_start_at])
+  @@index([expires_at], map: "booking_slot_locks_expiry_idx")
+  @@index([tenant_id, clinic_id, idempotency_key], map: "booking_slot_locks_request_idx")
 }

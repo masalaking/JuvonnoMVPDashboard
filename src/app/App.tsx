@@ -2799,7 +2799,12 @@ function RecordingsScreen({ direction }: { direction: "inbound" | "outbound" }) 
 
 // ── Screen: Settings ──────────────────────────────────────────────────────────
 interface DurationCategory { id: string; label: string; durations: string; }
-interface AppointmentType { id: string; service_name: string; keywords: string; duration_categories: DurationCategory[]; }
+// service_id/product_id/schedule_type_id are the Juvonno booking identifiers
+// n8n needs to create a correct appointment (FRONTEND-DEVELOPER-HANDOFF-
+// BOOKING-HARDENING.md §1) - kept per practitioner+service, never merged into
+// one clinic-wide value, since two practitioners can offer the "same"
+// service under different Juvonno service/product/schedule-type IDs.
+interface AppointmentType { id: string; service_name: string; keywords: string; service_id: string; product_id: string; schedule_type_id: string; duration_categories: DurationCategory[]; }
 interface Practitioner { id: string; name: string; keywords: string; staff_num: string; appointment_types: AppointmentType[]; }
 interface FAQ { id: string; question: string; answer: string; category?: string; }
 
@@ -2843,6 +2848,17 @@ function SettingsScreen() {
   // read as one long expanded form - expanding one is purely a UI toggle,
   // it doesn't affect what's in `practitioners` or what gets saved.
   const [expandedPractitionerId, setExpandedPractitionerId] = useState<string | null>(null);
+  // Which appointment types have their "Juvonno booking identifiers"
+  // advanced section open - collapsed by default since most staff never
+  // need to touch these (BOOKING-HARDENING.md §2).
+  const [expandedIdentifierIds, setExpandedIdentifierIds] = useState<Set<string>>(new Set());
+  function toggleIdentifiers(typeId: string) {
+    setExpandedIdentifierIds(prev => {
+      const next = new Set(prev);
+      next.has(typeId) ? next.delete(typeId) : next.add(typeId);
+      return next;
+    });
+  }
   // Purely a visual step tab (matches the 3-step reference design) - steps 2
   // and 3 both reveal the same Services block since service + duration data
   // live together in one appointment_type, not two separate saved sections.
@@ -2896,7 +2912,18 @@ function SettingsScreen() {
       sms_follow_ups: (settings.sms_follow_ups ?? {}) as Record<string, string>,
     });
     const savedP = (settings.practitioners as { list?: Practitioner[] })?.list;
-    if (savedP && savedP.length > 0) setPractitioners(savedP);
+    // Practitioners saved before the Juvonno-identifier fields existed won't
+    // have service_id/product_id/schedule_type_id in their stored JSON -
+    // default those to "" rather than leaving them undefined, which would
+    // otherwise make the identifier <input>s below start as uncontrolled.
+    if (savedP && savedP.length > 0) {
+      setPractitioners(savedP.map(p => ({
+        ...p,
+        appointment_types: (p.appointment_types ?? []).map(t => ({
+          service_id: "", product_id: "", schedule_type_id: "", ...t,
+        })),
+      })));
+    }
     const savedF = (settings.faqs as { list?: FAQ[] })?.list;
     if (savedF && savedF.length > 0) setFaqs(savedF);
   }, [settings]);
@@ -2985,18 +3012,94 @@ function SettingsScreen() {
   // render as "Confirm manually" rather than a fabricated pass/fail, and
   // block the overall Ready state same as a real failure would.
   type ReadinessItem = { label: string; ok: boolean | null; note?: string; section?: string };
+
+  // Booking configuration status (BOOKING-HARDENING.md §6) - specifically
+  // the mechanics n8n needs to place a correct Juvonno appointment, as its
+  // own visible-but-non-blocking checklist. Distinct from the broader
+  // Production Readiness list below, which also covers Retell/API-key/user-
+  // access concerns unrelated to booking mechanics - "Practitioner/service/
+  // duration mappings configured" there reuses bookingReady so the two
+  // checklists can't quietly disagree with each other.
+  const staffNumsOk = practitioners.length > 0 && practitioners.every(p => p.staff_num) &&
+    new Set(practitioners.map(p => p.staff_num)).size === practitioners.length;
+  const serviceMappingOk = practitioners.length > 0 && practitioners.every(p =>
+    (p.appointment_types ?? []).length > 0 &&
+    p.appointment_types.every(t => t.service_id && t.schedule_type_id));
+  const durationRulesOk = practitioners.length > 0 && practitioners.every(p =>
+    (p.appointment_types ?? []).every(t =>
+      (t.duration_categories ?? []).length > 0 &&
+      t.duration_categories.every(c => c.label.trim() && (c.durations ?? "").split(",").some(d => parseInt(d.trim(), 10) > 0))));
+  const bookingReadiness: ReadinessItem[] = [
+    { label: "Clinic timezone", ok: /^[A-Za-z_]+\/[A-Za-z_]+$/.test(connectionStatus?.timezone ?? ""), section: "Clinic Profile" },
+    { label: "Branch code", ok: Boolean(connectionStatus?.defaultBranchCode) },
+    { label: "Clinic hours", ok: sectionComplete["Clinic Hours"], section: "Clinic Hours" },
+    { label: "Transfer number", ok: /^\+[1-9]\d{6,14}$/.test(draft.transfer_escalation.transfer_number ?? ""), section: "Transfer & Escalation" },
+    { label: "Booking notice/window", ok: null, note: "Not yet exposed in Settings UI - confirm in clinic_configs" },
+    { label: "Practitioner staff numbers", ok: staffNumsOk, section: "Practitioners" },
+    { label: "Service mapping (Service ID + Schedule Type ID)", ok: serviceMappingOk, section: "Practitioners" },
+    { label: "Duration rules (Initial/Follow-up)", ok: durationRulesOk, section: "Practitioners" },
+  ];
+  const bookingReady = bookingReadiness.every(i => i.ok === true);
+
   const productionReadiness: ReadinessItem[] = [
     { label: "Clinic hours configured", ok: sectionComplete["Clinic Hours"], section: "Clinic Hours" },
     { label: "Transfer number is valid E.164", ok: /^\+[1-9]\d{6,14}$/.test(draft.transfer_escalation.transfer_number ?? ""), section: "Transfer & Escalation" },
     { label: "Minimum booking notice configured", ok: null, note: "Not yet exposed in Settings UI - confirm in clinic_configs" },
     { label: "Maximum booking window configured", ok: null, note: "Not yet exposed in Settings UI - confirm in clinic_configs" },
     { label: "Juvonno base URL, branch code, and API key connected", ok: Boolean(connectionStatus?.juvonnoBaseUrl && connectionStatus?.defaultBranchCode && connectionStatus?.hasJuvonnoApiKey) },
-    { label: "Practitioner/service/duration mappings configured", ok: sectionComplete["Practitioners"], section: "Practitioners" },
+    { label: "Practitioner/service/duration mappings configured", ok: staffNumsOk && serviceMappingOk && durationRulesOk, section: "Practitioners" },
     { label: "Retell receptionist agent and phone number mapped", ok: Boolean(connectionStatus?.retellReceptionistAgentId && connectionStatus?.retellReceptionistPhoneNumber) },
     { label: "Authorized owner/admin/manager has clinic access", ok: null, note: "Confirm in user_clinic_access" },
     { label: "Cancellation strategy sandbox-validated", ok: null, note: "Administrator-only - required before enabling cancellation approval" },
   ];
   const productionReady = productionReadiness.every(i => i.ok === true);
+
+  // Shared renderer for both readiness cards below (Booking configuration
+  // status + Production Readiness) - same three-state item row (OK / Missing
+  // -> jump to section / Confirm manually or Contact administrator).
+  function renderReadinessCard(title: string, subtitle: string, items: ReadinessItem[], ready: boolean, readyLabel: string, notReadyLabel: string) {
+    return (
+      <Card className="overflow-hidden">
+        <div className="px-4 py-2.5 border-b border-border bg-muted/40 flex items-center justify-between">
+          <div>
+            <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">{title}</p>
+            <p className="text-[10px] text-muted-foreground mt-0.5">{subtitle}</p>
+          </div>
+          <span className={`text-[10px] font-medium px-2 py-1 rounded-full flex-shrink-0 ${ready ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}`}>
+            {ready ? readyLabel : notReadyLabel}
+          </span>
+        </div>
+        <div className="divide-y divide-border">
+          {items.map((item) => (
+            <div key={item.label} className="flex items-center justify-between px-4 py-3">
+              <div>
+                <p className="text-xs font-medium text-foreground">{item.label}</p>
+                {item.note && <p className="text-[10px] text-muted-foreground mt-0.5">{item.note}</p>}
+              </div>
+              {item.ok === true ? (
+                <span className="text-[10px] text-emerald-600 font-medium flex items-center gap-1 flex-shrink-0"><CheckCircle2 size={11} /> OK</span>
+              ) : item.ok === false ? (
+                item.section ? (
+                  <button
+                    onClick={() => setActiveSection(item.section!)}
+                    className="text-[10px] text-amber-600 font-medium flex items-center gap-1 flex-shrink-0 hover:underline"
+                  >
+                    <AlertCircle size={11} /> Missing — Fix in {item.section}
+                  </button>
+                ) : (
+                  <span className="text-[10px] text-amber-600 font-medium flex items-center gap-1 flex-shrink-0"><AlertCircle size={11} /> Missing</span>
+                )
+              ) : canConfirmManually ? (
+                <span className="text-[10px] text-muted-foreground font-medium flex items-center gap-1 flex-shrink-0"><Info size={11} /> Confirm manually</span>
+              ) : (
+                <span className="text-[10px] text-muted-foreground font-medium flex items-center gap-1 flex-shrink-0"><Info size={11} /> Contact RivaCare administrator</span>
+              )}
+            </div>
+          ))}
+        </div>
+      </Card>
+    );
+  }
 
   // Dispatches to whichever save handler the currently active section
   // actually uses - same three handlers as before, just called from one
@@ -3067,6 +3170,7 @@ function SettingsScreen() {
   function newAppointmentType(): AppointmentType {
     return {
       id: crypto.randomUUID(), service_name: "", keywords: "",
+      service_id: "", product_id: "", schedule_type_id: "",
       duration_categories: [
         { id: crypto.randomUUID(), label: "Initial", durations: "45,60" },
         { id: crypto.randomUUID(), label: "Follow-up", durations: "30,45,60" },
@@ -3086,9 +3190,9 @@ function SettingsScreen() {
     } : p));
   }
 
-  function updateAppointmentTypeField(practitionerId: string, typeId: string, field: 'service_name' | 'keywords', value: string) {
+  function updateAppointmentTypeField(practitionerId: string, typeId: string, field: 'service_name' | 'keywords' | 'service_id' | 'product_id' | 'schedule_type_id', value: string) {
     setPractitioners(prev => prev.map(p => p.id === practitionerId ? {
-      ...p, appointment_types: p.appointment_types.map(t => t.id === typeId ? { ...t, [field]: value } : t),
+      ...p, appointment_types: p.appointment_types.map(t => t.id === typeId ? { ...t, [field]: value.trim() } : t),
     } : p));
   }
 
@@ -3237,45 +3341,17 @@ function SettingsScreen() {
               </div>
             </Card>
 
-            <Card className="overflow-hidden">
-              <div className="px-4 py-2.5 border-b border-border bg-muted/40 flex items-center justify-between">
-                <div>
-                  <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">Production Readiness</p>
-                  <p className="text-[10px] text-muted-foreground mt-0.5">Deploy-gating checks, stricter than the setup sections above.</p>
-                </div>
-                <span className={`text-[10px] font-medium px-2 py-1 rounded-full flex-shrink-0 ${productionReady ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}`}>
-                  {productionReady ? "Production Ready" : "Not Production Ready"}
-                </span>
-              </div>
-              <div className="divide-y divide-border">
-                {productionReadiness.map((item) => (
-                  <div key={item.label} className="flex items-center justify-between px-4 py-3">
-                    <div>
-                      <p className="text-xs font-medium text-foreground">{item.label}</p>
-                      {item.note && <p className="text-[10px] text-muted-foreground mt-0.5">{item.note}</p>}
-                    </div>
-                    {item.ok === true ? (
-                      <span className="text-[10px] text-emerald-600 font-medium flex items-center gap-1 flex-shrink-0"><CheckCircle2 size={11} /> OK</span>
-                    ) : item.ok === false ? (
-                      item.section ? (
-                        <button
-                          onClick={() => setActiveSection(item.section!)}
-                          className="text-[10px] text-amber-600 font-medium flex items-center gap-1 flex-shrink-0 hover:underline"
-                        >
-                          <AlertCircle size={11} /> Missing — Fix in {item.section}
-                        </button>
-                      ) : (
-                        <span className="text-[10px] text-amber-600 font-medium flex items-center gap-1 flex-shrink-0"><AlertCircle size={11} /> Missing</span>
-                      )
-                    ) : canConfirmManually ? (
-                      <span className="text-[10px] text-muted-foreground font-medium flex items-center gap-1 flex-shrink-0"><Info size={11} /> Confirm manually</span>
-                    ) : (
-                      <span className="text-[10px] text-muted-foreground font-medium flex items-center gap-1 flex-shrink-0"><Info size={11} /> Contact RivaCare administrator</span>
-                    )}
-                  </div>
-                ))}
-              </div>
-            </Card>
+            {renderReadinessCard(
+              "Booking Configuration Status",
+              "Non-blocking - what n8n needs to place a correct Juvonno appointment (BOOKING-HARDENING.md §6).",
+              bookingReadiness, bookingReady, "Booking Ready", "Booking Not Ready"
+            )}
+
+            {renderReadinessCard(
+              "Production Readiness",
+              "Deploy-gating checks, stricter than the setup sections above.",
+              productionReadiness, productionReady, "Production Ready", "Not Production Ready"
+            )}
           </div>
         )}
         {activeSection === "Clinic Profile" && (
@@ -3578,6 +3654,45 @@ function SettingsScreen() {
                                   <Plus size={11} /> Add duration type
                                 </button>
                               </div>
+                              {/* Juvonno booking identifiers (advanced, collapsed by default) */}
+                              {(() => {
+                                const idsOpen = expandedIdentifierIds.has(t.id);
+                                const idsComplete = Boolean(t.service_id && t.schedule_type_id);
+                                return (
+                                  <div className="border-t border-border pt-3">
+                                    <button
+                                      type="button"
+                                      onClick={() => toggleIdentifiers(t.id)}
+                                      className="flex items-center justify-between w-full text-left"
+                                    >
+                                      <span className="flex items-center gap-1.5 text-xs font-medium text-foreground">
+                                        <Database size={11} /> Juvonno booking identifiers
+                                        {!idsComplete && <Badge label="Incomplete" variant="Medium" />}
+                                      </span>
+                                      <ChevronDown size={13} className={`text-muted-foreground transition-transform ${idsOpen ? "rotate-180" : ""}`} />
+                                    </button>
+                                    {idsOpen && (
+                                      <div className="grid grid-cols-3 gap-3 mt-3">
+                                        <div className="space-y-1">
+                                          <label className="text-[10px] font-medium text-muted-foreground">Juvonno Service ID *</label>
+                                          <input value={t.service_id ?? ""} onChange={e => updateAppointmentTypeField(p.id, t.id, 'service_id', e.target.value)} placeholder="e.g. 123" className="w-full bg-input-background border border-border rounded-md px-3 py-1.5 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring" />
+                                        </div>
+                                        <div className="space-y-1">
+                                          <label className="text-[10px] font-medium text-muted-foreground">Juvonno Product ID</label>
+                                          <input value={t.product_id ?? ""} onChange={e => updateAppointmentTypeField(p.id, t.id, 'product_id', e.target.value)} placeholder="e.g. 456" className="w-full bg-input-background border border-border rounded-md px-3 py-1.5 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring" />
+                                        </div>
+                                        <div className="space-y-1">
+                                          <label className="text-[10px] font-medium text-muted-foreground">Juvonno Schedule Type ID *</label>
+                                          <input value={t.schedule_type_id ?? ""} onChange={e => updateAppointmentTypeField(p.id, t.id, 'schedule_type_id', e.target.value)} placeholder="e.g. 789" className="w-full bg-input-background border border-border rounded-md px-3 py-1.5 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring" />
+                                        </div>
+                                      </div>
+                                    )}
+                                    <p className="text-[10px] text-muted-foreground mt-2">
+                                      Required before this service is booking-ready. Product ID may stay blank only once this clinic's Juvonno API has been confirmed to accept appointments without one.
+                                    </p>
+                                  </div>
+                                );
+                              })()}
                             </div>
                           ))}
                           <button type="button" onClick={() => addAppointmentType(p.id)} className="flex items-center gap-1.5 text-xs font-medium text-primary hover:underline pt-1">

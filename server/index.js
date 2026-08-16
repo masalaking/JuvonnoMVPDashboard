@@ -227,6 +227,9 @@ function formatForN8n(section, data) {
         : (Array.isArray(p.keywords) ? p.keywords : []),
       service_types: (p.appointment_types ?? []).map(t => ({
         service: t.service_name,
+        service_id: String(t.service_id ?? ''),
+        product_id: String(t.product_id ?? ''),
+        schedule_type_id: String(t.schedule_type_id ?? ''),
         keywords: typeof t.keywords === 'string'
           ? t.keywords.split(',').map(k => k.trim()).filter(Boolean)
           : (Array.isArray(t.keywords) ? t.keywords : []),
