@@ -5,7 +5,7 @@ import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { randomUUID } from 'crypto';
 import { prisma } from './db.js';
-import { requireSession, requireCsrf, requireClinicAccess, requireRole, verifyCredentials, clinicsForUser, issueSession, clearSession, rateLimit } from './auth.js';
+import { requireSession, requireCsrf, requireClinicAccess, requireRole, verifyCredentials, clinicsForUser, issueSession, clearSession, rateLimit, readCsrfToken } from './auth.js';
 import * as n8nProd from './n8n.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -803,7 +803,18 @@ app.post('/api/auth/logout', requireSession, requireCsrf, apiRoute(async (req, r
 
 app.get('/api/auth/session', requireSession, apiRoute(async (req, res) => {
   const clinics = await clinicsForUser(req.session.userId, req.session.tenantId);
-  res.json({ userId: req.session.userId, tenantId: req.session.tenantId, activeClinicId: req.session.activeClinicId ?? null, clinics });
+  // multi-clinic-prompt.md §1.1: a hard reload has a valid session cookie
+  // but the rc_csrf cookie can legitimately be missing (e.g. cleared,
+  // first load in a new tab context) - never return an empty csrfToken,
+  // since that makes every mutation (including switching clinics) 403
+  // until the next login. Mint a fresh session+CSRF pair whenever the
+  // existing CSRF cookie is missing/empty so the response always carries
+  // a usable token.
+  let csrfToken = readCsrfToken(req);
+  if (!csrfToken) {
+    csrfToken = issueSession(res, { userId: req.session.userId, tenantId: req.session.tenantId, activeClinicId: req.session.activeClinicId ?? null });
+  }
+  res.json({ userId: req.session.userId, tenantId: req.session.tenantId, activeClinicId: req.session.activeClinicId ?? null, clinics, csrfToken });
 }));
 
 // ── Clinic selection (§5, §12) ───────────────────────────────────────────────

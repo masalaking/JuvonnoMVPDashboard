@@ -100,6 +100,12 @@ function readCsrfCookie(req) {
   return parseCookies(req.headers.cookie)[CSRF_COOKIE] ?? '';
 }
 
+// Exposed for GET /api/auth/session (multi-clinic-prompt.md §1.1) - the
+// rc_csrf cookie is deliberately not httpOnly (the frontend echoes it back
+// in X-CSRF-Token), so reading it back out is not a security-sensitive
+// operation the way reading the session cookie's contents would be.
+export const readCsrfToken = readCsrfCookie;
+
 // Attaches req.session = { userId, tenantId, activeClinicId } or 401s.
 export function requireSession(req, res, next) {
   const session = readSession(req);
