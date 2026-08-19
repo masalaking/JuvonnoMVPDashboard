@@ -169,13 +169,19 @@ export async function clinicsForUser(userId, tenantId) {
   const access = await prisma.user_clinic_access.findMany({
     where: { user_id: userId, tenant_id: tenantId },
     include: { clinic_configs: true },
-    orderBy: { clinic_id: 'asc' },
   });
-  return access.map((a) => ({
-    clinicId: a.clinic_id,
-    clinicName: a.clinic_configs?.clinic_name ?? a.clinic_id,
-    role: a.role,
-  }));
+  // Sorted by clinic_name (not clinic_id) so the picker/switcher lists
+  // clinics the way a human would expect, not by internal id order
+  // (multi-clinic-prompt.md §2).
+  return access
+    .map((a) => ({
+      clinicId: a.clinic_id,
+      clinicName: a.clinic_configs?.clinic_name ?? a.clinic_id,
+      role: a.role,
+      status: a.clinic_configs?.status ?? null,
+      timezone: a.clinic_configs?.timezone ?? null,
+    }))
+    .sort((x, y) => x.clinicName.localeCompare(y.clinicName));
 }
 
 // Minimal in-memory sliding-window rate limiter (§15: login, settings

@@ -114,6 +114,11 @@ export const outbound = {
   calls: (t, c) => n8nGet('juvonno-outbound/calls', t, c),
   transcripts: (t, c) => n8nGet('juvonno-outbound/transcripts', t, c),
   invoices: (t, c) => n8nGet('juvonno-outbound/invoices', t, c),
+  // multi-clinic-prompt.md §3.1 - MakeCallScreen's only working backend was
+  // the legacy per-client_id-prefixed /api/link/:token/outbound/make-call
+  // route; this is its session-mode equivalent on the shared juvonno-outbound
+  // workflow, same as every other outbound.* call above.
+  makeCall: (t, c, payload) => n8nPost('juvonno-outbound/make-call', { tenant_id: t, clinic_id: c, ...payload }),
 };
 
 // ── Appointment Requests / Staff Action Queue (FRONTEND-BFF-HANDOFF.md) ─────

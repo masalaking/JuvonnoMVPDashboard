@@ -1,9 +1,8 @@
-import 'dotenv/config';
+﻿import 'dotenv/config';
 import express from 'express';
-import { readFileSync, writeFileSync } from 'fs';
+import { readFileSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
-import { randomUUID } from 'crypto';
 import { prisma } from './db.js';
 import { requireSession, requireCsrf, requireClinicAccess, requireRole, verifyCredentials, clinicsForUser, issueSession, clearSession, rateLimit, readCsrfToken } from './auth.js';
 import * as n8nProd from './n8n.js';
@@ -13,172 +12,21 @@ const __dirname = dirname(__filename);
 const ROOT = join(__dirname, '..');
 
 const PORT = process.env.API_PORT ?? 3001;
+// Still guards GET /api/settings-by-client/:clientId below, which the n8n
+// "Juvonno Settings Backend" workflow calls directly (server-to-server, no
+// user session) to read a clinic's settings file.
 const DASHBOARD_API_KEY = process.env.DASHBOARD_API_KEY ?? '';
-// Optional: shared secret n8n's Payment Recovery workflow can require via an
-// X-Dashboard-Secret header. Sent only when configured so tenants that
-// haven't set this yet keep working exactly as before (billing/recovery
-// routes all funnel through callN8n below).
-const N8N_DASHBOARD_SECRET = process.env.N8N_DASHBOARD_SECRET ?? '';
-const TENANT_LINKS_FILE = process.env.TENANT_LINKS_FILE ?? join(ROOT, 'data/tenant-links.json');
-const REQUESTS_DATA_FILE = process.env.REQUESTS_DATA_FILE ?? join(ROOT, 'data/requests.json');
 const SETTINGS_FILE = process.env.SETTINGS_FILE ?? join(ROOT, 'data/settings.json');
 
 const app = express();
 app.use(express.json());
 
-function loadTenants() {
-  return JSON.parse(readFileSync(TENANT_LINKS_FILE, 'utf-8'));
-}
-
-function loadRequests() {
-  return JSON.parse(readFileSync(REQUESTS_DATA_FILE, 'utf-8'));
-}
-
-function saveRequests(requests) {
-  writeFileSync(REQUESTS_DATA_FILE, JSON.stringify(requests, null, 2));
-}
-
-function findTenant(accessToken) {
-  return loadTenants().find(t => t.access_token === accessToken) ?? null;
-}
-
+// Still backs GET /api/settings-by-client/:clientId below - the n8n
+// "Juvonno Settings Backend" workflow reads a clinic's settings from this
+// file directly rather than from its own workflow static data (unreliable
+// for fast read-after-write between separate executions).
 function loadSettings() {
   try { return JSON.parse(readFileSync(SETTINGS_FILE, 'utf-8')); } catch { return {}; }
-}
-
-function saveSettingsFile(data) {
-  writeFileSync(SETTINGS_FILE, JSON.stringify(data, null, 2));
-}
-
-// ── n8n proxy helper (Payment Recovery + Call Logs) ─────────────────────────
-// These two feature areas keep no local storage on this server — n8n (backed
-// by Google Sheets / Juvonno) is the source of truth. The dashboard is a thin,
-// per-tenant proxy: it resolves :accessToken -> tenant, forwards an `event` +
-// payload to that tenant's own n8n_webhook_url, and relays back whatever n8n
-// responds with (via n8n's "Respond to Webhook" node). This keeps every
-// request scoped to one clinic's n8n instance, same as /settings scopes
-// writes to one clinic's data.
-async function callN8n(tenant, event, payload = {}) {
-  if (!tenant.n8n_webhook_url) {
-    const err = new Error('No n8n webhook configured for this clinic');
-    err.status = 502;
-    throw err;
-  }
-  let res;
-  try {
-    res = await fetch(tenant.n8n_webhook_url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(N8N_DASHBOARD_SECRET ? { 'X-Dashboard-Secret': N8N_DASHBOARD_SECRET } : {}),
-      },
-      body: JSON.stringify({
-        event,
-        client_id: tenant.client_id,
-        clinic_id: tenant.clinic_id,
-        clinic_name: tenant.clinic_name,
-        ...payload,
-      }),
-      signal: AbortSignal.timeout(15_000),
-    });
-  } catch (error) {
-    const err = new Error(error?.name === 'TimeoutError'
-      ? 'The payment recovery service timed out'
-      : 'The payment recovery service is unavailable');
-    err.status = error?.name === 'TimeoutError' ? 504 : 502;
-    throw err;
-  }
-  const text = await res.text();
-  let json;
-  try { json = text ? JSON.parse(text) : {}; } catch { json = { raw: text }; }
-  if (!res.ok) {
-    const err = new Error(json?.error ?? `n8n responded with ${res.status}`);
-    err.status = 502;
-    throw err;
-  }
-  return json;
-}
-
-// The Inbound Tracker n8n workflow (overview / analytics / calls / transcripts
-// / invoices) uses a different calling convention than callN8n above: separate
-// GET webhooks per path (e.g. /webhook/<client_id>/calls), each expecting a
-// `tenantId` query param, rather than one shared webhook keyed by an `event`
-// field. Each clinic gets its own copy of this workflow imported into the
-// same n8n instance under a path prefix matching its own client_id - so
-// multi-tenancy needs no new config field, just naming each clinic's webhook
-// paths to match its client_id when that clinic's workflow copy is set up.
-const INBOUND_TRACKER_HOST = 'https://n8n.getnapsolutions.com/webhook';
-
-async function callInboundTracker(tenant, path, query = {}) {
-  const url = new URL(`${INBOUND_TRACKER_HOST}/${tenant.client_id}/${path.replace(/^\/+/, '')}`);
-  url.searchParams.set('tenantId', tenant.access_token);
-  for (const [key, value] of Object.entries(query)) {
-    if (value !== undefined && value !== null) url.searchParams.set(key, String(value));
-  }
-  const res = await fetch(url);
-  const text = await res.text();
-  let json;
-  try { json = text ? JSON.parse(text) : {}; } catch { json = { raw: text }; }
-  if (!res.ok) {
-    const err = new Error(json?.error ?? `n8n responded with ${res.status}`);
-    err.status = 502;
-    throw err;
-  }
-  return json;
-}
-
-// The Outbound Tracker n8n workflow is a SEPARATE workflow from the inbound
-// one, with its own webhook prefix - for this tenant it's literally
-// "juvonno-outbound/<path>", not "<client_id>/outbound-<path>" under the
-// inbound prefix. Mirrors callInboundTracker's request/response handling,
-// just against `<client_id>-outbound/<path>` instead of `<client_id>/<path>`.
-async function callOutboundTracker(tenant, path, query = {}) {
-  const url = new URL(`${INBOUND_TRACKER_HOST}/${tenant.client_id}-outbound/${path.replace(/^\/+/, '')}`);
-  url.searchParams.set('tenantId', tenant.access_token);
-  for (const [key, value] of Object.entries(query)) {
-    if (value !== undefined && value !== null) url.searchParams.set(key, String(value));
-  }
-  const res = await fetch(url);
-  const text = await res.text();
-  let json;
-  try { json = text ? JSON.parse(text) : {}; } catch { json = { raw: text }; }
-  if (!res.ok) {
-    const err = new Error(json?.error ?? `n8n responded with ${res.status}`);
-    err.status = 502;
-    throw err;
-  }
-  return json;
-}
-
-// POST variant for outbound-tracker-prefixed webhooks that take a body
-// instead of query params (e.g. the "Make a Call" batch-call trigger).
-// Passes through n8n's response body AND status code, since that workflow
-// deliberately responds 400 with { success:false, invalidRows } on bad
-// input rather than a generic 502 - the caller needs to see that shape.
-async function postToOutboundTracker(tenant, path, body) {
-  const url = `${INBOUND_TRACKER_HOST}/${tenant.client_id}-outbound/${path.replace(/^\/+/, '')}`;
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-  const text = await res.text();
-  let json;
-  try { json = text ? JSON.parse(text) : {}; } catch { json = { raw: text }; }
-  return { status: res.status, json };
-}
-
-// Wraps a route handler that talks to n8n so failures come back as a clean
-// 502 instead of an unhandled rejection / stack trace to the client.
-function n8nRoute(handler) {
-  return async (req, res) => {
-    try {
-      await handler(req, res);
-    } catch (err) {
-      console.error(`[n8n proxy] ${req.method} ${req.originalUrl} failed:`, err.message);
-      res.status(err.status ?? 502).json({ error: err.message ?? 'Upstream n8n request failed' });
-    }
-  };
 }
 
 // Strict boolean coercion for values that may arrive as a real boolean, the
@@ -260,110 +108,26 @@ function buildN8nAllSettings(allSettings) {
 
 app.get('/health', (_req, res) => res.json({ ok: true }));
 
-// The entire /api/link/:accessToken/* MVP surface below is retired - the
-// dashboard is session-only now (real login, per-clinic authorization via
-// user_clinic_access). This blanket 410 sits before every /api/link route
-// definition so none of them are reachable anymore, without deleting the
-// route bodies themselves (kept only as reference/rollback material).
+// The entire /api/link/:accessToken/* MVP surface is retired - the dashboard
+// is session-only now (real login, per-clinic authorization via
+// user_clinic_access, multi-clinic-prompt.md). This blanket 410 is the only
+// thing left mounted at that prefix; every route body that used to live here
+// (tenant/queue/settings/billing/recovery/inbound/outbound, all keyed by a
+// bare access token) has been deleted along with the JSON-file helpers
+// (loadTenants/findTenant/loadRequests/saveRequests/callN8n/
+// callInboundTracker/callOutboundTracker/postToOutboundTracker/n8nRoute)
+// that only existed to serve it.
 app.use('/api/link', (_req, res) => {
   res.status(410).json({ error: { code: 'GONE', message: 'Access-token links have been retired. Please sign in.', retryable: false } });
-});
-
-// Frontend fetches tenant info (clinic name, receptionist, etc.)
-app.get('/api/link/:accessToken/tenant', (req, res) => {
-  const tenant = findTenant(req.params.accessToken);
-  if (!tenant) return res.status(404).json({ error: 'Invalid access token' });
-  const { access_token, ...info } = tenant;
-  res.json(info);
-});
-
-// n8n pushes incoming request data here
-app.post('/api/link/:accessToken/intake/requests', (req, res) => {
-  const apiKey = req.headers['x-dashboard-api-key'];
-  if (!DASHBOARD_API_KEY || apiKey !== DASHBOARD_API_KEY) {
-    return res.status(401).json({ error: 'Unauthorized' });
-  }
-
-  const tenant = findTenant(req.params.accessToken);
-  if (!tenant) return res.status(404).json({ error: 'Invalid access token' });
-
-  const requests = loadRequests();
-  const entry = {
-    ...req.body,
-    // These are always ours to set, never the caller's - a new request is
-    // always "New" regardless of what status (if any) the workflow sends,
-    // since staff should be the ones moving it through the queue.
-    id: randomUUID(),
-    client_id: tenant.client_id,
-    created_at: new Date().toISOString(),
-    status: 'New',
-  };
-  requests.push(entry);
-  saveRequests(requests);
-  res.status(201).json(entry);
-});
-
-// Frontend polls this to get the queue for a tenant
-app.get('/api/link/:accessToken/queue/requests', (req, res) => {
-  const tenant = findTenant(req.params.accessToken);
-  if (!tenant) return res.status(404).json({ error: 'Invalid access token' });
-
-  const requests = loadRequests();
-  res.json(requests.filter(r => r.client_id === tenant.client_id));
-});
-
-// Frontend updates a request's status
-app.patch('/api/link/:accessToken/queue/requests/:id', (req, res) => {
-  const tenant = findTenant(req.params.accessToken);
-  if (!tenant) return res.status(404).json({ error: 'Invalid access token' });
-
-  const requests = loadRequests();
-  const idx = requests.findIndex(
-    r => r.id === req.params.id && r.client_id === tenant.client_id
-  );
-  if (idx === -1) return res.status(404).json({ error: 'Request not found' });
-
-  requests[idx] = {
-    ...requests[idx],
-    ...req.body,
-    id: requests[idx].id,
-    client_id: requests[idx].client_id,
-  };
-  saveRequests(requests);
-  res.json(requests[idx]);
-});
-
-// Frontend deletes a request from the queue
-app.delete('/api/link/:accessToken/queue/requests/:id', (req, res) => {
-  const tenant = findTenant(req.params.accessToken);
-  if (!tenant) return res.status(404).json({ error: 'Invalid access token' });
-
-  const requests = loadRequests();
-  const idx = requests.findIndex(
-    r => r.id === req.params.id && r.client_id === tenant.client_id
-  );
-  if (idx === -1) return res.status(404).json({ error: 'Request not found' });
-
-  requests.splice(idx, 1);
-  saveRequests(requests);
-  res.status(204).end();
-});
-
-// ── Settings endpoints ────────────────────────────────────────────────────────
-
-// Return all saved settings for this tenant
-app.get('/api/link/:accessToken/settings', (req, res) => {
-  const tenant = findTenant(req.params.accessToken);
-  if (!tenant) return res.status(404).json({ error: 'Invalid access token' });
-  const all = loadSettings();
-  res.json(all[tenant.client_id] ?? {});
 });
 
 // Read-only settings lookup by client_id (no access token) — used by the
 // n8n "Juvonno Settings Backend" workflow's "Get Receptionist Config" chain,
 // so it can read settings directly from this server's synchronous file
 // storage instead of relying on n8n's own workflow static data (which is
-// unreliable for fast read-after-write between separate executions).
+// unreliable for fast read-after-write between separate executions). Kept
+// deliberately (multi-clinic-prompt.md §3.3) even though everything else in
+// the legacy surface above it is gone - n8n still calls this one directly.
 app.get('/api/settings-by-client/:clientId', (req, res) => {
   const apiKey = req.headers['x-dashboard-api-key'];
   if (!DASHBOARD_API_KEY || apiKey !== DASHBOARD_API_KEY) {
@@ -380,368 +144,16 @@ app.get('/api/settings-by-client/:clientId', (req, res) => {
   });
 });
 
-// Save all sections at once — body: { sections: { clinic_profile: {...}, practitioners: {...}, ... } }
-// Fires one webhook per section so n8n processes each independently
-app.put('/api/link/:accessToken/settings/bulk', async (req, res) => {
-  const tenant = findTenant(req.params.accessToken);
-  if (!tenant) return res.status(404).json({ error: 'Invalid access token' });
-  const { sections } = req.body;
-  if (!sections || typeof sections !== 'object') return res.status(400).json({ error: 'sections is required' });
-
-  const all = loadSettings();
-  const existing = all[tenant.client_id] ?? {};
-
-  for (const [section, data] of Object.entries(sections)) {
-    existing[section] = { ...(existing[section] ?? {}), ...data };
-  }
-  all[tenant.client_id] = existing;
-  saveSettingsFile(all);
-
-  res.json(existing);
-
-  // Fire sequentially after responding so concurrent executions don't race on
-  // n8n's read→merge→write pattern inside $getWorkflowStaticData('global').
-  if (tenant.n8n_webhook_url) {
-    (async () => {
-      for (const [section, data] of Object.entries(sections)) {
-        try {
-          await fetch(tenant.n8n_webhook_url, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              event: 'settings.changed',
-              client_id: tenant.client_id,
-              clinic_id: tenant.clinic_id,
-              clinic_name: tenant.clinic_name,
-              section,
-              changed: formatForN8n(section, data),
-              all_settings: buildN8nAllSettings(existing),
-            }),
-          });
-        } catch (err) {
-          console.error(`[webhook] failed to notify n8n for section "${section}" (${tenant.client_id}):`, err.message);
-        }
-      }
-    })();
-  }
-});
-
-// Save (merge) one section — body: { section: 'voice_personality', data: {...} }
-// After saving, fires a webhook to n8n so it can react (e.g. update Retell AI)
-app.put('/api/link/:accessToken/settings', async (req, res) => {
-  const tenant = findTenant(req.params.accessToken);
-  if (!tenant) return res.status(404).json({ error: 'Invalid access token' });
-  const { section, data } = req.body;
-  if (!section || !data) return res.status(400).json({ error: 'section and data are required' });
-
-  const all = loadSettings();
-  const existing = all[tenant.client_id] ?? {};
-  existing[section] = { ...(existing[section] ?? {}), ...data };
-  all[tenant.client_id] = existing;
-  saveSettingsFile(all);
-
-  res.json(existing);
-
-  if (tenant.n8n_webhook_url) {
-    fetch(tenant.n8n_webhook_url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        event: 'settings.changed',
-        client_id: tenant.client_id,
-        clinic_id: tenant.clinic_id,
-        clinic_name: tenant.clinic_name,
-        section,
-        changed: formatForN8n(section, data),
-        all_settings: buildN8nAllSettings(existing),
-      }),
-    }).catch(err => console.error(`[webhook] failed to notify n8n for section "${section}" (${tenant.client_id}):`, err.message));
-  }
-});
-
-// ── Payment Recovery (billing) endpoints ────────────────────────────────────
-// No local storage — every route resolves :accessToken -> tenant, then
-// proxies to that tenant's own n8n_webhook_url (see callN8n above) and
-// relays back n8n's response. n8n / Google Sheets is the single source of
-// truth for invoices, tasks, and communications.
-
-app.get('/api/link/:accessToken/billing/overview', n8nRoute(async (req, res) => {
-  const tenant = findTenant(req.params.accessToken);
-  if (!tenant) return res.status(404).json({ error: 'Invalid access token' });
-  res.json(await callN8n(tenant, 'billing.get_overview'));
-}));
-
-app.get('/api/link/:accessToken/billing/invoices', n8nRoute(async (req, res) => {
-  const tenant = findTenant(req.params.accessToken);
-  if (!tenant) return res.status(404).json({ error: 'Invalid access token' });
-  res.json(await callN8n(tenant, 'billing.get_invoices'));
-}));
-
-app.get('/api/link/:accessToken/billing/invoices/:invoiceId', n8nRoute(async (req, res) => {
-  const tenant = findTenant(req.params.accessToken);
-  if (!tenant) return res.status(404).json({ error: 'Invalid access token' });
-  res.json(await callN8n(tenant, 'billing.get_invoice', { invoice_id: req.params.invoiceId }));
-}));
-
-app.get('/api/link/:accessToken/billing/tasks', n8nRoute(async (req, res) => {
-  const tenant = findTenant(req.params.accessToken);
-  if (!tenant) return res.status(404).json({ error: 'Invalid access token' });
-  res.json(await callN8n(tenant, 'billing.get_tasks'));
-}));
-
-app.get('/api/link/:accessToken/billing/communications', n8nRoute(async (req, res) => {
-  const tenant = findTenant(req.params.accessToken);
-  if (!tenant) return res.status(404).json({ error: 'Invalid access token' });
-  res.json(await callN8n(tenant, 'billing.get_communications'));
-}));
-
-app.get('/api/link/:accessToken/billing/settings', n8nRoute(async (req, res) => {
-  const tenant = findTenant(req.params.accessToken);
-  if (!tenant) return res.status(404).json({ error: 'Invalid access token' });
-  res.json(await callN8n(tenant, 'billing.get_settings'));
-}));
-
-app.post('/api/link/:accessToken/billing/settings', n8nRoute(async (req, res) => {
-  const tenant = findTenant(req.params.accessToken);
-  if (!tenant) return res.status(404).json({ error: 'Invalid access token' });
-  res.json(await callN8n(tenant, 'billing.settings_changed', { settings: req.body }));
-}));
-
-// Staff-triggered invoice actions — each just forwards to n8n, which performs
-// the real side effect (Twilio send, Juvonno lookup, Sheets update) and
-// returns the updated invoice.
-function billingInvoiceAction(event) {
-  return n8nRoute(async (req, res) => {
-    const tenant = findTenant(req.params.accessToken);
-    if (!tenant) return res.status(404).json({ error: 'Invalid access token' });
-    res.json(await callN8n(tenant, event, { invoice_id: req.params.invoiceId }));
-  });
-}
-
-app.post('/api/link/:accessToken/billing/invoices/:invoiceId/send-now', billingInvoiceAction('billing.invoice.send_now'));
-app.post('/api/link/:accessToken/billing/invoices/:invoiceId/pause', billingInvoiceAction('billing.invoice.pause'));
-app.post('/api/link/:accessToken/billing/invoices/:invoiceId/resume', billingInvoiceAction('billing.invoice.resume'));
-app.post('/api/link/:accessToken/billing/invoices/:invoiceId/reconcile', billingInvoiceAction('billing.invoice.reconcile'));
-app.post('/api/link/:accessToken/billing/invoices/:invoiceId/escalate', billingInvoiceAction('billing.invoice.escalate'));
-
-app.post('/api/link/:accessToken/billing/tasks/:taskId/cancel', n8nRoute(async (req, res) => {
-  const tenant = findTenant(req.params.accessToken);
-  if (!tenant) return res.status(404).json({ error: 'Invalid access token' });
-  res.json(await callN8n(tenant, 'billing.task.cancel', { task_id: req.params.taskId }));
-}));
-
-// ── Payment Recovery (AI-call based) ────────────────────────────────────────
-// Separate from the `billing.*` endpoints above, which are the older
-// SMS/email-reminder model. This is the AI-outbound-call recovery workflow
-// (JUVONNO_PAYMENT_RECOVERY_DASHBOARD spec): Day-3 payment request -> Day-7/14
-// Retell call queue -> staff approval -> dispatch -> outcome -> reconciliation.
-// Same proxy pattern as callN8n - the n8n workflow just needs to listen for
-// these exact event names on the tenant's n8n_webhook_url.
-// Consolidated snapshot (metrics + invoices + queue + calls + activity +
-// settings in one response) so PaymentRecoveryScreen can make one request
-// instead of six. The individual routes below stay in place for backward
-// compatibility - nothing currently calling them breaks.
-app.get('/api/link/:accessToken/recovery/snapshot', n8nRoute(async (req, res) => {
-  const tenant = findTenant(req.params.accessToken);
-  if (!tenant) return res.status(404).json({ error: 'Invalid access token' });
-  res.json(await callN8n(tenant, 'recovery.get_snapshot'));
-}));
-
-app.get('/api/link/:accessToken/recovery/overview', n8nRoute(async (req, res) => {
-  const tenant = findTenant(req.params.accessToken);
-  if (!tenant) return res.status(404).json({ error: 'Invalid access token' });
-  res.json(await callN8n(tenant, 'recovery.get_overview'));
-}));
-
-app.get('/api/link/:accessToken/recovery/invoices', n8nRoute(async (req, res) => {
-  const tenant = findTenant(req.params.accessToken);
-  if (!tenant) return res.status(404).json({ error: 'Invalid access token' });
-  res.json(await callN8n(tenant, 'recovery.get_invoices'));
-}));
-
-app.get('/api/link/:accessToken/recovery/queue', n8nRoute(async (req, res) => {
-  const tenant = findTenant(req.params.accessToken);
-  if (!tenant) return res.status(404).json({ error: 'Invalid access token' });
-  res.json(await callN8n(tenant, 'recovery.get_queue'));
-}));
-
-app.get('/api/link/:accessToken/recovery/calls', n8nRoute(async (req, res) => {
-  const tenant = findTenant(req.params.accessToken);
-  if (!tenant) return res.status(404).json({ error: 'Invalid access token' });
-  res.json(await callN8n(tenant, 'recovery.get_calls'));
-}));
-
-app.get('/api/link/:accessToken/recovery/activity', n8nRoute(async (req, res) => {
-  const tenant = findTenant(req.params.accessToken);
-  if (!tenant) return res.status(404).json({ error: 'Invalid access token' });
-  res.json(await callN8n(tenant, 'recovery.get_activity'));
-}));
-
-app.get('/api/link/:accessToken/recovery/settings', n8nRoute(async (req, res) => {
-  const tenant = findTenant(req.params.accessToken);
-  if (!tenant) return res.status(404).json({ error: 'Invalid access token' });
-  res.json(await callN8n(tenant, 'recovery.get_settings'));
-}));
-
-app.post('/api/link/:accessToken/recovery/settings', n8nRoute(async (req, res) => {
-  const tenant = findTenant(req.params.accessToken);
-  if (!tenant) return res.status(404).json({ error: 'Invalid access token' });
-  res.json(await callN8n(tenant, 'recovery.settings_changed', { settings: req.body }));
-}));
-
-app.post('/api/link/:accessToken/recovery/queue/approve', n8nRoute(async (req, res) => {
-  const tenant = findTenant(req.params.accessToken);
-  if (!tenant) return res.status(404).json({ error: 'Invalid access token' });
-  res.json(await callN8n(tenant, 'recovery.queue.approve', { queue_ids: req.body?.queueIds ?? [] }));
-}));
-
-app.post('/api/link/:accessToken/recovery/queue/reject', n8nRoute(async (req, res) => {
-  const tenant = findTenant(req.params.accessToken);
-  if (!tenant) return res.status(404).json({ error: 'Invalid access token' });
-  res.json(await callN8n(tenant, 'recovery.queue.reject', { queue_ids: req.body?.queueIds ?? [], reason: req.body?.reason }));
-}));
-
-function recoveryInvoiceAction(event) {
-  return n8nRoute(async (req, res) => {
-    const tenant = findTenant(req.params.accessToken);
-    if (!tenant) return res.status(404).json({ error: 'Invalid access token' });
-    res.json(await callN8n(tenant, event, { invoice_id: req.params.invoiceId, reason: req.body?.reason }));
-  });
-}
-
-app.post('/api/link/:accessToken/recovery/invoices/:invoiceId/hold', recoveryInvoiceAction('recovery.invoice.hold'));
-app.post('/api/link/:accessToken/recovery/invoices/:invoiceId/resume', recoveryInvoiceAction('recovery.invoice.resume'));
-app.post('/api/link/:accessToken/recovery/invoices/:invoiceId/reconcile', recoveryInvoiceAction('recovery.invoice.reconcile'));
-app.post('/api/link/:accessToken/recovery/invoices/:invoiceId/escalate', recoveryInvoiceAction('recovery.invoice.escalate'));
-
-app.post('/api/link/:accessToken/billing/tasks/:taskId/reschedule', n8nRoute(async (req, res) => {
-  const tenant = findTenant(req.params.accessToken);
-  if (!tenant) return res.status(404).json({ error: 'Invalid access token' });
-  res.json(await callN8n(tenant, 'billing.task.reschedule', { task_id: req.params.taskId, scheduled_time: req.body?.scheduled_time }));
-}));
-
-// ── Call logs endpoint ───────────────────────────────────────────────────────
-// No local storage either — proxies to n8n, which owns inbound/outbound call
-// history. `direction` is passed through so n8n can filter or the dashboard
-// can filter the response client-side; entries carry direction: "inbound" |
-// "outbound" so Call Logs / Transcripts / Recordings can split by tab.
-app.get('/api/link/:accessToken/call-logs', n8nRoute(async (req, res) => {
-  const tenant = findTenant(req.params.accessToken);
-  if (!tenant) return res.status(404).json({ error: 'Invalid access token' });
-  res.json(await callN8n(tenant, 'call_logs.get', { direction: req.query.direction ?? null }));
-}));
-
-// ── Inbound Tracker endpoints ────────────────────────────────────────────────
-// Proxies to the "Juvonno Inbound Tracker" n8n workflow's own GET webhooks
-// (juvonno/overview, juvonno/analytics, juvonno/calls, juvonno/transcripts,
-// juvonno/invoices), which read call/billing history from Google Sheets.
-// Distinct from callN8n/call-logs above, which use a different (event-based)
-// workflow convention.
-app.get('/api/link/:accessToken/inbound/overview', n8nRoute(async (req, res) => {
-  const tenant = findTenant(req.params.accessToken);
-  if (!tenant) return res.status(404).json({ error: 'Invalid access token' });
-  res.json(await callInboundTracker(tenant, 'overview'));
-}));
-
-app.get('/api/link/:accessToken/inbound/analytics', n8nRoute(async (req, res) => {
-  const tenant = findTenant(req.params.accessToken);
-  if (!tenant) return res.status(404).json({ error: 'Invalid access token' });
-  res.json(await callInboundTracker(tenant, 'analytics', { range: req.query.range ?? 1 }));
-}));
-
-app.get('/api/link/:accessToken/inbound/calls', n8nRoute(async (req, res) => {
-  const tenant = findTenant(req.params.accessToken);
-  if (!tenant) return res.status(404).json({ error: 'Invalid access token' });
-  res.json(await callInboundTracker(tenant, 'calls'));
-}));
-
-app.get('/api/link/:accessToken/inbound/transcripts', n8nRoute(async (req, res) => {
-  const tenant = findTenant(req.params.accessToken);
-  if (!tenant) return res.status(404).json({ error: 'Invalid access token' });
-  res.json(await callInboundTracker(tenant, 'transcripts'));
-}));
-
-app.get('/api/link/:accessToken/inbound/invoices', n8nRoute(async (req, res) => {
-  const tenant = findTenant(req.params.accessToken);
-  if (!tenant) return res.status(404).json({ error: 'Invalid access token' });
-  res.json(await callInboundTracker(tenant, 'invoices'));
-}));
-
-// ── Outbound Tracker endpoints ───────────────────────────────────────────────
-// Proxies to the "Juvonno Outbound Tracker" n8n workflow's own GET webhooks
-// (<client_id>-outbound/overview, /analytics, /calls, /transcripts,
-// /invoices) - a separate workflow from the inbound one, with its own
-// Google Sheet, so these use callOutboundTracker rather than
-// callInboundTracker even though the response shapes are identical.
-app.get('/api/link/:accessToken/outbound/overview', n8nRoute(async (req, res) => {
-  const tenant = findTenant(req.params.accessToken);
-  if (!tenant) return res.status(404).json({ error: 'Invalid access token' });
-  res.json(await callOutboundTracker(tenant, 'overview'));
-}));
-
-app.get('/api/link/:accessToken/outbound/analytics', n8nRoute(async (req, res) => {
-  const tenant = findTenant(req.params.accessToken);
-  if (!tenant) return res.status(404).json({ error: 'Invalid access token' });
-  res.json(await callOutboundTracker(tenant, 'analytics', { range: req.query.range ?? 1 }));
-}));
-
-app.get('/api/link/:accessToken/outbound/calls', n8nRoute(async (req, res) => {
-  const tenant = findTenant(req.params.accessToken);
-  if (!tenant) return res.status(404).json({ error: 'Invalid access token' });
-  res.json(await callOutboundTracker(tenant, 'calls'));
-}));
-
-app.get('/api/link/:accessToken/outbound/transcripts', n8nRoute(async (req, res) => {
-  const tenant = findTenant(req.params.accessToken);
-  if (!tenant) return res.status(404).json({ error: 'Invalid access token' });
-  res.json(await callOutboundTracker(tenant, 'transcripts'));
-}));
-
-app.get('/api/link/:accessToken/outbound/invoices', n8nRoute(async (req, res) => {
-  const tenant = findTenant(req.params.accessToken);
-  if (!tenant) return res.status(404).json({ error: 'Invalid access token' });
-  res.json(await callOutboundTracker(tenant, 'invoices'));
-}));
-
-// Triggers the "Make a Call" batch-call workflow - body:
-// { contacts: [{phone_number, first_name?, last_name?, full_name?}, ...], name?: string }
-// Matches the outbound tracker's recipient contract (see
-// FRONTEND_HANDOFF.md). clinic_id/client_id are set here from the resolved
-// tenant rather than trusted from the request body, so the browser can't
-// spoof which clinic a batch call is billed/logged against.
-app.post('/api/link/:accessToken/outbound/make-call', n8nRoute(async (req, res) => {
-  const tenant = findTenant(req.params.accessToken);
-  if (!tenant) return res.status(404).json({ error: 'Invalid access token' });
-  const { contacts, name } = req.body ?? {};
-  if (!Array.isArray(contacts) || contacts.length === 0) {
-    return res.status(400).json({ success: false, error: 'contacts must be a non-empty array' });
-  }
-  const normalized = contacts.map((c) => {
-    const phone_number = String(c?.phone_number ?? c?.phoneNumber ?? '').trim();
-    const first_name = String(c?.first_name ?? c?.firstName ?? '').trim();
-    const last_name = String(c?.last_name ?? c?.lastName ?? '').trim();
-    const full_name = String(c?.full_name ?? c?.fullName ?? '').trim() || [first_name, last_name].filter(Boolean).join(' ');
-    return { phone_number, first_name, last_name, full_name, clinic_id: tenant.clinic_id, client_id: tenant.client_id };
-  });
-  if (normalized.some(c => !c.phone_number)) {
-    return res.status(400).json({ success: false, error: 'Every contact must have a phone_number' });
-  }
-  const { status, json } = await postToOutboundTracker(tenant, 'make-call', { contacts: normalized, name });
-  res.status(status).json(json);
-}));
-
 // ═══════════════════════════════════════════════════════════════════════════
-// Production RivaCare API (RIVACARE-FRONTEND-DEVELOPER-HANDOFF.md) — replaces
-// the /api/link/:accessToken/* MVP surface above with server-controlled
-// sessions, verified (tenant_id, clinic_id) scoping via Prisma/Postgres, and
-// the new shared n8n webhook contracts (server/n8n.js). The legacy routes
-// above are left untouched for backward compatibility during migration
-// (handoff §3.4) — nothing that currently works stops working.
+// Production RivaCare API (RIVACARE-FRONTEND-DEVELOPER-HANDOFF.md,
+// multi-clinic-prompt.md) — server-controlled sessions, verified
+// (tenant_id, clinic_id) scoping via Prisma/Postgres, and the shared n8n
+// webhook contracts (server/n8n.js). This is the only surface the frontend
+// talks to now; the legacy /api/link/:accessToken/* MVP surface above it is
+// fully retired (410 only, route bodies deleted).
 // ═══════════════════════════════════════════════════════════════════════════
 
 // Uniform error contract (handoff §13): { error: { code, message, retryable } }.
-// Distinct from the legacy n8nRoute() above, which keeps its old flat shape
-// so existing /api/link/* callers don't see a breaking change.
 function apiRoute(handler) {
   return async (req, res) => {
     try {
@@ -791,7 +203,11 @@ app.post('/api/auth/login', rateLimit('login', 10, 60_000), apiRoute(async (req,
     throw err;
   }
   const clinics = await clinicsForUser(user.id, user.tenant_id);
-  const activeClinicId = clinics[0]?.clinicId ?? null;
+  // Only auto-select when there's exactly one clinic to choose from -
+  // with 2+, the frontend must show the clinic picker rather than silently
+  // landing on whichever clinic happened to sort first (multi-clinic-prompt.md
+  // §2: "clinic picker screen after login when 2+ clinics and none selected").
+  const activeClinicId = clinics.length === 1 ? clinics[0].clinicId : null;
   const csrfToken = issueSession(res, { userId: user.id, tenantId: user.tenant_id, activeClinicId });
   res.json({ userId: user.id, tenantId: user.tenant_id, clinics, activeClinicId, csrfToken });
 }));
@@ -820,7 +236,10 @@ app.get('/api/auth/session', requireSession, apiRoute(async (req, res) => {
 // ── Clinic selection (§5, §12) ───────────────────────────────────────────────
 app.get('/api/clinics', requireSession, apiRoute(async (req, res) => {
   const clinics = await clinicsForUser(req.session.userId, req.session.tenantId);
-  res.json({ tenantId: req.session.tenantId, clinics, activeClinicId: req.session.activeClinicId ?? clinics[0]?.clinicId ?? null });
+  // Same single-clinic auto-select rule as login - never default to
+  // clinics[0] when there's more than one, that's the picker's job.
+  const fallback = clinics.length === 1 ? clinics[0].clinicId : null;
+  res.json({ tenantId: req.session.tenantId, clinics, activeClinicId: req.session.activeClinicId ?? fallback });
 }));
 
 app.post('/api/session/active-clinic', requireSession, requireCsrf, apiRoute(async (req, res) => {
@@ -968,6 +387,19 @@ app.get('/api/dashboard/outbound/transcripts', ...dashboardAuth, apiRoute(async 
 }));
 app.get('/api/dashboard/outbound/invoices', ...dashboardAuth, apiRoute(async (req, res) => {
   res.json(await n8nProd.outbound.invoices(req.session.tenantId, req.clinicId));
+}));
+app.post('/api/dashboard/outbound/make-call', ...dashboardAuth, rateLimit('outbound-make-call', 10, 60_000), apiRoute(async (req, res) => {
+  const { contacts, name } = req.body ?? {};
+  if (!Array.isArray(contacts) || contacts.length === 0) throw badRequest('contacts must be a non-empty array.');
+  const normalized = contacts.map((c) => {
+    const phone_number = String(c?.phone_number ?? '').trim();
+    const first_name = String(c?.first_name ?? '').trim();
+    const last_name = String(c?.last_name ?? '').trim();
+    const full_name = String(c?.full_name ?? '').trim() || [first_name, last_name].filter(Boolean).join(' ');
+    return { phone_number, first_name, last_name, full_name };
+  });
+  if (normalized.some((c) => !c.phone_number)) throw badRequest('Every contact must have a phone_number.');
+  res.json(await n8nProd.outbound.makeCall(req.session.tenantId, req.clinicId, { contacts: normalized, name }));
 }));
 
 // ── Settings (§6.1, §8) ──────────────────────────────────────────────────────

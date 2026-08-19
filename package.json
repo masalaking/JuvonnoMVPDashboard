@@ -9,7 +9,8 @@
     "start": "node server/index.js",
     "db:pull": "prisma db pull --schema=prisma/schema.prisma",
     "db:generate": "prisma generate",
-    "db:sync": "npm run db:pull && npm run db:generate"
+    "db:sync": "npm run db:pull && npm run db:generate",
+    "clinics": "node scripts/clinics.js"
   },
   "dependencies": {
     "@emotion/react": "11.14.0",

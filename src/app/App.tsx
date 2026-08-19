@@ -16,6 +16,8 @@ import {
   XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer,
   AreaChart, Area, LabelList
 } from "recharts";
+import { Popover, PopoverContent, PopoverTrigger } from "./components/ui/popover";
+import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from "./components/ui/command";
 
 // ── Palette helpers ──────────────────────────────────────────────────────────
 // Healthcare-appropriate teal/white palette. `PURPLE` keeps its name (renaming
@@ -240,7 +242,7 @@ function useDashboard() { return useContext(DashboardContext); }
 // Legacy /t/:token links bypass this entirely (see AppGate below) - a
 // tenant/clinic-verified server session is the new path; the old
 // access-token link is left alone as-is.
-interface ClinicOption { clinicId: string; clinicName: string; role: string }
+interface ClinicOption { clinicId: string; clinicName: string; role: string; status: string | null; timezone: string | null }
 interface AuthSession { userId: string; tenantId: string; activeClinicId: string | null; clinics: ClinicOption[]; csrfToken: string }
 
 interface AuthCtx {
@@ -249,6 +251,9 @@ interface AuthCtx {
   login: (username: string, password: string) => Promise<{ ok: boolean; error?: string }>;
   logout: () => Promise<void>;
   switchClinic: (clinicId: string) => Promise<{ ok: boolean; error?: string }>;
+  // Phase 5 (multi-clinic-prompt.md §5) edge cases:
+  handleUnauthorized: () => void;
+  refreshClinics: () => Promise<void>;
 }
 
 const AuthContext = createContext<AuthCtx>({
@@ -257,6 +262,8 @@ const AuthContext = createContext<AuthCtx>({
   login: async () => ({ ok: false }),
   logout: async () => {},
   switchClinic: async () => ({ ok: false }),
+  handleUnauthorized: () => {},
+  refreshClinics: async () => {},
 });
 function useAuth() { return useContext(AuthContext); }
 
@@ -412,7 +419,39 @@ function AuthProvider({ children }: { children: React.ReactNode }) {
     }
   }
 
-  return <AuthContext.Provider value={{ session, authLoading, login, logout, switchClinic }}>{children}</AuthContext.Provider>;
+  // A 401 from ANY /api/dashboard/* call means the session is no longer
+  // valid server-side (expired, secret rotated, etc.) - clear it locally too
+  // rather than leaving the UI showing stale data behind a dead session
+  // (multi-clinic-prompt.md §5). No server round-trip needed: the session
+  // the server already rejected can't be un-rejected by calling /logout.
+  function handleUnauthorized() {
+    setSession(null);
+  }
+
+  // A 403 on a dashboard call means the CURRENT clinic access was revoked
+  // mid-session (multi-clinic-prompt.md §5). Re-fetch the user's real clinic
+  // list; if the active clinic is no longer in it, drop activeClinicId so
+  // AppGate routes to the picker (or the empty state) instead of continuing
+  // to poll a clinic this user can no longer see.
+  async function refreshClinics() {
+    if (!session) return;
+    try {
+      const res = await fetch("/api/clinics", { credentials: "include" });
+      if (res.status === 401) return handleUnauthorized();
+      if (!res.ok) return;
+      const data = await res.json();
+      const clinics: ClinicOption[] = Array.isArray(data.clinics) ? data.clinics : [];
+      setSession(prev => {
+        if (!prev) return prev;
+        const stillHasAccess = prev.activeClinicId ? clinics.some(c => c.clinicId === prev.activeClinicId) : false;
+        return { ...prev, clinics, activeClinicId: stillHasAccess ? prev.activeClinicId : null };
+      });
+    } catch {
+      // Network error - leave the session as-is rather than guessing.
+    }
+  }
+
+  return <AuthContext.Provider value={{ session, authLoading, login, logout, switchClinic, handleUnauthorized, refreshClinics }}>{children}</AuthContext.Provider>;
 }
 
 function LoginScreen() {
@@ -472,13 +511,25 @@ function LoginScreen() {
   );
 }
 
-// Clinic switcher shown in the top bar under session auth. Nothing is
-// rendered in legacy access-token mode (a link is already scoped to one
-// clinic, there's nothing to switch between).
+function ClinicStatusDot({ status }: { status: string | null }) {
+  const normalized = (status ?? "").toLowerCase();
+  const color = normalized === "active" ? "bg-emerald-500" : normalized === "" || normalized == null ? "bg-slate-300" : "bg-amber-500";
+  return <span className={`inline-block w-1.5 h-1.5 rounded-full ${color}`} />;
+}
+
+// Clinic switcher shown in the top bar under session auth - hidden entirely
+// when the user only has one clinic (multi-clinic-prompt.md §2: "auto-select
+// when exactly 1 clinic, hide switcher") since there's nothing to switch
+// between. Built on the existing shadcn Popover+Command primitives so it's
+// searchable rather than a plain <select>, and shows each clinic's role and
+// status instead of just its name.
 function ClinicSwitcher() {
   const { session, switchClinic } = useAuth();
+  const [open, setOpen] = useState(false);
   const [switching, setSwitching] = useState(false);
-  if (!session || session.clinics.length === 0) return null;
+  if (!session || session.clinics.length <= 1) return null;
+
+  const active = session.clinics.find(c => c.clinicId === session.activeClinicId) ?? null;
 
   // No reload: switchClinic (AuthProvider) sets session.activeClinicId
   // optimistically and persists the choice to the server in the background.
@@ -486,8 +537,8 @@ function ClinicSwitcher() {
   // when that context value changes, which is what actually swaps the
   // screen's data - a full page reload was never buying correctness, just
   // masking the fact that nothing was listening for the change.
-  async function handleChange(e: React.ChangeEvent<HTMLSelectElement>) {
-    const clinicId = e.target.value;
+  async function handleSelect(clinicId: string) {
+    setOpen(false);
     if (clinicId === session!.activeClinicId) return;
     setSwitching(true);
     const result = await switchClinic(clinicId);
@@ -500,16 +551,112 @@ function ClinicSwitcher() {
   }
 
   return (
-    <select
-      value={session.activeClinicId ?? ""}
-      onChange={handleChange}
-      disabled={switching}
-      className="bg-muted border border-border rounded-md px-2.5 py-1.5 text-xs font-medium text-foreground focus:outline-none focus:ring-1 focus:ring-ring disabled:opacity-50"
-    >
-      {session.clinics.map((c) => (
-        <option key={c.clinicId} value={c.clinicId}>{c.clinicName}</option>
-      ))}
-    </select>
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          disabled={switching}
+          className="flex items-center gap-1.5 bg-muted border border-border rounded-md px-2.5 py-1.5 text-xs font-medium text-foreground hover:bg-accent focus:outline-none focus:ring-1 focus:ring-ring disabled:opacity-50 max-w-[220px]"
+        >
+          <ClinicStatusDot status={active?.status ?? null} />
+          <span className="truncate">{active?.clinicName ?? "Select clinic"}</span>
+          <ChevronDown size={12} className="text-muted-foreground shrink-0" />
+        </button>
+      </PopoverTrigger>
+      <PopoverContent className="w-72 p-0" align="start">
+        <Command>
+          <CommandInput placeholder="Search clinics…" />
+          <CommandList>
+            <CommandEmpty>No clinics found.</CommandEmpty>
+            <CommandGroup>
+              {session.clinics.map((c) => (
+                <CommandItem key={c.clinicId} value={c.clinicName} onSelect={() => handleSelect(c.clinicId)}>
+                  <ClinicStatusDot status={c.status} />
+                  <span className="flex-1 truncate">{c.clinicName}</span>
+                  <span className="text-[10px] uppercase tracking-wide text-muted-foreground border border-border rounded px-1.5 py-0.5">{c.role}</span>
+                  {c.clinicId === session.activeClinicId && <Check size={14} className="text-teal-600" />}
+                </CommandItem>
+              ))}
+            </CommandGroup>
+          </CommandList>
+        </Command>
+      </PopoverContent>
+    </Popover>
+  );
+}
+
+// Shown after login when the user has 2+ clinics and none is active yet
+// (multi-clinic-prompt.md §2) - there is deliberately no "all clinics"
+// aggregate option here, only a choice of exactly one.
+function ClinicPickerScreen() {
+  const { session, switchClinic, logout } = useAuth();
+  const [selecting, setSelecting] = useState<string | null>(null);
+  const [error, setError] = useState("");
+
+  async function handlePick(clinicId: string) {
+    setSelecting(clinicId);
+    setError("");
+    const result = await switchClinic(clinicId);
+    setSelecting(null);
+    if (!result.ok) setError(result.error ?? "Could not select this clinic.");
+  }
+
+  return (
+    <div className="min-h-screen flex items-center justify-center bg-muted p-4">
+      <div className="w-full max-w-md bg-card border border-border rounded-lg shadow-sm p-6 space-y-4">
+        <div>
+          <h1 className="text-lg font-semibold text-foreground">Select a clinic</h1>
+          <p className="text-xs text-muted-foreground mt-1">Choose which clinic's dashboard to open.</p>
+        </div>
+        {error && <p className="text-xs text-red-600">{error}</p>}
+        <div className="space-y-2 max-h-80 overflow-y-auto">
+          {(session?.clinics ?? []).map((c) => (
+            <button
+              key={c.clinicId}
+              type="button"
+              disabled={selecting !== null}
+              onClick={() => handlePick(c.clinicId)}
+              className="w-full flex items-center gap-2.5 text-left bg-input-background border border-border rounded-md px-3 py-2.5 hover:border-teal-500 hover:bg-accent transition-colors disabled:opacity-50"
+            >
+              <ClinicStatusDot status={c.status} />
+              <div className="flex-1 min-w-0">
+                <div className="text-sm font-medium text-foreground truncate">{c.clinicName}</div>
+                <div className="text-[11px] text-muted-foreground capitalize">{c.role}{c.timezone ? ` · ${c.timezone}` : ""}</div>
+              </div>
+              {selecting === c.clinicId ? (
+                <span className="text-xs text-muted-foreground">Opening…</span>
+              ) : (
+                <ChevronRight size={14} className="text-muted-foreground shrink-0" />
+              )}
+            </button>
+          ))}
+        </div>
+        <button type="button" onClick={() => logout()} className="text-xs text-muted-foreground hover:text-foreground">
+          Sign out
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// Shown when a signed-in user has no clinics at all (multi-clinic-prompt.md
+// §5) - distinct from the picker above so "you have nothing to pick from"
+// never looks like a broken/empty picker list.
+function NoClinicsScreen() {
+  const { logout } = useAuth();
+  return (
+    <div className="min-h-screen flex items-center justify-center bg-muted p-4">
+      <div className="w-full max-w-sm bg-card border border-border rounded-lg shadow-sm p-6 space-y-3 text-center">
+        <div className="w-12 h-12 rounded-full bg-muted flex items-center justify-center mx-auto">
+          <Building2 size={20} className="text-muted-foreground" />
+        </div>
+        <h1 className="text-sm font-semibold text-foreground">No clinics assigned</h1>
+        <p className="text-xs text-muted-foreground">Your account doesn't have access to any clinic yet. Contact an administrator to get access.</p>
+        <button type="button" onClick={() => logout()} className="text-xs text-teal-600 hover:underline">
+          Sign out
+        </button>
+      </div>
+    </div>
   );
 }
 
@@ -1601,7 +1748,8 @@ function parseContactsCsv(text: string): CsvContact[] {
 }
 
 function MakeCallScreen() {
-  const { accessToken } = useDashboard();
+  const { activeClinicId } = useDashboard();
+  const { session } = useAuth();
   const [contacts, setContacts] = useState<CsvContact[]>([]);
   const [fileName, setFileName] = useState("");
   const [batchName, setBatchName] = useState("");
@@ -1628,26 +1776,25 @@ function MakeCallScreen() {
   }
 
   async function startBatchCall() {
-    if (!accessToken || validContacts.length === 0) return;
+    if (!activeClinicId || validContacts.length === 0) return;
     setSubmitting(true);
     setResult(null);
     try {
-      const res = await fetch(`/api/link/${accessToken}/outbound/make-call`, {
+      const res = await apiFetch(activeClinicId, session?.csrfToken, "/outbound/make-call", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
+        body: {
           name: batchName || undefined,
           // Matches the outbound tracker's recipient contract: E.164
           // phone_number plus first/last/full name as Retell dynamic
-          // variables. clinic_id/client_id are added server-side from the
-          // authenticated tenant, not trusted from the browser.
+          // variables. clinic_id/tenant_id are added server-side from the
+          // verified session, not trusted from the browser.
           contacts: validContacts.map(c => ({
             phone_number: c.phoneNumber.trim(),
             first_name: c.firstName.trim(),
             last_name: c.lastName.trim(),
             full_name: [c.firstName.trim(), c.lastName.trim()].filter(Boolean).join(" "),
           })),
-        }),
+        },
       });
       const json = await res.json().catch(() => ({}));
       if (res.ok && json.success !== false) {
@@ -1788,7 +1935,7 @@ function MakeCallScreen() {
 
 // ── Screen: Trends ────────────────────────────────────────────────────────────
 function TrendsScreen() {
-  // TODO: Replace with real insights from /api/link/:accessToken/analytics/insights
+  // TODO: Replace with real insights from a dedicated /api/dashboard/analytics/insights route
   // These are generated from call transcripts, sentiment analysis, and call outcomes via n8n
   const insights = [
     { icon: Clock, color: "violet", title: "Peak Call Times", body: "Most calls this week happened between 10 AM and 1 PM, with a secondary peak at 3–4 PM." },
@@ -5051,16 +5198,32 @@ export default function App() {
 }
 
 function AppGate() {
-  const { session, authLoading } = useAuth();
+  const { session, authLoading, switchClinic } = useAuth();
+  const singleClinicId = session && session.clinics.length === 1 ? session.clinics[0].clinicId : null;
+  // Login already auto-selects a lone clinic, but an older session cookie
+  // (issued before that server fix, or one restored via GET /api/auth/session
+  // for a user newly down to one clinic) can still have activeClinicId===null
+  // here - auto-select rather than showing a one-item picker.
+  useEffect(() => {
+    if (singleClinicId && !session?.activeClinicId) switchClinic(singleClinicId);
+  }, [singleClinicId, session?.activeClinicId]);
+
   if (authLoading) {
     return <div className="min-h-screen flex items-center justify-center text-sm text-muted-foreground">Loading…</div>;
   }
   if (!session) return <LoginScreen />;
+  if (session.clinics.length === 0) return <NoClinicsScreen />;
+  // 2+ clinics and none selected yet - show the picker instead of guessing
+  // (multi-clinic-prompt.md §2).
+  if (!session.activeClinicId) {
+    if (singleClinicId) return <div className="min-h-screen flex items-center justify-center text-sm text-muted-foreground">Loading…</div>;
+    return <ClinicPickerScreen />;
+  }
   return <DashboardShell />;
 }
 
 function DashboardShell() {
-  const { session, logout } = useAuth();
+  const { session, logout, handleUnauthorized, refreshClinics } = useAuth();
   const [activeNav, setActiveNav] = useState("overview");
   const activeClinicId = session?.activeClinicId ?? null;
   const csrfToken = session?.csrfToken;
@@ -5159,6 +5322,14 @@ function DashboardShell() {
       const rank = (s: number) => (s === 401 ? 0 : s === 403 ? 1 : 2);
       const worst = [...failures].sort((a, b) => rank(a.status) - rank(b.status))[0];
       setLoadError(describeLoadFailure(worst.status));
+      // Edge cases (multi-clinic-prompt.md §5): a 401 means the session
+      // itself is dead - clear it so AppGate falls back to the login screen
+      // instead of continuing to show a dashboard behind a rejected session.
+      // A 403 means THIS clinic's access was revoked mid-session - re-fetch
+      // the real clinic list so AppGate routes to the picker/empty state if
+      // it's really gone, rather than retrying a clinic this user can't see.
+      if (worst.status === 401) handleUnauthorized();
+      else if (worst.status === 403) refreshClinics();
     } else {
       setLoadError(null);
     }
