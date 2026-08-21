@@ -79,7 +79,7 @@ async function createClinic(args) {
 
   await ensureTenant(tenantId);
   const clinic = await prisma.clinic_configs.upsert({
-    where: { clinic_configs_tenant_clinic_uidx: { tenant_id: tenantId, clinic_id: clinicId } },
+    where: { tenant_id_clinic_id: { tenant_id: tenantId, clinic_id: clinicId } },
     update: { clinic_name: clinicName, timezone, status },
     create: { tenant_id: tenantId, clinic_id: clinicId, client_id: clientId, clinic_name: clinicName, timezone, status },
   });
@@ -107,7 +107,7 @@ async function grant(args) {
     throw new Error(`User "${username}" belongs to tenant ${user.tenant_id}, not ${tenantId} - one login belongs to exactly one tenant.`);
   }
   const clinic = await prisma.clinic_configs.findUnique({
-    where: { clinic_configs_tenant_clinic_uidx: { tenant_id: tenantId, clinic_id: clinicId } },
+    where: { tenant_id_clinic_id: { tenant_id: tenantId, clinic_id: clinicId } },
   });
   if (!clinic) throw new Error(`No clinic "${clinicId}" found under tenant ${tenantId} - create it first with create-clinic.`);
   await prisma.user_clinic_access.upsert({
