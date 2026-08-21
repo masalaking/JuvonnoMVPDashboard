@@ -417,6 +417,31 @@ app.get('/api/dashboard/settings/retell-options', ...dashboardAuth, requireRole(
   res.json(await n8nProd.getRetellOptions(req.session.tenantId, req.clinicId));
 }));
 
+// ── SMS Follow-Ups (FRONTEND-DEVELOPER-HANDOFF-SMS-ONLY.md) ─────────────────
+// Returns only the safe, normalized fields the workflow sends - never
+// Twilio credentials, raw provider payloads, or raw n8n errors. Missing
+// count values default to 0 rather than surfacing as an error, since a new
+// clinic legitimately has no SMS history yet.
+app.get('/api/dashboard/sms-follow-ups/status', ...dashboardAuth, apiRoute(async (req, res) => {
+  const raw = await n8nProd.getSmsFollowupStatus(req.session.tenantId, req.clinicId);
+  const counts = raw?.last_24_hours ?? {};
+  res.json({
+    success: raw?.success === true,
+    provider: raw?.sms_enabled ? String(raw?.provider ?? 'twilio') : null,
+    sms_enabled: raw?.sms_enabled === true,
+    sender_status: String(raw?.sender_status ?? 'not_configured'),
+    masked_from_number: raw?.masked_from_number ? String(raw.masked_from_number) : null,
+    last_24_hours: {
+      jobs: Number(counts.jobs) || 0,
+      pending: Number(counts.pending) || 0,
+      sent: Number(counts.sent) || 0,
+      delivered: Number(counts.delivered) || 0,
+      failed: Number(counts.failed) || 0,
+      suppressed: Number(counts.suppressed) || 0,
+    },
+  });
+}));
+
 // ── Payment Recovery (§6.4) ──────────────────────────────────────────────────
 app.get('/api/dashboard/recovery/snapshot', ...dashboardAuth, apiRoute(async (req, res) => {
   res.json(await n8nProd.recoveryEvent('recovery.get_snapshot', req.session.tenantId, req.clinicId));

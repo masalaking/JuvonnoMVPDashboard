@@ -3027,6 +3027,106 @@ const SETTINGS_SECTION_META: Record<string, { icon: any; subtitle: string; optio
   "SMS Follow-Ups": { icon: Send, subtitle: "Patient messages sent after booking and appointment events.", optional: true },
 };
 
+interface SmsFollowupStatus {
+  success: boolean;
+  provider?: string;
+  sms_enabled: boolean;
+  sender_status: string;
+  masked_from_number?: string;
+  last_24_hours?: { jobs?: number; pending?: number; sent?: number; delivered?: number; failed?: number; suppressed?: number };
+}
+
+// Read-only sender/delivery status panel (FRONTEND-DEVELOPER-HANDOFF-SMS-ONLY.md).
+// Fetches once on mount plus a manual refresh button - deliberately no
+// polling, this isn't a live-updating dashboard widget.
+function SmsStatusPanel() {
+  const { activeClinicId } = useDashboard();
+  const { session } = useAuth();
+  const [status, setStatus] = useState<SmsFollowupStatus | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(false);
+
+  async function load() {
+    if (!activeClinicId) return;
+    setLoading(true);
+    setError(false);
+    try {
+      const res = await apiFetch(activeClinicId, session?.csrfToken, "/sms-follow-ups/status");
+      if (!res.ok) { setError(true); setStatus(null); return; }
+      const data = await res.json();
+      setStatus(data);
+    } catch {
+      setError(true);
+      setStatus(null);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => { load(); }, [activeClinicId]);
+
+  const counts = status?.last_24_hours ?? {};
+  const statusLabel = !status
+    ? null
+    : status.sms_enabled && status.sender_status === "ready"
+    ? { text: "SMS sending is active", tone: "emerald" }
+    : !status.sms_enabled
+    ? { text: "SMS is disabled for this clinic", tone: "muted" }
+    : { text: "Configuration issue — contact an administrator", tone: "amber" };
+
+  return (
+    <Card className="p-4 space-y-3">
+      <div className="flex items-center justify-between">
+        <p className="text-xs font-semibold text-foreground">Sender & Delivery Status</p>
+        <button
+          type="button"
+          onClick={load}
+          disabled={loading}
+          className="flex items-center gap-1 text-[10px] font-medium text-muted-foreground hover:text-foreground transition-colors disabled:opacity-50"
+        >
+          <RefreshCw size={11} className={loading ? "animate-spin" : ""} /> Refresh status
+        </button>
+      </div>
+      {error ? (
+        <p className="text-xs text-destructive">Could not load SMS status. Try refreshing.</p>
+      ) : !status ? (
+        <p className="text-xs text-muted-foreground">{loading ? "Loading…" : "No status yet."}</p>
+      ) : (
+        <>
+          {statusLabel && (
+            <div className={`text-xs font-medium rounded-md px-2.5 py-1.5 inline-flex items-center gap-1.5 ${
+              statusLabel.tone === "emerald" ? "bg-emerald-50 text-emerald-700" :
+              statusLabel.tone === "amber" ? "bg-amber-50 text-amber-700" :
+              "bg-muted text-muted-foreground"
+            }`}>
+              {statusLabel.tone === "emerald" ? <Wifi size={12} /> : statusLabel.tone === "amber" ? <AlertTriangle size={12} /> : <WifiOff size={12} />}
+              {statusLabel.text}
+            </div>
+          )}
+          <div className="grid grid-cols-4 gap-3 text-xs">
+            <div>
+              <p className="text-muted-foreground text-[10px] uppercase tracking-wide">Provider</p>
+              <p className="font-medium text-foreground">{status.sms_enabled ? (status.provider ? status.provider[0].toUpperCase() + status.provider.slice(1) : "Twilio") : "Disabled"}</p>
+            </div>
+            <div>
+              <p className="text-muted-foreground text-[10px] uppercase tracking-wide">Sender</p>
+              <p className="font-mono text-foreground">{status.masked_from_number ?? "—"}</p>
+            </div>
+            <div>
+              <p className="text-muted-foreground text-[10px] uppercase tracking-wide">Sent (24h)</p>
+              <p className="font-medium text-foreground">{counts.sent ?? 0} · Delivered {counts.delivered ?? 0}</p>
+            </div>
+            <div>
+              <p className="text-muted-foreground text-[10px] uppercase tracking-wide">Pending / Failed</p>
+              <p className="font-medium text-foreground">{counts.pending ?? 0} / {counts.failed ?? 0}</p>
+            </div>
+          </div>
+        </>
+      )}
+    </Card>
+  );
+}
+
 function SettingsScreen() {
   const { tenantInfo, settings, connectionStatus, saveSection } = useDashboard();
   const { session } = useAuth();
@@ -3040,6 +3140,11 @@ function SettingsScreen() {
   const [activeSection, setActiveSection] = useState("Overview");
   const [saving, setSaving] = useState(false);
   const [saveResult, setSaveResult] = useState<{ section: string; ok: boolean } | null>(null);
+  // Client-side placeholder validation (SMS-ONLY handoff): reject any
+  // {placeholder} that isn't one of the four the n8n workflow substitutes -
+  // the backend is still the final authority, this just catches a typo
+  // before a save round-trip.
+  const [smsValidationError, setSmsValidationError] = useState<string | null>(null);
   const [practitioners, setPractitioners] = useState<Practitioner[]>([]);
   const [faqs, setFaqs] = useState<FAQ[]>([]);
   const [faqSearch, setFaqSearch] = useState("");
@@ -3129,6 +3234,7 @@ function SettingsScreen() {
   }, [settings]);
 
   function setField(section: DraftKey, key: string, value: string) {
+    if (section === 'sms_follow_ups') setSmsValidationError(null);
     setDraft(prev => ({ ...prev, [section]: { ...prev[section], [key]: value } }));
   }
 
@@ -3168,7 +3274,27 @@ function SettingsScreen() {
     setTimeout(() => setSaveResult(r => (r?.section === section ? null : r)), ok ? 2500 : 5000);
   }
 
+  const SMS_ALLOWED_PLACEHOLDERS = ['patient_name', 'clinic_name', 'date', 'time'];
+  function findInvalidSmsPlaceholders(messages: Record<string, string>): string[] {
+    const invalid = new Set<string>();
+    for (const [key, value] of Object.entries(messages)) {
+      if (!key.endsWith('_message') || typeof value !== 'string') continue;
+      for (const match of value.match(/\{[^}]*\}/g) ?? []) {
+        if (!SMS_ALLOWED_PLACEHOLDERS.includes(match.slice(1, -1))) invalid.add(match);
+      }
+    }
+    return [...invalid];
+  }
+
   async function handleSaveSection(section: DraftKey) {
+    if (section === 'sms_follow_ups') {
+      const invalid = findInvalidSmsPlaceholders(draft.sms_follow_ups);
+      if (invalid.length > 0) {
+        setSmsValidationError(`Unsupported placeholder${invalid.length > 1 ? 's' : ''}: ${invalid.join(', ')}. Only {patient_name}, {clinic_name}, {date}, {time} are supported.`);
+        return;
+      }
+    }
+    setSmsValidationError(null);
     setSaving(true);
     const ok = await saveSection(section, draft[section]);
     setSaving(false);
@@ -4112,7 +4238,11 @@ function SettingsScreen() {
                 <h2 className="text-base font-semibold text-foreground">SMS Follow-Ups</h2>
                 <p className="text-xs text-muted-foreground mt-0.5">{SETTINGS_SECTION_META["SMS Follow-Ups"].subtitle}</p>
               </div>
+              <SmsStatusPanel />
               <p className="text-xs text-muted-foreground -mt-2">Customize the SMS sent for each event. Use <span className="font-mono bg-muted px-1 rounded">{"{patient_name}"}</span>, <span className="font-mono bg-muted px-1 rounded">{"{date}"}</span>, <span className="font-mono bg-muted px-1 rounded">{"{time}"}</span>, <span className="font-mono bg-muted px-1 rounded">{"{clinic_name}"}</span> as placeholders.</p>
+              {smsValidationError && (
+                <div className="text-xs text-destructive bg-destructive/10 rounded-md px-3 py-2">{smsValidationError}</div>
+              )}
               <div className="space-y-3">
                 {templates.map(([key, label, fallback]) => {
                   const enabled = draft.sms_follow_ups[`${key}_enabled`] !== 'false';

@@ -14,6 +14,10 @@ const N8N_DASHBOARD_AUTH_VALUE = process.env.N8N_DASHBOARD_AUTH_VALUE ?? '';
 // Postgres directly for this domain (same "browser never talks to n8n or
 // Postgres directly" boundary, one hop further in).
 const N8N_APPOINTMENT_REQUESTS_URL = process.env.N8N_APPOINTMENT_REQUESTS_URL ?? '';
+// SMS Follow-Ups (FRONTEND-DEVELOPER-HANDOFF-SMS-ONLY.md) - a separate
+// database-backed n8n workflow, its own dedicated webhook like the
+// appointment-requests one above rather than the shared N8N_BASE_URL.
+const N8N_SMS_FOLLOWUPS_URL = process.env.N8N_SMS_FOLLOWUPS_URL ?? '';
 
 function authHeaders() {
   const headers = { 'Content-Type': 'application/json' };
@@ -135,6 +139,25 @@ async function appointmentRequestsAction(action, userId, tenantId, clinicId, ext
     method: 'POST',
     headers: authHeaders(),
     body: JSON.stringify({ action, user_id: userId, tenant_id: tenantId, clinic_id: clinicId, ...extra }),
+  });
+  const json = await parseJsonSafe(res);
+  if (!res.ok) throw n8nError(json, res.status);
+  return json;
+}
+
+// SMS Follow-Ups status (FRONTEND-DEVELOPER-HANDOFF-SMS-ONLY.md). tenant_id
+// and clinic_id must always be the verified session/req.clinicId values -
+// callers pass them explicitly, never anything from the request body.
+export async function getSmsFollowupStatus(tenantId, clinicId) {
+  if (!N8N_SMS_FOLLOWUPS_URL) {
+    const err = new Error('N8N_SMS_FOLLOWUPS_URL is not configured');
+    err.status = 503;
+    throw err;
+  }
+  const res = await withTimeoutFetch(N8N_SMS_FOLLOWUPS_URL, {
+    method: 'POST',
+    headers: authHeaders(),
+    body: JSON.stringify({ action: 'status', tenant_id: tenantId, clinic_id: clinicId }),
   });
   const json = await parseJsonSafe(res);
   if (!res.ok) throw n8nError(json, res.status);
