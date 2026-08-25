@@ -795,7 +795,6 @@ const navItems = [
   { id: "analytics", label: "Analytics", icon: BarChart2, group: "Inbound" },
   { id: "staff-queue", label: "Staff Action Queue", icon: ClipboardList, group: "Inbound" },
   { id: "activity", label: "Activity", icon: Bell, group: "Inbound" },
-  { id: "knowledge-base", label: "Knowledge Base", icon: UploadCloud, group: "Inbound" },
   { id: "settings", label: "Settings", icon: Settings, group: "Inbound" },
 
   { id: "outbound-make-call", label: "Make a Call", icon: PhoneOutgoing, group: "Outbound" },
@@ -4337,6 +4336,7 @@ function SettingsScreen() {
                 })}
               </div>
             )}
+            <KnowledgeSubmissionsPanel />
           </div>
         )}
 
@@ -4543,7 +4543,11 @@ function websiteHostname(url?: string | null): string {
   try { return new URL(url).hostname; } catch { return url; }
 }
 
-function KnowledgeBaseScreen() {
+// Rendered inside Settings' "FAQs / Knowledge Base" section (below the FAQ
+// editor), not as its own nav item - both are the AI receptionist's
+// knowledge sources from a clinic user's point of view, so they live in one
+// place even though this one is review-queued rather than saved instantly.
+function KnowledgeSubmissionsPanel() {
   const { activeClinicId } = useDashboard();
   const { session } = useAuth();
   const [sourceType, setSourceType] = useState<"website" | "pdf" | "docx">("website");
@@ -4653,10 +4657,10 @@ function KnowledgeBaseScreen() {
   }
 
   return (
-    <div className="p-6 space-y-6">
+    <div className="space-y-5 pt-5 mt-5 border-t border-border">
       <div>
-        <h1 className="text-lg font-semibold text-foreground">Knowledge Base</h1>
-        <p className="text-xs text-muted-foreground mt-0.5">Submit a website, PDF, or DOCX for the RivaCare team to review and add to Grace's knowledge.</p>
+        <h3 className="text-sm font-semibold text-foreground">Document & Website Submissions</h3>
+        <p className="text-xs text-muted-foreground mt-0.5">Submit a website, PDF, or DOCX for the RivaCare team to review and add to Grace's knowledge. Reviewed separately from the FAQs above.</p>
       </div>
 
       <Card className="p-5 space-y-4 max-w-2xl">
@@ -5722,7 +5726,6 @@ const SCREENS: Record<string, React.FC> = {
   "analytics": InboundAnalyticsScreen,
   "staff-queue": StaffQueueScreen,
   "activity": ActivityScreen,
-  "knowledge-base": KnowledgeBaseScreen,
   "settings": SettingsScreen,
   "outbound-make-call": MakeCallScreen,
   "outbound-call-logs": OutboundCallLogsScreen,
