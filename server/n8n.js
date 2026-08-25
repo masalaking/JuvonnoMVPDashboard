@@ -24,6 +24,12 @@ const N8N_SMS_FOLLOWUPS_URL = process.env.N8N_SMS_FOLLOWUPS_URL ?? '';
 // never receives the binary file itself (only storage_key/sha256/metadata
 // for PDF/DOCX; the file bytes stay in this server's private storage).
 const N8N_KNOWLEDGE_BASE_SUBMISSIONS_URL = process.env.N8N_KNOWLEDGE_BASE_SUBMISSIONS_URL ?? '';
+// Outbound Batch Calls (FRONTEND-DEVELOPER-HANDOFF (1).md) - another
+// dedicated webhook. The database is the source of truth here: create writes
+// a Draft batch + its contacts to Postgres without touching Retell at all;
+// only a separate, deliberate dispatch call actually fires the Retell batch
+// call and records the returned retell_batch_call_id.
+const N8N_OUTBOUND_BATCHES_URL = process.env.N8N_OUTBOUND_BATCHES_URL ?? '';
 
 function authHeaders() {
   const headers = { 'Content-Type': 'application/json' };
@@ -124,11 +130,11 @@ export const outbound = {
   calls: (t, c) => n8nGet('juvonno-outbound/calls', t, c),
   transcripts: (t, c) => n8nGet('juvonno-outbound/transcripts', t, c),
   invoices: (t, c) => n8nGet('juvonno-outbound/invoices', t, c),
-  // multi-clinic-prompt.md §3.1 - MakeCallScreen's only working backend was
-  // the legacy per-client_id-prefixed /api/link/:token/outbound/make-call
-  // route; this is its session-mode equivalent on the shared juvonno-outbound
-  // workflow, same as every other outbound.* call above.
-  makeCall: (t, c, payload) => n8nPost('juvonno-outbound/make-call', { tenant_id: t, clinic_id: c, ...payload }),
+  // NOTE: the old single-shot makeCall() (juvonno-outbound/make-call, fired
+  // Retell immediately on submit) is retired - superseded by the
+  // create-then-dispatch outboundBatches flow below (FRONTEND-DEVELOPER-
+  // HANDOFF (1).md), which makes the database the source of truth instead
+  // of trusting a browser-supplied contacts array straight through to Retell.
 };
 
 // ── Appointment Requests / Staff Action Queue (FRONTEND-BFF-HANDOFF.md) ─────
@@ -209,4 +215,30 @@ export const knowledgeSubmissions = {
   submit: (u, t, c, payload) => knowledgeSubmissionsAction('submit', u, t, c, payload),
   list: (u, t, c) => knowledgeSubmissionsAction('list', u, t, c),
   get: (u, t, c, id) => knowledgeSubmissionsAction('get', u, t, c, { id }),
+};
+
+// ── Outbound Batch Calls (FRONTEND-DEVELOPER-HANDOFF (1).md) ────────────────
+// tenant_id/clinic_id/user_id must always be the verified session values -
+// callers pass them explicitly, never anything from the request body.
+async function outboundBatchesAction(action, userId, tenantId, clinicId, extra = {}) {
+  if (!N8N_OUTBOUND_BATCHES_URL) {
+    const err = new Error('N8N_OUTBOUND_BATCHES_URL is not configured');
+    err.status = 503;
+    throw err;
+  }
+  const res = await withTimeoutFetch(N8N_OUTBOUND_BATCHES_URL, {
+    method: 'POST',
+    headers: authHeaders(),
+    body: JSON.stringify({ action, user_id: userId, tenant_id: tenantId, clinic_id: clinicId, ...extra }),
+  });
+  const json = await parseJsonSafe(res);
+  if (!res.ok) throw n8nError(json, res.status);
+  return json;
+}
+
+export const outboundBatches = {
+  create: (u, t, c, payload) => outboundBatchesAction('outbound_batch.create', u, t, c, payload),
+  list: (u, t, c) => outboundBatchesAction('outbound_batch.list', u, t, c),
+  get: (u, t, c, batchId) => outboundBatchesAction('outbound_batch.get', u, t, c, { batch_id: batchId }),
+  dispatch: (u, t, c, batchId) => outboundBatchesAction('outbound_batch.dispatch', u, t, c, { batch_id: batchId }),
 };

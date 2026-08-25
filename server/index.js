@@ -402,18 +402,56 @@ app.get('/api/dashboard/outbound/transcripts', ...dashboardAuth, apiRoute(async 
 app.get('/api/dashboard/outbound/invoices', ...dashboardAuth, apiRoute(async (req, res) => {
   res.json(await n8nProd.outbound.invoices(req.session.tenantId, req.clinicId));
 }));
-app.post('/api/dashboard/outbound/make-call', ...dashboardAuth, rateLimit('outbound-make-call', 10, 60_000), apiRoute(async (req, res) => {
-  const { contacts, name } = req.body ?? {};
-  if (!Array.isArray(contacts) || contacts.length === 0) throw badRequest('contacts must be a non-empty array.');
-  const normalized = contacts.map((c) => {
-    const phone_number = String(c?.phone_number ?? '').trim();
-    const first_name = String(c?.first_name ?? '').trim();
-    const last_name = String(c?.last_name ?? '').trim();
-    const full_name = String(c?.full_name ?? '').trim() || [first_name, last_name].filter(Boolean).join(' ');
-    return { phone_number, first_name, last_name, full_name };
+// ── Outbound Batch Calls (FRONTEND-DEVELOPER-HANDOFF (1).md) ────────────────
+// Replaces the old single-shot make-call route above: creating a batch only
+// ever writes clinic-scoped database rows (Draft status) - it never touches
+// Retell. Only the separate, deliberate /dispatch route below does that.
+function isE164Phone(value) {
+  return /^\+[1-9]\d{6,14}$/.test(String(value ?? ''));
+}
+
+app.post('/api/dashboard/outbound-batches', ...dashboardAuth, requireRole('owner', 'admin'), rateLimit('outbound-batch-create', 20, 60_000), apiRoute(async (req, res) => {
+  const body = req.body ?? {};
+  const name = body.name != null ? String(body.name).trim() || undefined : undefined;
+  const contactsIn = Array.isArray(body.contacts) ? body.contacts : [];
+  if (contactsIn.length === 0) throw badRequest('contacts must be a non-empty array.');
+  if (contactsIn.length > 100) throw badRequest('A batch may contain at most 100 contacts.');
+
+  const seenPhones = new Set();
+  const contacts = contactsIn.map((c, i) => {
+    const phone = String(c?.patient_phone ?? c?.phone_number ?? '').trim();
+    if (!isE164Phone(phone)) throw badRequest(`Row ${i + 1}: phone number must be E.164 (e.g. +14165551234).`);
+    if (seenPhones.has(phone)) throw badRequest(`Row ${i + 1}: duplicate phone number ${phone} within this batch.`);
+    seenPhones.add(phone);
+    return {
+      contact_external_id: c?.contact_external_id != null ? String(c.contact_external_id) : undefined,
+      patient_first_name: String(c?.patient_first_name ?? c?.first_name ?? '').trim(),
+      patient_last_name: String(c?.patient_last_name ?? c?.last_name ?? '').trim(),
+      patient_phone: phone,
+    };
   });
-  if (normalized.some((c) => !c.phone_number)) throw badRequest('Every contact must have a phone_number.');
-  res.json(await n8nProd.outbound.makeCall(req.session.tenantId, req.clinicId, { contacts: normalized, name }));
+
+  const payload = { name, contacts, idempotency_key: `outbound-batch-${randomUUID()}` };
+  res.json(await n8nProd.outboundBatches.create(req.session.userId, req.session.tenantId, req.clinicId, payload));
+}));
+
+app.get('/api/dashboard/outbound-batches', ...dashboardAuth, apiRoute(async (req, res) => {
+  res.json(await n8nProd.outboundBatches.list(req.session.userId, req.session.tenantId, req.clinicId));
+}));
+
+app.get('/api/dashboard/outbound-batches/:id', ...dashboardAuth, apiRoute(async (req, res) => {
+  const result = await n8nProd.outboundBatches.get(req.session.userId, req.session.tenantId, req.clinicId, req.params.id);
+  // Defense in depth: never trust a record whose ownership fields don't
+  // match the verified session as belonging to this clinic.
+  const record = result?.batch ?? result;
+  if (record && (record.tenant_id !== req.session.tenantId || record.clinic_id !== req.clinicId)) {
+    return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Batch not found.', retryable: false } });
+  }
+  res.json(result);
+}));
+
+app.post('/api/dashboard/outbound-batches/:id/dispatch', ...dashboardAuth, requireRole('owner', 'admin'), rateLimit('outbound-batch-dispatch', 10, 60_000), apiRoute(async (req, res) => {
+  res.json(await n8nProd.outboundBatches.dispatch(req.session.userId, req.session.tenantId, req.clinicId, req.params.id));
 }));
 
 // ── Settings (§6.1, §8) ──────────────────────────────────────────────────────

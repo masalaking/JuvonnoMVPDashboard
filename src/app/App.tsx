@@ -1814,67 +1814,192 @@ function parseContactsCsv(text: string): CsvContact[] {
   });
 }
 
+// The database is the source of truth for batch calling (FRONTEND-DEVELOPER-
+// HANDOFF (1).md): CREATE only ever writes Draft rows, contacts included -
+// Retell is never touched until a separate, deliberate DISPATCH action.
+// Field names are read defensively (pick/pickText/pickNum) since the exact
+// n8n response shape isn't guaranteed to be fully camelCase or snake_case.
+interface OutboundBatch {
+  id: string;
+  name: string;
+  status: "draft" | "dispatching" | "submitted" | "failed" | "completed" | "cancelled" | string;
+  contactCount: number;
+  createdAt: string;
+  retellBatchCallId: string;
+  lastError: string;
+}
+
+function mapOutboundBatch(raw: any): OutboundBatch {
+  return {
+    id: pickText(raw, "id", "batch_id"),
+    name: pickText(raw, "name") || "Untitled batch",
+    status: pickText(raw, "status") || "draft",
+    contactCount: pickNum(raw, "contact_count", "contactCount"),
+    createdAt: pickText(raw, "created_at", "createdAt"),
+    retellBatchCallId: pickText(raw, "retell_batch_call_id", "retellBatchCallId"),
+    lastError: pickText(raw, "last_error", "lastError", "error"),
+  };
+}
+
+const OUTBOUND_BATCH_STATUS_LABEL: Record<string, string> = {
+  draft: "Ready to send",
+  dispatching: "Sending to Retell",
+  submitted: "Sent to Retell",
+  failed: "Send failed",
+  completed: "Completed",
+  cancelled: "Cancelled",
+};
+const OUTBOUND_BATCH_STATUS_VARIANT: Record<string, string> = {
+  draft: "New",
+  dispatching: "In Progress",
+  submitted: "Completed",
+  failed: "Failed",
+  completed: "Completed",
+  cancelled: "Dismissed",
+};
+
+function maskPhone(phone: string): string {
+  const digits = phone.replace(/\D/g, "");
+  return digits.length >= 4 ? `•••• ${digits.slice(-4)}` : "••••";
+}
+
 function MakeCallScreen() {
   const { activeClinicId } = useDashboard();
   const { session } = useAuth();
+  const currentClinicRole = session?.clinics.find(c => c.clinicId === session.activeClinicId)?.role ?? null;
+  const canSeeFullNumbers = currentClinicRole === "owner" || currentClinicRole === "admin";
   const [contacts, setContacts] = useState<CsvContact[]>([]);
   const [fileName, setFileName] = useState("");
   const [batchName, setBatchName] = useState("");
-  const [submitting, setSubmitting] = useState(false);
+  const [creating, setCreating] = useState(false);
   const [result, setResult] = useState<{ ok: boolean; message: string } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  // The batch just created in this session, if any - separate from history
+  // below so the "Send" confirmation flow has an obvious single target.
+  const [activeBatch, setActiveBatch] = useState<OutboundBatch | null>(null);
+  const [confirmSendOpen, setConfirmSendOpen] = useState(false);
+  const [dispatching, setDispatching] = useState(false);
+
+  const [history, setHistory] = useState<OutboundBatch[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(true);
+  const [historyError, setHistoryError] = useState(false);
+  const [selectedBatchId, setSelectedBatchId] = useState<string | null>(null);
+  const [selectedBatchDetail, setSelectedBatchDetail] = useState<any>(null);
+  const [detailLoading, setDetailLoading] = useState(false);
+
   const validContacts = contacts.filter(c => c.valid);
   const invalidContacts = contacts.filter(c => !c.valid);
+
+  async function loadHistory() {
+    if (!activeClinicId) return;
+    setHistoryLoading(true);
+    setHistoryError(false);
+    try {
+      const res = await apiFetch(activeClinicId, session?.csrfToken, "/outbound-batches");
+      if (!res.ok) throw new Error("failed");
+      const json = await res.json().catch(() => []);
+      const list = Array.isArray(json) ? json : Array.isArray(json?.batches) ? json.batches : [];
+      setHistory(list.map(mapOutboundBatch));
+    } catch {
+      setHistoryError(true);
+    } finally {
+      setHistoryLoading(false);
+    }
+  }
+
+  useEffect(() => { loadHistory(); }, [activeClinicId]);
+
+  useEffect(() => {
+    if (!selectedBatchId || !activeClinicId) { setSelectedBatchDetail(null); return; }
+    let cancelled = false;
+    setDetailLoading(true);
+    apiFetch(activeClinicId, session?.csrfToken, `/outbound-batches/${selectedBatchId}`)
+      .then(r => r.ok ? r.json() : null)
+      .then(json => { if (!cancelled) setSelectedBatchDetail(json); })
+      .catch(() => { if (!cancelled) setSelectedBatchDetail(null); })
+      .finally(() => { if (!cancelled) setDetailLoading(false); });
+    return () => { cancelled = true; };
+  }, [selectedBatchId, activeClinicId]);
 
   function reset() {
     setContacts([]);
     setFileName("");
     setBatchName("");
     setResult(null);
+    setActiveBatch(null);
+    if (fileInputRef.current) fileInputRef.current.value = "";
   }
 
   function handleFile(file: File) {
     setFileName(file.name);
     setResult(null);
+    setActiveBatch(null);
     const reader = new FileReader();
     reader.onload = () => setContacts(parseContactsCsv(String(reader.result ?? "")));
     reader.readAsText(file);
   }
 
-  async function startBatchCall() {
+  async function createBatch() {
     if (!activeClinicId || validContacts.length === 0) return;
-    setSubmitting(true);
+    setCreating(true);
     setResult(null);
     try {
-      const res = await apiFetch(activeClinicId, session?.csrfToken, "/outbound/make-call", {
+      const res = await apiFetch(activeClinicId, session?.csrfToken, "/outbound-batches", {
         method: "POST",
         body: {
           name: batchName || undefined,
-          // Matches the outbound tracker's recipient contract: E.164
-          // phone_number plus first/last/full name as Retell dynamic
-          // variables. clinic_id/tenant_id are added server-side from the
-          // verified session, not trusted from the browser.
           contacts: validContacts.map(c => ({
-            phone_number: c.phoneNumber.trim(),
-            first_name: c.firstName.trim(),
-            last_name: c.lastName.trim(),
-            full_name: [c.firstName.trim(), c.lastName.trim()].filter(Boolean).join(" "),
+            patient_first_name: c.firstName.trim(),
+            patient_last_name: c.lastName.trim(),
+            patient_phone: c.phoneNumber.trim(),
           })),
         },
       });
       const json = await res.json().catch(() => ({}));
-      if (res.ok && json.success !== false) {
-        setResult({ ok: true, message: `Batch call started for ${validContacts.length} contact${validContacts.length === 1 ? "" : "s"}.` });
-        setContacts([]);
-        setFileName("");
-      } else {
-        setResult({ ok: false, message: json.error || "Failed to start batch call." });
+      if (!res.ok) {
+        setResult({ ok: false, message: json?.error?.message ?? "Could not create the batch." });
+        return;
       }
+      const batch = mapOutboundBatch(json?.batch ?? json);
+      if (!batch.id) {
+        setResult({ ok: false, message: "Batch was created but no batch ID was returned." });
+        return;
+      }
+      setActiveBatch(batch);
+      setResult({ ok: true, message: `Batch created with ${validContacts.length} contact${validContacts.length === 1 ? "" : "s"} — still in Draft. Review and send when ready.` });
+      loadHistory();
     } catch {
-      setResult({ ok: false, message: "Could not reach the outbound workflow. Please try again." });
+      setResult({ ok: false, message: "Could not reach the server. Please try again." });
     } finally {
-      setSubmitting(false);
+      setCreating(false);
+    }
+  }
+
+  async function dispatchActiveBatch() {
+    if (!activeClinicId || !activeBatch) return;
+    setDispatching(true);
+    setConfirmSendOpen(false);
+    try {
+      const res = await apiFetch(activeClinicId, session?.csrfToken, `/outbound-batches/${activeBatch.id}/dispatch`, { method: "POST" });
+      const json = await res.json().catch(() => ({}));
+      const dispatched = json?.success === true && json?.status === "submitted" &&
+        typeof json?.retell_batch_call_id === "string" && json.retell_batch_call_id.length > 0;
+      if (res.ok && dispatched) {
+        setActiveBatch(prev => prev ? { ...prev, status: "submitted", retellBatchCallId: json.retell_batch_call_id } : prev);
+        setResult({ ok: true, message: `Sent to Retell — batch call ${json.retell_batch_call_id}.` });
+      } else if (json?.error?.code === "BATCH_NOT_DISPATCHABLE" || json?.error_code === "BATCH_NOT_DISPATCHABLE") {
+        setResult({ ok: false, message: "This batch was already sent or is no longer dispatchable." });
+        setActiveBatch(prev => prev ? { ...prev, status: "failed" } : prev);
+      } else {
+        setResult({ ok: false, message: json?.error?.message ?? "Could not send this batch to Retell." });
+        setActiveBatch(prev => prev ? { ...prev, status: "failed" } : prev);
+      }
+      loadHistory();
+    } catch {
+      setResult({ ok: false, message: "Could not reach the server. Please try again." });
+    } finally {
+      setDispatching(false);
     }
   }
 
@@ -1944,21 +2069,61 @@ function MakeCallScreen() {
             )}
           </div>
 
+          {invalidContacts.length > 0 && (
+            <div className="space-y-1.5">
+              <p className="text-[10px] font-semibold text-destructive uppercase tracking-wide">Rows needing cleanup</p>
+              <div className="max-h-32 overflow-y-auto border border-border rounded-md divide-y divide-border">
+                {invalidContacts.map(c => (
+                  <div key={c.row} className="flex items-center justify-between px-2.5 py-1.5 text-[11px]">
+                    <span className="text-muted-foreground">Row {c.row} · {c.phoneNumber || "(no phone)"}</span>
+                    <span className="text-destructive">{c.reason}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
           {result && (
             <p className={`text-xs rounded-md p-3 border ${result.ok ? "bg-emerald-50 border-emerald-200 text-emerald-700" : "bg-red-50 border-red-200 text-destructive"}`}>
               {result.message}
             </p>
           )}
 
-          <button
-            type="button"
-            onClick={startBatchCall}
-            disabled={submitting || validContacts.length === 0}
-            className="w-full flex items-center justify-center gap-2 bg-primary text-primary-foreground text-xs font-semibold px-4 py-2.5 rounded-md hover:opacity-90 disabled:opacity-50 disabled:bg-muted disabled:text-muted-foreground transition-colors"
-          >
-            <PhoneOutgoing size={13} />
-            {submitting ? "Starting batch call…" : validContacts.length === 0 ? "Upload contacts first" : `Start Batch Call (${validContacts.length})`}
-          </button>
+          {!activeBatch ? (
+            <button
+              type="button"
+              onClick={createBatch}
+              disabled={creating || validContacts.length === 0}
+              className="w-full flex items-center justify-center gap-2 bg-primary text-primary-foreground text-xs font-semibold px-4 py-2.5 rounded-md hover:opacity-90 disabled:opacity-50 disabled:bg-muted disabled:text-muted-foreground transition-colors"
+            >
+              <FileText size={13} />
+              {creating ? "Creating batch…" : validContacts.length === 0 ? "Upload contacts first" : `Create Batch (${validContacts.length})`}
+            </button>
+          ) : (
+            <div className="space-y-2">
+              <div className="flex items-center justify-between text-xs bg-muted/40 border border-border rounded-md p-3">
+                <span className="font-medium text-foreground">{activeBatch.name}</span>
+                <Badge label={OUTBOUND_BATCH_STATUS_LABEL[activeBatch.status] ?? activeBatch.status} variant={OUTBOUND_BATCH_STATUS_VARIANT[activeBatch.status] ?? "Neutral"} />
+              </div>
+              {activeBatch.status === "draft" && (
+                <button
+                  type="button"
+                  onClick={() => setConfirmSendOpen(true)}
+                  disabled={dispatching}
+                  className="w-full flex items-center justify-center gap-2 bg-primary text-primary-foreground text-xs font-semibold px-4 py-2.5 rounded-md hover:opacity-90 disabled:opacity-50 transition-colors"
+                >
+                  <PhoneOutgoing size={13} />
+                  {dispatching ? "Sending…" : `Send Batch (${activeBatch.contactCount || validContacts.length})`}
+                </button>
+              )}
+              {activeBatch.status === "submitted" && activeBatch.retellBatchCallId && (
+                <p className="text-[10px] text-muted-foreground font-mono">Retell batch: {activeBatch.retellBatchCallId}</p>
+              )}
+              <button type="button" onClick={reset} className="w-full text-[10px] font-medium text-muted-foreground hover:text-foreground transition-colors">
+                Start a new batch
+              </button>
+            </div>
+          )}
         </Card>
 
         <Card className="overflow-hidden">
@@ -1984,7 +2149,7 @@ function MakeCallScreen() {
                 <tbody>
                   {validContacts.map((c) => (
                     <tr key={c.row} className="border-b border-border last:border-0 hover:bg-muted/30 transition-colors">
-                      <td className="px-4 py-2 font-mono text-foreground">{c.phoneNumber}</td>
+                      <td className="px-4 py-2 font-mono text-foreground">{canSeeFullNumbers ? c.phoneNumber : maskPhone(c.phoneNumber)}</td>
                       <td className="px-4 py-2 text-foreground">{c.firstName || "—"}</td>
                       <td className="px-4 py-2 text-foreground">{c.lastName || "—"}</td>
                       <td className="px-4 py-2 font-mono text-muted-foreground">{c.row}</td>
@@ -1996,6 +2161,112 @@ function MakeCallScreen() {
           )}
         </Card>
       </div>
+
+      <Card className="overflow-hidden">
+        <div className="px-4 py-3 border-b border-border flex items-center justify-between">
+          <h3 className="text-sm font-semibold text-foreground">Batch History</h3>
+          <button onClick={loadHistory} className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground hover:text-foreground transition-colors">
+            <RefreshCw size={12} /> Refresh
+          </button>
+        </div>
+        {historyLoading ? (
+          <p className="text-xs text-muted-foreground py-10 text-center">Loading…</p>
+        ) : historyError ? (
+          <p className="text-xs text-muted-foreground py-10 text-center">Could not load batch history. <button onClick={loadHistory} className="text-primary hover:underline">Try again</button></p>
+        ) : history.length === 0 ? (
+          <p className="text-xs text-muted-foreground py-10 text-center">No batches yet.</p>
+        ) : (
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="border-b border-border bg-muted/40">
+                {["Name", "Created", "Status", "Contacts", "Retell Batch ID"].map(h => (
+                  <th key={h} className="text-left px-4 py-2.5 text-muted-foreground font-medium">{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {history.map(b => (
+                <tr key={b.id} onClick={() => setSelectedBatchId(b.id)} className="border-b border-border last:border-0 hover:bg-muted/30 cursor-pointer transition-colors">
+                  <td className="px-4 py-3 font-medium text-foreground">{b.name}</td>
+                  <td className="px-4 py-3 font-mono text-muted-foreground">{formatRelativeTime(b.createdAt)}</td>
+                  <td className="px-4 py-3"><Badge label={OUTBOUND_BATCH_STATUS_LABEL[b.status] ?? b.status} variant={OUTBOUND_BATCH_STATUS_VARIANT[b.status] ?? "Neutral"} /></td>
+                  <td className="px-4 py-3 font-mono text-muted-foreground">{b.contactCount || "—"}</td>
+                  <td className="px-4 py-3 font-mono text-muted-foreground">{b.status === "submitted" || b.status === "completed" ? (b.retellBatchCallId || "—") : "—"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </Card>
+
+      {confirmSendOpen && activeBatch && (
+        <ConfirmModal
+          title="Send this batch to Retell?"
+          body={`This will dispatch ${activeBatch.contactCount || validContacts.length} contact${(activeBatch.contactCount || validContacts.length) === 1 ? "" : "s"} for outbound calling. This can't be undone.`}
+          confirmLabel="Send Batch"
+          busy={dispatching}
+          onConfirm={dispatchActiveBatch}
+          onCancel={() => setConfirmSendOpen(false)}
+        />
+      )}
+
+      {selectedBatchId && (
+        <>
+          <div className="fixed inset-0 bg-black/30 z-40" onClick={() => setSelectedBatchId(null)} />
+          <div className="fixed inset-y-0 right-0 w-full max-w-md bg-card border-l border-border shadow-xl z-50 flex flex-col">
+            <div className="flex items-center justify-between px-5 py-4 border-b border-border">
+              <span className="text-sm font-semibold text-foreground">Batch Detail</span>
+              <button onClick={() => setSelectedBatchId(null)} className="p-1 text-muted-foreground hover:text-foreground transition-colors">
+                <X size={16} />
+              </button>
+            </div>
+            <div className="flex-1 overflow-y-auto px-5 py-4 space-y-3 text-xs">
+              {detailLoading ? (
+                <p className="text-muted-foreground">Loading…</p>
+              ) : !selectedBatchDetail ? (
+                <p className="text-muted-foreground">Could not load this batch.</p>
+              ) : (() => {
+                const b = mapOutboundBatch(selectedBatchDetail?.batch ?? selectedBatchDetail);
+                const detailContacts = Array.isArray(selectedBatchDetail?.contacts) ? selectedBatchDetail.contacts : [];
+                return (
+                  <>
+                    <div className="rounded-md border border-border divide-y divide-border">
+                      <DetailRow label="Name" value={b.name} />
+                      <DetailRow label="Status" value={<Badge label={OUTBOUND_BATCH_STATUS_LABEL[b.status] ?? b.status} variant={OUTBOUND_BATCH_STATUS_VARIANT[b.status] ?? "Neutral"} />} />
+                      <DetailRow label="Created" value={formatRelativeTime(b.createdAt) || "—"} />
+                      <DetailRow label="Contacts" value={String(b.contactCount || detailContacts.length)} />
+                      {b.retellBatchCallId && <DetailRow label="Retell Batch ID" value={<span className="font-mono">{b.retellBatchCallId}</span>} />}
+                      {b.lastError && <DetailRow label="Last Error" value={<span className="text-destructive">{b.lastError}</span>} />}
+                    </div>
+                    {detailContacts.length > 0 && (
+                      <div>
+                        <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide mb-2">
+                          Contacts {!canSeeFullNumbers && "(numbers masked)"}
+                        </p>
+                        <div className="rounded-md border border-border divide-y divide-border max-h-72 overflow-y-auto">
+                          {detailContacts.map((c: any, i: number) => {
+                            const phone = pickText(c, "patient_phone", "phone_number");
+                            const callStatus = pickText(c, "call_status", "status");
+                            return (
+                              <div key={i} className="flex items-center justify-between px-3 py-2">
+                                <div>
+                                  <p className="font-medium text-foreground">{pickText(c, "patient_first_name", "first_name")} {pickText(c, "patient_last_name", "last_name")}</p>
+                                  <p className="text-[10px] text-muted-foreground font-mono">{canSeeFullNumbers ? phone : maskPhone(phone)}</p>
+                                </div>
+                                {callStatus && <Badge label={callStatus} variant={callStatus} />}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
+                  </>
+                );
+              })()}
+            </div>
+          </div>
+        </>
+      )}
     </div>
   );
 }
