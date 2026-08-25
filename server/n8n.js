@@ -18,6 +18,12 @@ const N8N_APPOINTMENT_REQUESTS_URL = process.env.N8N_APPOINTMENT_REQUESTS_URL ??
 // database-backed n8n workflow, its own dedicated webhook like the
 // appointment-requests one above rather than the shared N8N_BASE_URL.
 const N8N_SMS_FOLLOWUPS_URL = process.env.N8N_SMS_FOLLOWUPS_URL ?? '';
+// Knowledge Base Submission Queue (FRONTEND-DEVELOPER-HANDOFF.md) - another
+// dedicated webhook, same reasoning as appointment-requests/SMS above: this
+// is the only thing allowed to write to the submissions queue table, and it
+// never receives the binary file itself (only storage_key/sha256/metadata
+// for PDF/DOCX; the file bytes stay in this server's private storage).
+const N8N_KNOWLEDGE_BASE_SUBMISSIONS_URL = process.env.N8N_KNOWLEDGE_BASE_SUBMISSIONS_URL ?? '';
 
 function authHeaders() {
   const headers = { 'Content-Type': 'application/json' };
@@ -176,4 +182,31 @@ export const appointmentRequests = {
     appointmentRequestsAction('appointment_request.archive', u, t, c, { request_id: requestId, resolution_note: resolutionNote }),
   eventsList: (u, t, c, params = {}) => appointmentRequestsAction('appointment_event.list', u, t, c, params),
   eventGet: (u, t, c, eventId) => appointmentRequestsAction('appointment_event.get', u, t, c, { event_id: eventId }),
+};
+
+// ── Knowledge Base Submission Queue (FRONTEND-DEVELOPER-HANDOFF.md) ─────────
+// tenant_id/clinic_id/user_id must always be the verified session values -
+// callers pass them explicitly, never anything from the request body. The
+// workflow accepts one shared action field (submit/list/get/update_status),
+// same convention as appointmentRequestsAction above.
+async function knowledgeSubmissionsAction(action, userId, tenantId, clinicId, extra = {}) {
+  if (!N8N_KNOWLEDGE_BASE_SUBMISSIONS_URL) {
+    const err = new Error('N8N_KNOWLEDGE_BASE_SUBMISSIONS_URL is not configured');
+    err.status = 503;
+    throw err;
+  }
+  const res = await withTimeoutFetch(N8N_KNOWLEDGE_BASE_SUBMISSIONS_URL, {
+    method: 'POST',
+    headers: authHeaders(),
+    body: JSON.stringify({ action, user_id: userId, tenant_id: tenantId, clinic_id: clinicId, ...extra }),
+  });
+  const json = await parseJsonSafe(res);
+  if (!res.ok) throw n8nError(json, res.status);
+  return json;
+}
+
+export const knowledgeSubmissions = {
+  submit: (u, t, c, payload) => knowledgeSubmissionsAction('submit', u, t, c, payload),
+  list: (u, t, c) => knowledgeSubmissionsAction('list', u, t, c),
+  get: (u, t, c, id) => knowledgeSubmissionsAction('get', u, t, c, { id }),
 };

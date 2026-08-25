@@ -298,6 +298,20 @@ async function apiFetch(clinicId: string | null, csrfToken: string | undefined, 
   return fetch(`/api/dashboard${path}?${params.toString()}`, fetchInit);
 }
 
+// Multipart variant of apiFetch (knowledge-base document upload) - a raw
+// FormData body instead of JSON, so no Content-Type header is set here
+// (the browser adds the multipart boundary itself). Same clinic_id/CSRF
+// rules as apiFetch otherwise.
+async function apiUpload(clinicId: string | null, csrfToken: string | undefined, suffix: string, formData: FormData): Promise<Response> {
+  if (!clinicId) return Promise.reject(new Error("No active clinic selected."));
+  const headers: Record<string, string> = {};
+  if (csrfToken) headers["X-CSRF-Token"] = csrfToken;
+  const [path, existingQuery] = suffix.split("?");
+  const params = new URLSearchParams(existingQuery ?? "");
+  params.set("clinic_id", clinicId);
+  return fetch(`/api/dashboard${path}?${params.toString()}`, { method: "POST", credentials: "include", headers, body: formData });
+}
+
 // A non-ok response and an empty-but-successful response mean completely
 // different things ("something's broken" vs. "there's nothing here yet"),
 // but plain `r.ok ? r.json() : <empty fallback>` collapses them into the
@@ -781,6 +795,7 @@ const navItems = [
   { id: "analytics", label: "Analytics", icon: BarChart2, group: "Inbound" },
   { id: "staff-queue", label: "Staff Action Queue", icon: ClipboardList, group: "Inbound" },
   { id: "activity", label: "Activity", icon: Bell, group: "Inbound" },
+  { id: "knowledge-base", label: "Knowledge Base", icon: UploadCloud, group: "Inbound" },
   { id: "settings", label: "Settings", icon: Settings, group: "Inbound" },
 
   { id: "outbound-make-call", label: "Make a Call", icon: PhoneOutgoing, group: "Outbound" },
@@ -4483,6 +4498,293 @@ function SettingsScreen() {
   );
 }
 
+// ── Screen: Knowledge Base Submissions ───────────────────────────────────────
+// Replaces automatic Retell Knowledge Base syncing with a review queue
+// (FRONTEND-DEVELOPER-HANDOFF.md) - clinics submit a website/PDF/DOCX here,
+// a RivaCare administrator manually reviews and adds it to Retell. This
+// screen never shows Retell status/KB ids and never claims submitted
+// content is automatically live.
+interface KnowledgeSubmission {
+  id: string;
+  source_type: "website" | "pdf" | "docx" | string;
+  title: string;
+  website_url?: string | null;
+  original_filename?: string | null;
+  status: string;
+  created_at?: string;
+  submitted_at?: string;
+}
+
+const KB_STATUS_LABEL: Record<string, string> = {
+  submitted: "Submitted for review",
+  in_review: "Under review",
+  approved: "Approved — awaiting manual Retell update",
+  completed: "Added to the AI knowledge base",
+  rejected: "Not approved",
+  archived: "Archived",
+};
+const KB_STATUS_BADGE_VARIANT: Record<string, string> = {
+  submitted: "New",
+  in_review: "In Progress",
+  approved: "Staff Action",
+  completed: "Completed",
+  rejected: "Failed",
+  archived: "Dismissed",
+};
+
+const KB_MAX_FILE_BYTES = 50 * 1024 * 1024;
+const KB_MIME_BY_SOURCE: Record<string, string> = {
+  pdf: "application/pdf",
+  docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+};
+
+function websiteHostname(url?: string | null): string {
+  if (!url) return "—";
+  try { return new URL(url).hostname; } catch { return url; }
+}
+
+function KnowledgeBaseScreen() {
+  const { activeClinicId } = useDashboard();
+  const { session } = useAuth();
+  const [sourceType, setSourceType] = useState<"website" | "pdf" | "docx">("website");
+  const [title, setTitle] = useState("");
+  const [websiteUrl, setWebsiteUrl] = useState("");
+  const [requestNote, setRequestNote] = useState("");
+  const [file, setFile] = useState<File | null>(null);
+  const [fileError, setFileError] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [submitResult, setSubmitResult] = useState<{ ok: boolean; message: string } | null>(null);
+  const [history, setHistory] = useState<KnowledgeSubmission[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(true);
+  const [historyError, setHistoryError] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  async function loadHistory() {
+    if (!activeClinicId) return;
+    setHistoryLoading(true);
+    setHistoryError(false);
+    try {
+      const res = await apiFetch(activeClinicId, session?.csrfToken, "/knowledge-submissions");
+      if (!res.ok) throw new Error("failed");
+      const json = await res.json().catch(() => []);
+      setHistory(Array.isArray(json) ? json : Array.isArray(json?.submissions) ? json.submissions : []);
+    } catch {
+      setHistoryError(true);
+    } finally {
+      setHistoryLoading(false);
+    }
+  }
+
+  useEffect(() => { loadHistory(); }, [activeClinicId]);
+
+  function resetForm() {
+    setTitle("");
+    setWebsiteUrl("");
+    setRequestNote("");
+    setFile(null);
+    setFileError("");
+    if (fileInputRef.current) fileInputRef.current.value = "";
+  }
+
+  function handleFileChange(f: File | null) {
+    setFileError("");
+    if (!f) { setFile(null); return; }
+    const expectedMime = KB_MIME_BY_SOURCE[sourceType];
+    if (f.type !== expectedMime) {
+      setFileError(sourceType === "pdf" ? "File must be a PDF." : "File must be a DOCX document.");
+      setFile(null);
+      return;
+    }
+    if (f.size > KB_MAX_FILE_BYTES) {
+      setFileError("File exceeds the 50 MB maximum.");
+      setFile(null);
+      return;
+    }
+    setFile(f);
+  }
+
+  const canSubmit = !submitting && activeClinicId && title.trim().length > 0 && requestNote.length <= 2000 &&
+    (sourceType === "website" ? websiteUrl.trim().length > 0 : Boolean(file) && !fileError);
+
+  async function handleSubmit() {
+    if (!activeClinicId || !canSubmit) return;
+    setSubmitting(true);
+    setSubmitResult(null);
+    try {
+      const basePayload: Record<string, unknown> = {
+        source_type: sourceType,
+        title: title.trim(),
+        request_note: requestNote.trim() || undefined,
+      };
+
+      if (sourceType === "website") {
+        basePayload.website_url = websiteUrl.trim();
+      } else {
+        if (!file) throw new Error("no file");
+        const formData = new FormData();
+        formData.append("file", file);
+        const uploadRes = await apiUpload(activeClinicId, session?.csrfToken, `/knowledge-submissions/upload?sourceType=${sourceType}`, formData);
+        const uploadJson = await uploadRes.json().catch(() => ({}));
+        if (!uploadRes.ok) {
+          setSubmitResult({ ok: false, message: uploadJson?.error?.message ?? "Upload failed. Please try again." });
+          return;
+        }
+        basePayload.storage_key = uploadJson.storageKey;
+        basePayload.original_filename = uploadJson.originalFilename;
+        basePayload.mime_type = uploadJson.mimeType;
+        basePayload.byte_size = uploadJson.byteSize;
+        basePayload.sha256 = uploadJson.sha256;
+      }
+
+      const res = await apiFetch(activeClinicId, session?.csrfToken, "/knowledge-submissions", { method: "POST", body: basePayload });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setSubmitResult({ ok: false, message: json?.error?.message ?? "Submission failed. Please try again." });
+        return;
+      }
+      setSubmitResult({ ok: true, message: "Submitted for RivaCare review. It will not be live in the AI receptionist until our team approves it." });
+      resetForm();
+      loadHistory();
+    } catch {
+      setSubmitResult({ ok: false, message: "Could not reach the server. Please try again." });
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <div className="p-6 space-y-6">
+      <div>
+        <h1 className="text-lg font-semibold text-foreground">Knowledge Base</h1>
+        <p className="text-xs text-muted-foreground mt-0.5">Submit a website, PDF, or DOCX for the RivaCare team to review and add to Grace's knowledge.</p>
+      </div>
+
+      <Card className="p-5 space-y-4 max-w-2xl">
+        <div className="flex items-center gap-2">
+          {(["website", "pdf", "docx"] as const).map(t => (
+            <button
+              key={t}
+              type="button"
+              onClick={() => { setSourceType(t); setFile(null); setFileError(""); if (fileInputRef.current) fileInputRef.current.value = ""; }}
+              className={`text-xs font-medium px-3 py-1.5 rounded-md border transition-colors ${sourceType === t ? "border-primary bg-primary/10 text-primary" : "border-border hover:bg-muted text-foreground"}`}
+            >
+              {t === "website" ? "Website" : t.toUpperCase()}
+            </button>
+          ))}
+        </div>
+
+        <div className="space-y-1.5">
+          <label className="text-xs font-medium text-foreground">Title</label>
+          <input
+            value={title}
+            onChange={e => setTitle(e.target.value)}
+            placeholder="e.g. Clinic services and policies"
+            maxLength={300}
+            className="w-full bg-input-background border border-border rounded-md px-3 py-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+          />
+        </div>
+
+        {sourceType === "website" ? (
+          <div className="space-y-1.5">
+            <label className="text-xs font-medium text-foreground">Website URL</label>
+            <input
+              type="url"
+              value={websiteUrl}
+              onChange={e => setWebsiteUrl(e.target.value)}
+              placeholder="https://exampleclinic.ca/services"
+              className="w-full bg-input-background border border-border rounded-md px-3 py-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+            />
+            <p className="text-[10px] text-muted-foreground">Must be a public HTTPS page.</p>
+          </div>
+        ) : (
+          <div className="space-y-1.5">
+            <label className="text-xs font-medium text-foreground">{sourceType === "pdf" ? "PDF file" : "DOCX file"}</label>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept={sourceType === "pdf" ? ".pdf,application/pdf" : ".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document"}
+              onChange={e => handleFileChange(e.target.files?.[0] ?? null)}
+              className="w-full text-xs text-foreground file:mr-3 file:py-1.5 file:px-3 file:rounded-md file:border file:border-border file:bg-muted file:text-xs file:font-medium hover:file:bg-accent file:cursor-pointer cursor-pointer"
+            />
+            {fileError ? (
+              <p className="text-[10px] text-destructive">{fileError}</p>
+            ) : file ? (
+              <p className="text-[10px] text-muted-foreground">{file.name} · {(file.size / (1024 * 1024)).toFixed(2)} MB</p>
+            ) : (
+              <p className="text-[10px] text-muted-foreground">Maximum 50 MB.</p>
+            )}
+          </div>
+        )}
+
+        <div className="space-y-1.5">
+          <label className="text-xs font-medium text-foreground">Request note <span className="text-muted-foreground font-normal">(optional)</span></label>
+          <textarea
+            value={requestNote}
+            onChange={e => setRequestNote(e.target.value)}
+            rows={3}
+            maxLength={2000}
+            placeholder="Please use this for service questions."
+            className="w-full bg-input-background border border-border rounded-md px-3 py-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring resize-none"
+          />
+          <p className="text-[10px] text-muted-foreground text-right">{requestNote.length} / 2000</p>
+        </div>
+
+        {submitResult && (
+          <div className={`text-xs rounded-md px-3 py-2.5 ${submitResult.ok ? "bg-emerald-50 text-emerald-700" : "bg-destructive/10 text-destructive"}`}>
+            {submitResult.message}
+          </div>
+        )}
+
+        <button
+          type="button"
+          onClick={handleSubmit}
+          disabled={!canSubmit}
+          className="bg-primary text-primary-foreground text-xs font-semibold px-5 py-2 rounded-md hover:opacity-90 disabled:opacity-50 transition-opacity"
+        >
+          {submitting ? "Submitting…" : "Submit for Review"}
+        </button>
+      </Card>
+
+      <Card className="overflow-hidden">
+        <div className="px-4 py-3 border-b border-border flex items-center justify-between">
+          <h3 className="text-sm font-semibold text-foreground">Submission History</h3>
+          <button onClick={loadHistory} className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground hover:text-foreground transition-colors">
+            <RefreshCw size={12} /> Refresh
+          </button>
+        </div>
+        {historyLoading ? (
+          <p className="text-xs text-muted-foreground py-10 text-center">Loading…</p>
+        ) : historyError ? (
+          <p className="text-xs text-muted-foreground py-10 text-center">Could not load submission history. <button onClick={loadHistory} className="text-primary hover:underline">Try again</button></p>
+        ) : history.length === 0 ? (
+          <p className="text-xs text-muted-foreground py-10 text-center">No submissions yet.</p>
+        ) : (
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="border-b border-border bg-muted/40">
+                {["Title", "Source", "File / Website", "Submitted", "Status"].map(h => (
+                  <th key={h} className="text-left px-4 py-2.5 text-muted-foreground font-medium">{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {history.map(s => (
+                <tr key={s.id} className="border-b border-border last:border-0 hover:bg-muted/30 transition-colors">
+                  <td className="px-4 py-3 font-medium text-foreground">{s.title}</td>
+                  <td className="px-4 py-3 text-muted-foreground capitalize">{s.source_type}</td>
+                  <td className="px-4 py-3 text-muted-foreground">{s.source_type === "website" ? websiteHostname(s.website_url) : (s.original_filename ?? "—")}</td>
+                  <td className="px-4 py-3 font-mono text-muted-foreground">{formatRelativeTime(s.submitted_at ?? s.created_at ?? "")}</td>
+                  <td className="px-4 py-3"><Badge label={KB_STATUS_LABEL[s.status] ?? s.status} variant={KB_STATUS_BADGE_VARIANT[s.status] ?? "Neutral"} /></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </Card>
+    </div>
+  );
+}
+
 // ── Screen: Billing & Usage ───────────────────────────────────────────────────
 function BillingScreen() {
   // No dedicated "billing" webhook exists - everything here is derived from
@@ -5420,6 +5722,7 @@ const SCREENS: Record<string, React.FC> = {
   "analytics": InboundAnalyticsScreen,
   "staff-queue": StaffQueueScreen,
   "activity": ActivityScreen,
+  "knowledge-base": KnowledgeBaseScreen,
   "settings": SettingsScreen,
   "outbound-make-call": MakeCallScreen,
   "outbound-call-logs": OutboundCallLogsScreen,

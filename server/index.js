@@ -1,8 +1,10 @@
 ﻿import 'dotenv/config';
 import express from 'express';
-import { readFileSync } from 'fs';
-import { join, dirname } from 'path';
+import multer from 'multer';
+import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'fs';
+import { join, dirname, extname } from 'path';
 import { fileURLToPath } from 'url';
+import { randomUUID, createHash } from 'crypto';
 import { prisma } from './db.js';
 import { requireSession, requireCsrf, requireClinicAccess, requireRole, verifyCredentials, clinicsForUser, issueSession, clearSession, rateLimit, readCsrfToken } from './auth.js';
 import * as n8nProd from './n8n.js';
@@ -17,6 +19,18 @@ const PORT = process.env.API_PORT ?? 3001;
 // user session) to read a clinic's settings file.
 const DASHBOARD_API_KEY = process.env.DASHBOARD_API_KEY ?? '';
 const SETTINGS_FILE = process.env.SETTINGS_FILE ?? join(ROOT, 'data/settings.json');
+// Private knowledge-base upload storage (FRONTEND-DEVELOPER-HANDOFF.md - the
+// "Knowledge Base Submission Queue" doc). Deliberately NOT under any
+// statically-served path - static file serving is restricted to `/` only
+// (see the catch-all 404 below), so a file written here is unreachable by
+// URL. Files are addressed only by an opaque storage_key returned to the
+// browser, never a public URL.
+const KNOWLEDGE_UPLOADS_DIR = process.env.KNOWLEDGE_UPLOADS_DIR ?? join(ROOT, 'data/knowledge-uploads');
+const KNOWLEDGE_UPLOAD_MAX_BYTES = 50 * 1024 * 1024;
+const KNOWLEDGE_UPLOAD_MIME_TYPES = {
+  pdf: 'application/pdf',
+  docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+};
 
 const app = express();
 app.use(express.json());
@@ -440,6 +454,130 @@ app.get('/api/dashboard/sms-follow-ups/status', ...dashboardAuth, apiRoute(async
       suppressed: Number(counts.suppressed) || 0,
     },
   });
+}));
+
+// ── Knowledge Base Submission Queue (FRONTEND-DEVELOPER-HANDOFF.md) ─────────
+// Clinic users submit a website URL, PDF, or DOCX for a RivaCare
+// administrator to manually review and add to Retell - this server never
+// uploads anything to Retell itself. PDF/DOCX bytes never reach n8n; only
+// safe metadata (storage_key/sha256/size) does, per the doc's private
+// file upload flow.
+function resolveKnowledgeUploadPath(storageKey, tenantId, clinicId) {
+  // Scoped to THIS request's verified tenant/clinic, not whatever the
+  // browser sent - a storage_key naming a different clinic can never
+  // resolve here, structurally, regardless of what string is supplied.
+  const prefix = `knowledge-submissions/${tenantId}/${clinicId}/`;
+  if (typeof storageKey !== 'string' || !storageKey.startsWith(prefix)) return null;
+  const rest = storageKey.slice(prefix.length);
+  if (!rest || rest.includes('/') || rest.includes('..')) return null;
+  return join(KNOWLEDGE_UPLOADS_DIR, tenantId, clinicId, rest);
+}
+
+const knowledgeUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: KNOWLEDGE_UPLOAD_MAX_BYTES, files: 1 },
+  fileFilter: (req, file, cb) => {
+    const sourceType = String(req.query.sourceType ?? '');
+    const expectedMime = KNOWLEDGE_UPLOAD_MIME_TYPES[sourceType];
+    if (!expectedMime) return cb(badRequest('sourceType query param must be "pdf" or "docx".'));
+    if (file.mimetype !== expectedMime) return cb(badRequest(`File must be ${expectedMime} for sourceType "${sourceType}".`));
+    cb(null, true);
+  },
+});
+
+// Normalizes multer's own error-callback style (which bypasses apiRoute's
+// try/catch) into the same { error: { code, message, retryable } } contract
+// every other route uses, so a bad upload never falls through to Express's
+// default HTML error page.
+function knowledgeUploadMiddleware(req, res, next) {
+  knowledgeUpload.single('file')(req, res, (err) => {
+    if (!err) return next();
+    if (err instanceof multer.MulterError && err.code === 'LIMIT_FILE_SIZE') {
+      return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'File exceeds the 50 MB maximum.', retryable: false } });
+    }
+    const status = typeof err.status === 'number' ? err.status : 400;
+    return res.status(status).json({ error: { code: err.code ?? 'VALIDATION_ERROR', message: err.message ?? 'Upload failed.', retryable: false } });
+  });
+}
+
+app.post('/api/dashboard/knowledge-submissions/upload', ...dashboardAuth, requireRole('owner', 'admin'), rateLimit('kb-upload', 20, 60_000), knowledgeUploadMiddleware, apiRoute(async (req, res) => {
+  if (!req.file) throw badRequest('file is required.');
+  const dir = join(KNOWLEDGE_UPLOADS_DIR, req.session.tenantId, req.clinicId);
+  mkdirSync(dir, { recursive: true });
+  const filename = `${randomUUID()}${extname(req.file.originalname).toLowerCase()}`;
+  const sha256 = createHash('sha256').update(req.file.buffer).digest('hex');
+  writeFileSync(join(dir, filename), req.file.buffer);
+  // Opaque storage_key only - never a public/permanent URL (doc's private
+  // upload flow step 3).
+  res.json({
+    storageKey: `knowledge-submissions/${req.session.tenantId}/${req.clinicId}/${filename}`,
+    originalFilename: req.file.originalname,
+    mimeType: req.file.mimetype,
+    byteSize: req.file.size,
+    sha256,
+  });
+}));
+
+app.post('/api/dashboard/knowledge-submissions', ...dashboardAuth, requireRole('owner', 'admin'), rateLimit('kb-submit', 20, 60_000), apiRoute(async (req, res) => {
+  const body = req.body ?? {};
+  const sourceType = String(body.source_type ?? '');
+  if (!['website', 'pdf', 'docx'].includes(sourceType)) throw badRequest('source_type must be "website", "pdf", or "docx".');
+  const title = String(body.title ?? '').trim();
+  if (!title) throw badRequest('title is required.');
+  if (title.length > 300) throw badRequest('title must be 300 characters or fewer.');
+  const requestNote = body.request_note != null ? String(body.request_note) : undefined;
+  if (requestNote && requestNote.length > 2000) throw badRequest('request_note must be 2,000 characters or fewer.');
+
+  const payload = { title, request_note: requestNote, source_type: sourceType };
+
+  if (sourceType === 'website') {
+    const rawUrl = String(body.website_url ?? '');
+    let parsed;
+    try {
+      parsed = new URL(rawUrl);
+    } catch {
+      throw badRequest('website_url must be a valid URL.');
+    }
+    if (parsed.protocol !== 'https:') throw badRequest('website_url must use HTTPS.');
+    if (parsed.username || parsed.password) throw badRequest('website_url must not include embedded credentials.');
+    payload.website_url = parsed.toString();
+    payload.idempotency_key = `kb-web-${randomUUID()}`;
+  } else {
+    const storageKey = String(body.storage_key ?? '');
+    const diskPath = resolveKnowledgeUploadPath(storageKey, req.session.tenantId, req.clinicId);
+    if (!diskPath || !existsSync(diskPath)) throw badRequest('storage_key does not match an uploaded file for this clinic.');
+    const originalFilename = String(body.original_filename ?? '').trim();
+    const sha256 = String(body.sha256 ?? '');
+    const byteSize = Number(body.byte_size);
+    if (!originalFilename) throw badRequest('original_filename is required.');
+    if (!/^[a-f0-9]{64}$/.test(sha256)) throw badRequest('sha256 must be a 64-character lowercase hex string.');
+    if (!Number.isFinite(byteSize) || byteSize <= 0) throw badRequest('byte_size is required.');
+    payload.storage_provider = 'private_object_storage';
+    payload.storage_key = storageKey;
+    payload.original_filename = originalFilename;
+    payload.mime_type = KNOWLEDGE_UPLOAD_MIME_TYPES[sourceType];
+    payload.byte_size = byteSize;
+    payload.sha256 = sha256;
+    payload.idempotency_key = `kb-file-${randomUUID()}`;
+  }
+
+  res.json(await n8nProd.knowledgeSubmissions.submit(req.session.userId, req.session.tenantId, req.clinicId, payload));
+}));
+
+app.get('/api/dashboard/knowledge-submissions', ...dashboardAuth, requireRole('owner', 'admin'), apiRoute(async (req, res) => {
+  res.json(await n8nProd.knowledgeSubmissions.list(req.session.userId, req.session.tenantId, req.clinicId));
+}));
+
+app.get('/api/dashboard/knowledge-submissions/:id', ...dashboardAuth, requireRole('owner', 'admin'), apiRoute(async (req, res) => {
+  const result = await n8nProd.knowledgeSubmissions.get(req.session.userId, req.session.tenantId, req.clinicId, req.params.id);
+  // Defense in depth: n8n should already scope by the tenant_id/clinic_id we
+  // sent, but never trust a record whose ownership fields don't match the
+  // verified session as belonging to this clinic (doc acceptance test #1).
+  const record = result?.record ?? result;
+  if (record && (record.tenant_id !== req.session.tenantId || record.clinic_id !== req.clinicId)) {
+    return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Submission not found.', retryable: false } });
+  }
+  res.json(result);
 }));
 
 // ── Payment Recovery (§6.4) ──────────────────────────────────────────────────

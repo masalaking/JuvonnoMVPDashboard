@@ -2,3 +2,7 @@ node_modules
 .env
 .env.*
 !.env.example
+
+# Private knowledge-base uploads (never committed - these are clinics'
+# actual submitted documents, addressed only by opaque storage_key).
+data/knowledge-uploads/
