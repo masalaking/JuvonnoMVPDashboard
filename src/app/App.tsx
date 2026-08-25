@@ -4485,45 +4485,59 @@ function SettingsScreen() {
 
 // ── Screen: Billing & Usage ───────────────────────────────────────────────────
 function BillingScreen() {
-  const { invoices, loadError } = useDashboard();
+  // No dedicated "billing" webhook exists - everything here is derived from
+  // data other screens already fetch and display (the same overview/
+  // outboundOverview sources Overview uses, plus the real inbound invoices
+  // feed) rather than a separate, currently-unwired billing endpoint. Any
+  // number that can't be sourced from one of these is left out entirely
+  // instead of showing a permanent "—".
+  const { invoices, overview, outboundOverview, loadError } = useDashboard();
+  const noOverviewData = !overview && !outboundOverview;
   // Build Invoices Response already sorts newest period first.
   const latest = invoices[0] ?? null;
-  const latestMinutesUsed = num(latest?.minutesUsed);
-  const latestIncludedMinutes = num(latest?.includedMinutes);
-  const billingPct = latestIncludedMinutes > 0 ? Math.min(100, (latestMinutesUsed / latestIncludedMinutes) * 100) : 0;
+
+  // Same additive inbound+outbound convention the Overview screen already
+  // uses for combining these two separate n8n Tracker workflows' numbers.
+  const combinedUsed = (overview?.minutesUsed ?? 0) + (outboundOverview?.minutesUsed ?? 0);
+  const combinedIncluded = (overview?.minutesIncluded ?? 0) + (outboundOverview?.minutesIncluded ?? 0);
+  const combinedBasePrice = (overview?.basePrice ?? 0) + (outboundOverview?.basePrice ?? 0);
+  const combinedOverageUSD = (overview?.overageUSD ?? 0) + (outboundOverview?.overageUSD ?? 0);
+  const combinedOverageMin = (overview?.overageMinutes ?? 0) + (outboundOverview?.overageMinutes ?? 0);
+  const combinedMonthlyTotal = (overview?.monthlyTotal ?? 0) + (outboundOverview?.monthlyTotal ?? 0);
+  const combinedCalls = (overview?.totalCalls ?? 0) + (outboundOverview?.totalCalls ?? 0);
+  const billingPct = combinedIncluded > 0 ? Math.min(100, (combinedUsed / combinedIncluded) * 100) : 0;
+  const billingPeriod = overview?.billingPeriod || outboundOverview?.billingPeriod || null;
 
   return (
     <div className="p-6 space-y-6">
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-lg font-semibold text-foreground">Billing & Usage</h1>
-          <p className="text-xs text-muted-foreground">Billing cycle: {latest?.period ?? "—"}</p>
+          <p className="text-xs text-muted-foreground">Billing cycle: {billingPeriod ?? "—"}</p>
         </div>
-        <button className="flex items-center gap-2 bg-muted border border-border text-xs font-medium px-3 py-1.5 rounded-md hover:bg-accent transition-colors">
-          <Download size={12} /> Download Invoice
-        </button>
       </div>
 
-      {invoices.length === 0 && (
+      {noOverviewData && (
         <div className={`text-xs rounded-md px-3 py-2.5 ${loadError ? "bg-destructive/10 text-destructive" : "bg-muted text-muted-foreground"}`}>
-          {loadError ? `Could not load billing data — ${loadError}` : "No usage recorded yet — a plan may not be configured for this clinic."}
+          {loadError ? `Could not load usage data — ${loadError}` : "No usage recorded yet — a plan may not be configured for this clinic."}
         </div>
       )}
 
       <div className="grid grid-cols-4 gap-4">
-        <KpiCard label="Current Plan" value={latest ? `$${num(latest.baseRate).toFixed(0)}/mo` : "—"} sub={latest ? `${latestIncludedMinutes.toLocaleString()} min included` : "—"} icon={Star} color="purple" />
-        <KpiCard label="Minutes Used" value={latest ? `${latestMinutesUsed} / ${latestIncludedMinutes}` : "—"} sub="of plan included" icon={Clock} color="amber" />
-        <KpiCard label="Est. Overage" value={latest ? `$${num(latest.overageCost).toFixed(2)}` : "—"} sub={latest ? `${num(latest.overageMin)} min over` : "vs plan limits"} icon={CreditCard} color={latest?.isOverage ? "red" : "green"} />
-        <KpiCard label="Latest Invoice" value={latest?.amount ?? "—"} sub={latest ? (latest.paid ? "Paid" : latest.status) : "Current cycle"} icon={CreditCard} color="purple" />
+        <KpiCard label="Current Plan" value={!noOverviewData ? `$${combinedBasePrice.toFixed(0)}/mo` : "—"} sub={!noOverviewData ? `${combinedIncluded.toLocaleString()} min included · inbound + outbound` : "—"} icon={Star} color="purple" />
+        <KpiCard label="Minutes Used" value={!noOverviewData ? `${combinedUsed.toFixed(2)} / ${combinedIncluded}` : "—"} sub="of plan included" icon={Clock} color="amber" />
+        <KpiCard label="Est. Overage" value={!noOverviewData ? `$${combinedOverageUSD.toFixed(2)}` : "—"} sub={!noOverviewData ? `${combinedOverageMin.toFixed(2)} min over` : "vs plan limits"} icon={CreditCard} color={combinedOverageMin > 0 ? "red" : "green"} />
+        <KpiCard label="Est. Monthly Total" value={!noOverviewData ? `$${combinedMonthlyTotal.toFixed(2)}` : "—"} sub={!noOverviewData ? `${combinedCalls} calls this period` : "Current cycle"} icon={CreditCard} color="purple" />
       </div>
 
       <div className="grid grid-cols-2 gap-4">
         <Card className="overflow-hidden">
           <div className="px-4 py-3 border-b border-border">
             <h3 className="text-sm font-semibold text-foreground">Invoice History</h3>
+            <p className="text-[10px] text-muted-foreground mt-0.5">Inbound billing periods on record.</p>
           </div>
           {invoices.length === 0 ? (
-            <p className="text-xs text-muted-foreground py-10 text-center">No invoices yet.</p>
+            <p className="text-xs text-muted-foreground py-10 text-center px-4">No invoices generated yet — invoices are produced automatically at the end of each billing period.</p>
           ) : (
             <table className="w-full text-xs">
               <thead>
@@ -4553,26 +4567,26 @@ function BillingScreen() {
             <div>
               <div className="flex justify-between text-xs mb-1.5">
                 <span className="text-muted-foreground">AI Minutes Used</span>
-                <span className="font-semibold text-foreground font-mono">{latest ? `${latestMinutesUsed} / ${latestIncludedMinutes}` : "—"}</span>
+                <span className="font-semibold text-foreground font-mono">{!noOverviewData ? `${combinedUsed.toFixed(2)} / ${combinedIncluded}` : "—"}</span>
               </div>
               <div className="h-2.5 bg-muted rounded-full overflow-hidden">
                 <div className="h-full bg-amber-400 rounded-full" style={{ width: `${billingPct}%` }} />
               </div>
-              {latest && billingPct >= 80 && (
+              {!noOverviewData && billingPct >= 80 && (
                 <p className="text-[10px] text-amber-600 mt-1 font-medium">
-                  ⚠ {latest.isOverage ? "Over plan limit." : "Approaching plan limit."} {Math.max(0, latestIncludedMinutes - latestMinutesUsed)} minutes remaining.
+                  ⚠ {combinedOverageMin > 0 ? "Over plan limit." : "Approaching plan limit."} {Math.max(0, combinedIncluded - combinedUsed).toFixed(2)} minutes remaining.
                 </p>
               )}
             </div>
             <div className="pt-2 space-y-2 text-xs">
               {[
-                ["Included Minutes", latest ? `${latestIncludedMinutes.toLocaleString()}/mo` : "—"],
-                ["Overage Rate", latest ? `$${num(latest.overageRate).toFixed(2)}/min` : "—"],
-                ["Overage Minutes", latest ? String(num(latest.overageMin)) : "—"],
-                ["Invoice Status", latest ? (latest.paid ? "Paid" : latest.status) : "—"],
-                ["Generated", latest?.date || "—"],
-                ["Due Date", latest?.dueDate || "—"],
-              ].map(([k, v]) => (
+                ["Included Minutes", !noOverviewData ? `${combinedIncluded.toLocaleString()}/mo` : null],
+                ["Overage Rate", (overview ?? outboundOverview) ? `$${num((overview ?? outboundOverview)!.overageRate).toFixed(2)}/min` : null],
+                ["Overage Minutes", !noOverviewData ? combinedOverageMin.toFixed(2) : null],
+                ["Total Calls (Period)", !noOverviewData ? String(combinedCalls) : null],
+                ["Latest Invoice Status", latest ? (latest.paid ? "Paid" : latest.status) : null],
+                ["Latest Invoice Due", latest?.dueDate || null],
+              ].filter(([, v]) => v !== null).map(([k, v]) => (
                 <div key={k} className="flex justify-between py-1.5 border-b border-border last:border-0">
                   <span className="text-muted-foreground">{k}</span>
                   <span className="font-medium text-foreground">{v}</span>
