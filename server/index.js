@@ -406,8 +406,23 @@ app.get('/api/dashboard/outbound/invoices', ...dashboardAuth, apiRoute(async (re
 // Replaces the old single-shot make-call route above: creating a batch only
 // ever writes clinic-scoped database rows (Draft status) - it never touches
 // Retell. Only the separate, deliberate /dispatch route below does that.
+// FRONTEND-DEVELOPER-HANDOFF-COMBINED.md §3: "Use the same E.164 validation
+// everywhere" - this exact pattern, matched on the frontend too.
 function isE164Phone(value) {
-  return /^\+[1-9]\d{6,14}$/.test(String(value ?? ''));
+  return /^\+[1-9]\d{7,14}$/.test(String(value ?? ''));
+}
+
+// A network retry must reuse the original idempotency key rather than
+// minting a fresh one, or the retry becomes a silent duplicate (handoff
+// §1/§4). The browser generates and holds a stable per-attempt token across
+// retries of the same logical submit; this only derives the final n8n key
+// from it (still server-controlled format/prefix, never trusts the raw
+// client value directly) rather than calling randomUUID() on every request.
+function stableIdempotencyKey(prefix, clientOperationId) {
+  const token = typeof clientOperationId === 'string' && /^[a-zA-Z0-9_-]{8,100}$/.test(clientOperationId)
+    ? clientOperationId
+    : randomUUID();
+  return `${prefix}-${token}`;
 }
 
 app.post('/api/dashboard/outbound-batches', ...dashboardAuth, requireRole('owner', 'admin'), rateLimit('outbound-batch-create', 20, 60_000), apiRoute(async (req, res) => {
@@ -431,16 +446,27 @@ app.post('/api/dashboard/outbound-batches', ...dashboardAuth, requireRole('owner
     };
   });
 
-  const payload = { name, contacts, idempotency_key: `outbound-batch-${randomUUID()}` };
+  const payload = { name, contacts, idempotency_key: stableIdempotencyKey('outbound-batch', body.client_operation_id) };
+  // Not wrapped in requireN8nSuccess: success:false here can mean a
+  // legitimate "duplicate" (same idempotency_key returned the existing
+  // draft) rather than a failure - the frontend reads success/duplicate/
+  // error_code itself (handoff §3/§4).
   res.json(await n8nProd.outboundBatches.create(req.session.userId, req.session.tenantId, req.clinicId, payload));
 }));
 
 app.get('/api/dashboard/outbound-batches', ...dashboardAuth, apiRoute(async (req, res) => {
-  res.json(await n8nProd.outboundBatches.list(req.session.userId, req.session.tenantId, req.clinicId));
+  const result = requireN8nSuccess(
+    await n8nProd.outboundBatches.list(req.session.userId, req.session.tenantId, req.clinicId),
+    'The batch history could not be loaded.',
+  );
+  res.json(result.batches ?? []);
 }));
 
 app.get('/api/dashboard/outbound-batches/:id', ...dashboardAuth, apiRoute(async (req, res) => {
-  const result = await n8nProd.outboundBatches.get(req.session.userId, req.session.tenantId, req.clinicId, req.params.id);
+  const result = requireN8nSuccess(
+    await n8nProd.outboundBatches.get(req.session.userId, req.session.tenantId, req.clinicId, req.params.id),
+    'The batch could not be loaded.',
+  );
   // Defense in depth: never trust a record whose ownership fields don't
   // match the verified session as belonging to this clinic.
   const record = result?.batch ?? result;
@@ -579,7 +605,7 @@ app.post('/api/dashboard/knowledge-submissions', ...dashboardAuth, requireRole('
     if (parsed.protocol !== 'https:') throw badRequest('website_url must use HTTPS.');
     if (parsed.username || parsed.password) throw badRequest('website_url must not include embedded credentials.');
     payload.website_url = parsed.toString();
-    payload.idempotency_key = `kb-web-${randomUUID()}`;
+    payload.idempotency_key = stableIdempotencyKey('kb-web', body.client_operation_id);
   } else {
     const storageKey = String(body.storage_key ?? '');
     const diskPath = resolveKnowledgeUploadPath(storageKey, req.session.tenantId, req.clinicId);
@@ -596,22 +622,35 @@ app.post('/api/dashboard/knowledge-submissions', ...dashboardAuth, requireRole('
     payload.mime_type = KNOWLEDGE_UPLOAD_MIME_TYPES[sourceType];
     payload.byte_size = byteSize;
     payload.sha256 = sha256;
-    payload.idempotency_key = `kb-file-${randomUUID()}`;
+    payload.idempotency_key = stableIdempotencyKey('kb-file', body.client_operation_id);
   }
 
+  // Not wrapped in requireN8nSuccess: success:false here can mean a
+  // legitimate "duplicate" (same idempotency_key returned the existing
+  // record) rather than a failure - the frontend reads success/duplicate/
+  // error_code itself (handoff §2/§4), same shape n8n actually sends back.
   res.json(await n8nProd.knowledgeSubmissions.submit(req.session.userId, req.session.tenantId, req.clinicId, payload));
 }));
 
 app.get('/api/dashboard/knowledge-submissions', ...dashboardAuth, requireRole('owner', 'admin'), apiRoute(async (req, res) => {
-  res.json(await n8nProd.knowledgeSubmissions.list(req.session.userId, req.session.tenantId, req.clinicId));
+  const result = requireN8nSuccess(
+    await n8nProd.knowledgeSubmissions.list(req.session.userId, req.session.tenantId, req.clinicId),
+    'The submission history could not be loaded.',
+  );
+  res.json(result.submissions ?? []);
 }));
 
 app.get('/api/dashboard/knowledge-submissions/:id', ...dashboardAuth, requireRole('owner', 'admin'), apiRoute(async (req, res) => {
-  const result = await n8nProd.knowledgeSubmissions.get(req.session.userId, req.session.tenantId, req.clinicId, req.params.id);
+  const result = requireN8nSuccess(
+    await n8nProd.knowledgeSubmissions.get(req.session.userId, req.session.tenantId, req.clinicId, req.params.id),
+    'The submission could not be loaded.',
+  );
   // Defense in depth: n8n should already scope by the tenant_id/clinic_id we
   // sent, but never trust a record whose ownership fields don't match the
   // verified session as belonging to this clinic (doc acceptance test #1).
-  const record = result?.record ?? result;
+  // Normalized to n8n's actual { submission: ... } shape (handoff §4) -
+  // never require a `record` property.
+  const record = result?.submission ?? result;
   if (record && (record.tenant_id !== req.session.tenantId || record.clinic_id !== req.clinicId)) {
     return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Submission not found.', retryable: false } });
   }

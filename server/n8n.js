@@ -214,7 +214,9 @@ async function knowledgeSubmissionsAction(action, userId, tenantId, clinicId, ex
 export const knowledgeSubmissions = {
   submit: (u, t, c, payload) => knowledgeSubmissionsAction('submit', u, t, c, payload),
   list: (u, t, c) => knowledgeSubmissionsAction('list', u, t, c),
-  get: (u, t, c, id) => knowledgeSubmissionsAction('get', u, t, c, { id }),
+  // FRONTEND-DEVELOPER-HANDOFF-COMBINED.md §2: "the get action uses
+  // submission_id, not id".
+  get: (u, t, c, id) => knowledgeSubmissionsAction('get', u, t, c, { submission_id: id }),
 };
 
 // ── Outbound Batch Calls (FRONTEND-DEVELOPER-HANDOFF (1).md) ────────────────
