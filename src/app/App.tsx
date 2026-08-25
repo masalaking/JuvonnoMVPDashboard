@@ -5,7 +5,7 @@ import {
   Bell, HelpCircle, Search, User, Circle, CheckCircle2, AlertCircle,
   XCircle, Clock, ArrowUpRight, ArrowDownRight, Minus, Play, Pause,
   Download, Flag, Send, ChevronRight, Phone, Star, Zap, Shield,
-  RefreshCw, Eye, EyeOff, Edit2, Trash2, Plus, Filter, Calendar,
+  RefreshCw, Eye, EyeOff, Edit2, Trash2, Plus, Calendar,
   MoreHorizontal, Inbox, AlertTriangle, Check, X, Volume2, List, Columns,
   Lock, Unlock, Info, UploadCloud, MessageSquare, Users, Globe, Mail,
   Building2, Wifi, WifiOff, Database, Server, Layers, ToggleLeft,
@@ -900,11 +900,6 @@ function TopBar() {
           <ChevronDown size={12} className="text-muted-foreground ml-auto" />
         </div>
       )}
-      <div className="flex items-center gap-2 bg-muted border border-border rounded-md px-3 py-1.5 cursor-pointer hover:bg-accent transition-colors">
-        <Calendar size={13} className="text-muted-foreground" />
-        <span className="text-sm text-foreground">Date range</span>
-        <ChevronDown size={12} className="text-muted-foreground" />
-      </div>
       <div className="flex-1 relative max-w-xs">
         <Search size={13} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
         <input className="w-full bg-muted border border-border rounded-md pl-8 pr-3 py-1.5 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring" placeholder="Search calls, patients…" />
@@ -1372,8 +1367,31 @@ function OutboundAgentScreen() {
 // ── Screen: Call Logs ─────────────────────────────────────────────────────────
 function CallLogsScreen({ direction }: { direction: "inbound" | "outbound" }) {
   const { callLogs: allCallLogs, transcripts: allTranscripts } = useDashboard();
-  const callLogs = allCallLogs.filter(c => (c.direction ?? "inbound") === direction);
+  const directionLogs = allCallLogs.filter(c => (c.direction ?? "inbound") === direction);
   const [selectedCall, setSelectedCall] = useState<CallLog | null>(null);
+  const [search, setSearch] = useState("");
+  const [outcomeFilter, setOutcomeFilter] = useState("All");
+  const [sentimentFilter, setSentimentFilter] = useState("All");
+  const [negativeOnly, setNegativeOnly] = useState(false);
+  const [failedOnly, setFailedOnly] = useState(false);
+  const [staffActionOnly, setStaffActionOnly] = useState(false);
+
+  const outcomeOptions = ["All", ...Array.from(new Set(directionLogs.map(c => c.outcome).filter((v): v is string => Boolean(v))))];
+  const sentimentOptions = ["All", ...Array.from(new Set(directionLogs.map(c => c.sentiment).filter((v): v is string => Boolean(v))))];
+
+  const callLogs = directionLogs.filter(c => {
+    if (search.trim()) {
+      const q = search.trim().toLowerCase();
+      const haystack = `${c.caller ?? ""} ${c.phone ?? ""}`.toLowerCase();
+      if (!haystack.includes(q)) return false;
+    }
+    if (outcomeFilter !== "All" && c.outcome !== outcomeFilter) return false;
+    if (sentimentFilter !== "All" && c.sentiment !== sentimentFilter) return false;
+    if (negativeOnly && c.sentiment !== "Negative" && c.sentiment !== "Frustrated") return false;
+    if (failedOnly && c.outcome !== "Failed") return false;
+    if (staffActionOnly && !c.staffAction) return false;
+    return true;
+  });
   // The calls endpoint doesn't carry full conversation text - the transcripts
   // endpoint does, keyed by the same call id - so look it up there for the modal.
   const selectedTranscript = selectedCall ? allTranscripts.find(t => String(t.id) === String(selectedCall.id)) : null;
@@ -1387,21 +1405,30 @@ function CallLogsScreen({ direction }: { direction: "inbound" | "outbound" }) {
       {/* Filters */}
       <Card className="p-3">
         <div className="flex items-center gap-2 flex-wrap">
-          <Filter size={13} className="text-muted-foreground flex-shrink-0" />
-          {["Date Range", "Outcome", "Sentiment", "Service", "Provider", "Staff Action"].map((f) => (
-            <button key={f} className="flex items-center gap-1.5 text-xs font-medium px-2.5 py-1.5 border border-border rounded-md hover:bg-muted transition-colors">
-              {f} <ChevronDown size={11} />
-            </button>
-          ))}
-          <div className="flex items-center gap-2 ml-auto">
+          <div className="relative flex-1 min-w-[200px] max-w-xs">
+            <Search size={13} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
+            <input
+              value={search}
+              onChange={e => setSearch(e.target.value)}
+              placeholder="Search caller or phone…"
+              className="w-full bg-input-background border border-border rounded-md pl-8 pr-3 py-1.5 text-xs placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+            />
+          </div>
+          <select value={outcomeFilter} onChange={e => setOutcomeFilter(e.target.value)} className="text-xs font-medium px-2.5 py-1.5 border border-border rounded-md bg-card hover:bg-muted transition-colors focus:outline-none focus:ring-1 focus:ring-ring">
+            {outcomeOptions.map(o => <option key={o} value={o}>{o === "All" ? "All Outcomes" : o}</option>)}
+          </select>
+          <select value={sentimentFilter} onChange={e => setSentimentFilter(e.target.value)} className="text-xs font-medium px-2.5 py-1.5 border border-border rounded-md bg-card hover:bg-muted transition-colors focus:outline-none focus:ring-1 focus:ring-ring">
+            {sentimentOptions.map(o => <option key={o} value={o}>{o === "All" ? "All Sentiments" : o}</option>)}
+          </select>
+          <div className="flex items-center gap-3 ml-auto">
             <label className="flex items-center gap-1.5 text-xs text-foreground cursor-pointer">
-              <input type="checkbox" className="rounded" /> Negative only
+              <input type="checkbox" checked={negativeOnly} onChange={e => setNegativeOnly(e.target.checked)} className="rounded" /> Negative only
             </label>
             <label className="flex items-center gap-1.5 text-xs text-foreground cursor-pointer">
-              <input type="checkbox" className="rounded" /> Failed only
+              <input type="checkbox" checked={failedOnly} onChange={e => setFailedOnly(e.target.checked)} className="rounded" /> Failed only
             </label>
             <label className="flex items-center gap-1.5 text-xs text-foreground cursor-pointer">
-              <input type="checkbox" className="rounded" /> Staff action needed
+              <input type="checkbox" checked={staffActionOnly} onChange={e => setStaffActionOnly(e.target.checked)} className="rounded" /> Staff action needed
             </label>
           </div>
         </div>
@@ -1420,7 +1447,7 @@ function CallLogsScreen({ direction }: { direction: "inbound" | "outbound" }) {
             <tbody>
               {callLogs.length === 0 ? (
                 <tr><td colSpan={7} className="px-3 py-10 text-center text-muted-foreground">
-                  No {direction} calls yet.
+                  {directionLogs.length === 0 ? `No ${direction} calls yet.` : "No calls match these filters."}
                 </td></tr>
               ) : callLogs.map((c) => (
                 <tr
@@ -1518,8 +1545,21 @@ function OutboundRecordingsScreen() { return <RecordingsScreen direction="outbou
 // ── Screen: Transcripts ───────────────────────────────────────────────────────
 function TranscriptsScreen({ direction }: { direction: "inbound" | "outbound" }) {
   const { transcripts: allTranscripts } = useDashboard();
-  const filteredTranscripts = allTranscripts.filter(t => (t.direction ?? "inbound") === direction);
+  const directionTranscripts = allTranscripts.filter(t => (t.direction ?? "inbound") === direction);
   const [selected, setSelected] = useState<Transcript | null>(null);
+  const [search, setSearch] = useState("");
+  const [quickFilter, setQuickFilter] = useState<"All" | "Needs Review" | "Negative">("All");
+
+  const filteredTranscripts = directionTranscripts.filter(t => {
+    if (search.trim()) {
+      const q = search.trim().toLowerCase();
+      const haystack = `${t.caller ?? ""} ${t.phone ?? ""} ${t.preview ?? ""}`.toLowerCase();
+      if (!haystack.includes(q)) return false;
+    }
+    if (quickFilter === "Needs Review" && t.outcome !== "Staff Action Needed") return false;
+    if (quickFilter === "Negative" && t.sentiment !== "Negative" && t.sentiment !== "Frustrated") return false;
+    return true;
+  });
 
   return (
     <div className="p-6 h-full flex flex-col gap-4">
@@ -1532,16 +1572,29 @@ function TranscriptsScreen({ direction }: { direction: "inbound" | "outbound" })
         <div className="w-72 flex-shrink-0 flex flex-col gap-2">
           <div className="relative">
             <Search size={13} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
-            <input className="w-full bg-card border border-border rounded-md pl-8 pr-3 py-1.5 text-xs placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring" placeholder="Search transcripts…" />
+            <input
+              value={search}
+              onChange={e => setSearch(e.target.value)}
+              className="w-full bg-card border border-border rounded-md pl-8 pr-3 py-1.5 text-xs placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+              placeholder="Search caller, phone, or preview…"
+            />
           </div>
           <div className="flex gap-1.5">
-            {["All", "Needs Review", "Negative"].map(f => (
-              <button key={f} className="text-[10px] px-2 py-1 rounded border border-border hover:bg-muted transition-colors font-medium">{f}</button>
+            {(["All", "Needs Review", "Negative"] as const).map(f => (
+              <button
+                key={f}
+                onClick={() => setQuickFilter(f)}
+                className={`text-[10px] px-2 py-1 rounded border transition-colors font-medium ${quickFilter === f ? "border-primary bg-primary/10 text-primary" : "border-border hover:bg-muted text-foreground"}`}
+              >
+                {f}
+              </button>
             ))}
           </div>
           <div className="space-y-2 overflow-y-auto flex-1">
             {filteredTranscripts.length === 0 && (
-              <p className="text-xs text-muted-foreground text-center py-6">No {direction} transcripts yet.</p>
+              <p className="text-xs text-muted-foreground text-center py-6">
+                {directionTranscripts.length === 0 ? `No ${direction} transcripts yet.` : "No transcripts match these filters."}
+              </p>
             )}
             {filteredTranscripts.map((t) => (
               <div
@@ -2635,6 +2688,19 @@ function activityPatientLabel(event: ActivityEvent): { primary: string; secondar
   return { primary, secondary: idParts.join(" · ") };
 }
 
+// Client-side search only (the query params on /activity already filter
+// server-side by event type / status for the current page) - matches
+// against whatever name/phone/id fields this event actually carries, since
+// not every event type has all of them.
+function activitySearchText(event: ActivityEvent): string {
+  const data = event.data ?? {};
+  const patientObj = data.patient && typeof data.patient === "object" ? data.patient as Record<string, unknown> : {};
+  return [
+    data.patient_name, patientObj.display_name, patientObj.phone, patientObj.phone_number,
+    data.phone, data.phone_number, event.patient_external_id, event.juvonno_appointment_id,
+  ].map(safeText).filter(Boolean).join(" ").toLowerCase();
+}
+
 // cancellation_requested rows are always status "completed" in Postgres -
 // that's the audit WRITE succeeding, not the cancellation itself happening.
 // Showing "Completed" next to a "Needs Action" badge reads as "already
@@ -2655,6 +2721,7 @@ function ActivityScreen() {
   const [error, setError] = useState(false);
   const [eventTypeFilter, setEventTypeFilter] = useState("");
   const [statusFilter, setStatusFilter] = useState("");
+  const [search, setSearch] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [selectedEvent, setSelectedEvent] = useState<ActivityEvent | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
@@ -2730,6 +2797,15 @@ function ActivityScreen() {
       </div>
 
       <div className="flex items-center gap-2">
+        <div className="relative flex-1 max-w-xs">
+          <Search size={13} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
+          <input
+            value={search}
+            onChange={e => setSearch(e.target.value)}
+            placeholder="Search name or number…"
+            className="w-full bg-card border border-border rounded-md pl-8 pr-3 py-1.5 text-xs placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+          />
+        </div>
         <select value={eventTypeFilter} onChange={(e) => setEventTypeFilter(e.target.value)} className="text-xs border border-border rounded-md px-2.5 py-1.5 bg-card">
           <option value="">All event types</option>
           {ACTIVITY_EVENT_TYPES.map(t => <option key={t} value={t}>{ACTIVITY_EVENT_LABEL[t]}</option>)}
@@ -2748,10 +2824,16 @@ function ActivityScreen() {
         <div className="p-10 text-center text-xs text-muted-foreground">
           Could not load activity. <button onClick={() => loadEvents(false)} className="text-primary hover:underline">Try again</button>
         </div>
-      ) : (
+      ) : (() => {
+        const visibleEvents = search.trim()
+          ? events.filter(e => activitySearchText(e).includes(search.trim().toLowerCase()))
+          : events;
+        return (
         <Card className="overflow-hidden">
-          {events.length === 0 ? (
-            <p className="text-xs text-muted-foreground py-10 text-center">No activity yet.</p>
+          {visibleEvents.length === 0 ? (
+            <p className="text-xs text-muted-foreground py-10 text-center">
+              {events.length === 0 ? "No activity yet." : "No activity matches this search."}
+            </p>
           ) : (
             <table className="w-full text-xs">
               <thead>
@@ -2762,7 +2844,7 @@ function ActivityScreen() {
                 </tr>
               </thead>
               <tbody>
-                {events.map((event) => {
+                {visibleEvents.map((event) => {
                   const patient = activityPatientLabel(event);
                   return (
                   <tr
@@ -2790,7 +2872,8 @@ function ActivityScreen() {
             </table>
           )}
         </Card>
-      )}
+        );
+      })()}
 
       {selectedId && (
         <>
@@ -2856,12 +2939,24 @@ function ActivityScreen() {
 // ── Screen: Recordings ────────────────────────────────────────────────────────
 function RecordingsScreen({ direction }: { direction: "inbound" | "outbound" }) {
   const { callLogs: allCallLogs } = useDashboard();
-  const callLogs = allCallLogs.filter(c => (c.direction ?? "inbound") === direction);
+  const directionLogs = allCallLogs.filter(c => (c.direction ?? "inbound") === direction);
   const [playing, setPlaying] = useState<number | string | null>(null);
   const [progress, setProgress] = useState(0); // seconds
   const [audioDuration, setAudioDuration] = useState(0);
   const [dismissed, setDismissed] = useState<Set<string | number>>(new Set());
+  const [search, setSearch] = useState("");
+  const [outcomeFilter, setOutcomeFilter] = useState("All");
   const audioRef = useRef<HTMLAudioElement>(null);
+  const outcomeOptions = ["All", ...Array.from(new Set(directionLogs.map(c => c.outcome).filter((v): v is string => Boolean(v))))];
+  const callLogs = directionLogs.filter(c => {
+    if (search.trim()) {
+      const q = search.trim().toLowerCase();
+      const haystack = `${c.caller ?? ""} ${c.phone ?? ""} ${c.service ?? ""}`.toLowerCase();
+      if (!haystack.includes(q)) return false;
+    }
+    if (outcomeFilter !== "All" && c.outcome !== outcomeFilter) return false;
+    return true;
+  });
   const playingCall = callLogs.find(c => c.id === playing) ?? null;
   const visibleLogs = callLogs.filter(c => !dismissed.has(c.id));
 
@@ -2891,11 +2986,16 @@ function RecordingsScreen({ direction }: { direction: "inbound" | "outbound" }) 
         <div className="flex items-center gap-2">
           <div className="relative">
             <Search size={13} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
-            <input className="bg-card border border-border rounded-md pl-8 pr-3 py-1.5 text-xs placeholder:text-muted-foreground w-48 focus:outline-none focus:ring-1 focus:ring-ring" placeholder="Search recordings…" />
+            <input
+              value={search}
+              onChange={e => setSearch(e.target.value)}
+              className="bg-card border border-border rounded-md pl-8 pr-3 py-1.5 text-xs placeholder:text-muted-foreground w-48 focus:outline-none focus:ring-1 focus:ring-ring"
+              placeholder="Search recordings…"
+            />
           </div>
-          <button className="flex items-center gap-1.5 bg-muted border border-border text-xs font-medium px-3 py-1.5 rounded-md hover:bg-accent transition-colors">
-            <Filter size={12} /> Filter
-          </button>
+          <select value={outcomeFilter} onChange={e => setOutcomeFilter(e.target.value)} className="text-xs font-medium px-2.5 py-1.5 border border-border rounded-md bg-card hover:bg-muted transition-colors focus:outline-none focus:ring-1 focus:ring-ring">
+            {outcomeOptions.map(o => <option key={o} value={o}>{o === "All" ? "All Outcomes" : o}</option>)}
+          </select>
         </div>
       </div>
 
@@ -2910,7 +3010,9 @@ function RecordingsScreen({ direction }: { direction: "inbound" | "outbound" }) 
           </thead>
           <tbody>
             {visibleLogs.length === 0 ? (
-              <tr><td colSpan={9} className="px-4 py-10 text-center text-muted-foreground">No {direction} recordings yet.</td></tr>
+              <tr><td colSpan={9} className="px-4 py-10 text-center text-muted-foreground">
+                {directionLogs.length === 0 ? `No ${direction} recordings yet.` : "No recordings match these filters."}
+              </td></tr>
             ) : visibleLogs.map((c) => (
               <tr key={c.id} className="border-b border-border last:border-0 hover:bg-muted/30 transition-colors">
                 <td className="px-4 py-3 font-mono text-muted-foreground whitespace-nowrap">{c.time}</td>
