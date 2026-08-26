@@ -587,8 +587,12 @@ function ClinicSwitcher() {
                 <CommandItem key={c.clinicId} value={c.clinicName} onSelect={() => handleSelect(c.clinicId)}>
                   <ClinicStatusDot status={c.status} />
                   <span className="flex-1 truncate">{c.clinicName}</span>
-                  <span className="text-[10px] uppercase tracking-wide text-muted-foreground border border-border rounded px-1.5 py-0.5">{c.role}</span>
-                  {c.clinicId === session.activeClinicId && <Check size={14} className="text-teal-600" />}
+                  {/* text-current/border-current so this always matches the
+                      row's own text color (foreground normally, accent-
+                      foreground when highlighted) instead of a fixed muted
+                      tone that becomes unreadable against the highlight bg. */}
+                  <span className="text-[10px] uppercase tracking-wide text-current border border-current/30 rounded px-1.5 py-0.5 opacity-80">{c.role}</span>
+                  {c.clinicId === session.activeClinicId && <Check size={14} className="text-current shrink-0" />}
                 </CommandItem>
               ))}
             </CommandGroup>
@@ -914,21 +918,10 @@ function TopBar() {
           <ChevronDown size={12} className="text-muted-foreground ml-auto" />
         </div>
       )}
-      <div className="flex-1 relative max-w-xs">
-        <Search size={13} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
-        <input className="w-full bg-muted border border-border rounded-md pl-8 pr-3 py-1.5 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring" placeholder="Search calls, patients…" />
-      </div>
       <div className="ml-auto flex items-center gap-2">
         <span className="flex items-center gap-1.5 bg-emerald-50 text-emerald-700 border border-emerald-200 text-xs font-medium px-2.5 py-1 rounded-full">
           <Circle size={6} className="fill-emerald-500 text-emerald-500" /> Active
         </span>
-        <button className="relative p-2 rounded-md hover:bg-muted transition-colors">
-          <Bell size={15} className="text-muted-foreground" />
-          <span className="absolute top-1 right-1 w-1.5 h-1.5 bg-red-500 rounded-full" />
-        </button>
-        <button className="p-2 rounded-md hover:bg-muted transition-colors">
-          <HelpCircle size={15} className="text-muted-foreground" />
-        </button>
         {session && (
           <button onClick={logout} title="Sign out" className="p-2 rounded-md hover:bg-muted transition-colors">
             <LogOut size={15} className="text-muted-foreground" />
