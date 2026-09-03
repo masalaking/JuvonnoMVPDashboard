@@ -14,7 +14,20 @@ import crypto from 'crypto';
 import bcrypt from 'bcryptjs';
 import { prisma } from './db.js';
 
-const SESSION_SECRET = process.env.SESSION_SECRET ?? '';
+// Local-only convenience for the demo dashboard. This remains disabled in
+// production, where a browser must always authenticate.
+const LOCAL_DASHBOARD_NO_LOGIN = process.env.NODE_ENV !== 'production'
+  && String(process.env.LOCAL_DASHBOARD_NO_LOGIN ?? 'true').toLowerCase() === 'true';
+export const isLocalDashboardNoLogin = LOCAL_DASHBOARD_NO_LOGIN;
+const LOCAL_DASHBOARD_USERNAME = process.env.LOCAL_DASHBOARD_USERNAME ?? 'test_clinic';
+const LOCAL_DASHBOARD_TENANT_ID = process.env.LOCAL_DASHBOARD_TENANT_ID ?? 'clinic_001';
+const LOCAL_DASHBOARD_CLINIC_ID = process.env.LOCAL_DASHBOARD_CLINIC_ID ?? 'clinic_001';
+const LOCAL_DASHBOARD_CLINIC_NAME = process.env.LOCAL_DASHBOARD_CLINIC_NAME ?? 'Local demo clinic';
+const LOCAL_DASHBOARD_USER_ID = process.env.LOCAL_DASHBOARD_USER_ID ?? 'local_demo';
+const USE_DATABASE_LOCAL_IDENTITY = LOCAL_DASHBOARD_NO_LOGIN
+  && Boolean(process.env.DIRECT_DATABASE_URL)
+  && !process.env.LOCAL_DASHBOARD_USER_ID;
+const SESSION_SECRET = process.env.SESSION_SECRET ?? (LOCAL_DASHBOARD_NO_LOGIN ? 'local-dashboard-demo-only-not-for-production' : '');
 const SESSION_COOKIE = 'rc_session';
 const CSRF_COOKIE = 'rc_csrf';
 const SESSION_MAX_AGE_MS = 12 * 60 * 60 * 1000; // 12h
@@ -107,13 +120,44 @@ function readCsrfCookie(req) {
 export const readCsrfToken = readCsrfCookie;
 
 // Attaches req.session = { userId, tenantId, activeClinicId } or 401s.
-export function requireSession(req, res, next) {
+export async function requireSession(req, res, next) {
   const session = readSession(req);
-  if (!session) {
-    return res.status(401).json({ error: { code: 'UNAUTHENTICATED', message: 'Sign in required.', retryable: false } });
+  if (session) {
+    req.session = session;
+    return next();
   }
-  req.session = session;
-  next();
+
+  // When the local repo has the same read-only database connection as the
+  // live dashboard, use the existing user + clinic access row. That lets n8n
+  // independently verify the exact user_id it receives. If no database is
+  // configured, retain a shell-only local demo fallback.
+  if (LOCAL_DASHBOARD_NO_LOGIN) {
+    if (USE_DATABASE_LOCAL_IDENTITY) {
+      try {
+        const user = await prisma.users.findUnique({ where: { username: LOCAL_DASHBOARD_USERNAME } });
+        if (!user) return res.status(503).json({ error: { code: 'LOCAL_DEMO_USER_UNAVAILABLE', message: `Local demo user \"${LOCAL_DASHBOARD_USERNAME}\" was not found.`, retryable: false } });
+        const clinics = await clinicsForUser(user.id, user.tenant_id);
+        if (clinics.length === 0) return res.status(503).json({ error: { code: 'LOCAL_DEMO_CLINIC_UNAVAILABLE', message: 'The local demo user has no clinic access.', retryable: false } });
+        const configuredClinic = process.env.LOCAL_DASHBOARD_CLINIC_ID;
+        const activeClinicId = configuredClinic && clinics.some(clinic => clinic.clinicId === configuredClinic)
+          ? configuredClinic
+          : clinics[0].clinicId;
+        const demoSession = { userId: user.id, tenantId: user.tenant_id, activeClinicId };
+        issueSession(res, demoSession);
+        req.session = demoSession;
+        return next();
+      } catch (error) {
+        console.error('[auth] local database-backed session failed:', error);
+        return res.status(503).json({ error: { code: 'LOCAL_DEMO_UNAVAILABLE', message: 'Could not establish the local demo session.', retryable: false } });
+      }
+    }
+    const demoSession = { userId: LOCAL_DASHBOARD_USER_ID, tenantId: LOCAL_DASHBOARD_TENANT_ID, activeClinicId: LOCAL_DASHBOARD_CLINIC_ID };
+    issueSession(res, demoSession);
+    req.session = demoSession;
+    return next();
+  }
+
+  return res.status(401).json({ error: { code: 'UNAUTHENTICATED', message: 'Sign in required.', retryable: false } });
 }
 
 // Double-submit CSRF check for state-changing requests. Must run after
@@ -135,6 +179,14 @@ export async function requireClinicAccess(req, res, next) {
   const clinicId = String(req.query.clinic_id ?? req.session.activeClinicId ?? '');
   if (!clinicId) {
     return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'No active clinic selected.', retryable: false } });
+  }
+  if (LOCAL_DASHBOARD_NO_LOGIN && req.session.userId === LOCAL_DASHBOARD_USER_ID) {
+    if (clinicId !== LOCAL_DASHBOARD_CLINIC_ID || req.session.tenantId !== LOCAL_DASHBOARD_TENANT_ID) {
+      return res.status(403).json({ error: { code: 'FORBIDDEN', message: 'The local demo is restricted to its configured clinic.', retryable: false } });
+    }
+    req.clinicId = clinicId;
+    req.clinicRole = 'owner';
+    return next();
   }
   const access = await prisma.user_clinic_access.findUnique({
     where: { user_id_tenant_id_clinic_id: { user_id: req.session.userId, tenant_id: req.session.tenantId, clinic_id: clinicId } },
@@ -166,6 +218,9 @@ export async function verifyCredentials(username, password) {
 }
 
 export async function clinicsForUser(userId, tenantId) {
+  if (LOCAL_DASHBOARD_NO_LOGIN && userId === LOCAL_DASHBOARD_USER_ID && tenantId === LOCAL_DASHBOARD_TENANT_ID) {
+    return [{ clinicId: LOCAL_DASHBOARD_CLINIC_ID, clinicName: LOCAL_DASHBOARD_CLINIC_NAME, role: 'owner', status: 'active', timezone: 'America/Toronto' }];
+  }
   const access = await prisma.user_clinic_access.findMany({
     where: { user_id: userId, tenant_id: tenantId },
     include: { clinic_configs: true },

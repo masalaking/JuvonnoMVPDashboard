@@ -6,18 +6,47 @@ import { join, dirname, extname } from 'path';
 import { fileURLToPath } from 'url';
 import { randomUUID, createHash } from 'crypto';
 import { prisma } from './db.js';
-import { requireSession, requireCsrf, requireClinicAccess, requireRole, verifyCredentials, clinicsForUser, issueSession, clearSession, rateLimit, readCsrfToken } from './auth.js';
+import { requireSession, requireCsrf, requireClinicAccess, requireRole, verifyCredentials, clinicsForUser, issueSession, clearSession, rateLimit, readCsrfToken, isLocalDashboardNoLogin } from './auth.js';
 import * as n8nProd from './n8n.js';
+import { buildManagerSummary, answerManagerQuestion } from './manager-assistant.js';
+import { advisorEncryptionReady } from './advisor-crypto.js';
+import { createEmbedding, runAdvisor, ADVISOR_MODEL } from './advisor-agent.js';
+import { createConversation, listConversations, getConversation, listMessages, saveMessage, archiveConversation, deleteConversation, queueMemoryJob, searchMemories, listMemories, deleteMemory, auditAdvisor } from './advisor-store.js';
+import { listRecommendations, createRecommendation, updateRecommendation } from './advisor-recommendations.js';
+import { processAdvisorMemoryJobs, startAdvisorMemoryWorker } from './advisor-memory-worker.js';
+import { authorizedAdvisorClinicScope } from './advisor-scope.js';
+import { createVerifiedRetellProxy, createVerifiedRetellScopedProxy } from './retell-webhooks.js';
+import { redactPublicSettingsResponse } from './settings-redaction.js';
+import { parsePublicWebsiteUrl } from './public-website-url.js';
+import { buildBillingOverview } from './inbound-overview.js';
+import { buildInboundCalls, buildInboundTranscripts, buildInboundAnalytics } from './inbound-dashboard.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const ROOT = join(__dirname, '..');
 
 const PORT = process.env.API_PORT ?? 3001;
+// OpenAI is the only supported Advisor provider. Never send an Anthropic key
+// to the OpenAI endpoint by treating an old variable name as a fallback.
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY ?? '';
+const MANAGER_ASSISTANT_MODEL = process.env.MANAGER_ASSISTANT_MODEL ?? 'gpt-5.1';
+const ADVISOR_ROLES = new Set(['owner', 'admin']);
+
+function canUseAdvisor(clinics) {
+  return isLocalDashboardNoLogin || clinics.some(clinic => ADVISOR_ROLES.has(String(clinic.role).toLowerCase()));
+}
 // Still guards GET /api/settings-by-client/:clientId below, which the n8n
 // "Juvonno Settings Backend" workflow calls directly (server-to-server, no
 // user session) to read a clinic's settings file.
 const DASHBOARD_API_KEY = process.env.DASHBOARD_API_KEY ?? '';
+const RETELL_WEBHOOK_API_KEY = process.env.RETELL_WEBHOOK_API_KEY ?? '';
+const N8N_RETELL_CALL_ANALYZED_URL = process.env.N8N_RETELL_CALL_ANALYZED_URL ?? '';
+const N8N_RETELL_INBOUND_ROUTER_URL = process.env.N8N_RETELL_INBOUND_ROUTER_URL ?? '';
+const N8N_RETELL_RECEPTIONIST_URL = process.env.N8N_RETELL_RECEPTIONIST_URL ?? '';
+const N8N_RETELL_OUTBOUND_CALL_ANALYZED_URL = process.env.N8N_RETELL_OUTBOUND_CALL_ANALYZED_URL ?? '';
+const N8N_RETELL_OUTBOUND_CONTEXT_URL = process.env.N8N_RETELL_OUTBOUND_CONTEXT_URL ?? '';
+const N8N_DASHBOARD_AUTH_HEADER = process.env.N8N_DASHBOARD_AUTH_HEADER ?? 'Authorization';
+const N8N_DASHBOARD_AUTH_VALUE = process.env.N8N_DASHBOARD_AUTH_VALUE ?? '';
 const SETTINGS_FILE = process.env.SETTINGS_FILE ?? join(ROOT, 'data/settings.json');
 // Private knowledge-base upload storage (FRONTEND-DEVELOPER-HANDOFF.md - the
 // "Knowledge Base Submission Queue" doc). Deliberately NOT under any
@@ -33,6 +62,61 @@ const KNOWLEDGE_UPLOAD_MIME_TYPES = {
 };
 
 const app = express();
+// Database routing uses a normalized destination phone and returns no clinic
+// data beyond the server-to-server scope passed to n8n. `LIMIT 2` makes any
+// duplicate configuration fail closed rather than selecting arbitrarily.
+async function resolveReceptionistClinic(destinationPhone) {
+  const rows = await prisma.$queryRaw`
+    SELECT cc.tenant_id, cc.clinic_id
+    FROM clinic_configs cc
+    JOIN tenants t ON t.id = cc.tenant_id
+    WHERE cc.status = 'active'
+      AND t.status = 'active'
+      AND regexp_replace(COALESCE(cc.retell_receptionist_phone_number, ''), '\\D', '', 'g') = ${destinationPhone}
+    LIMIT 2
+  `;
+  return rows.length === 1
+    ? { tenantId: String(rows[0].tenant_id), clinicId: String(rows[0].clinic_id) }
+    : null;
+}
+// Retell signature verification needs the original bytes. These routes must
+// precede express.json(), and their downstream n8n webhooks must use header
+// authentication before a Retell URL is pointed here.
+app.post('/webhooks/retell/call-analyzed', express.raw({ type: 'application/json', limit: '2mb' }), createVerifiedRetellProxy({
+  webhookKey: RETELL_WEBHOOK_API_KEY,
+  targetUrl: N8N_RETELL_CALL_ANALYZED_URL,
+  authHeader: N8N_DASHBOARD_AUTH_HEADER,
+  authValue: N8N_DASHBOARD_AUTH_VALUE,
+}));
+app.post('/webhooks/retell/outbound-call-analyzed', express.raw({ type: 'application/json', limit: '2mb' }), createVerifiedRetellProxy({
+  webhookKey: RETELL_WEBHOOK_API_KEY,
+  targetUrl: N8N_RETELL_OUTBOUND_CALL_ANALYZED_URL,
+  authHeader: N8N_DASHBOARD_AUTH_HEADER,
+  authValue: N8N_DASHBOARD_AUTH_VALUE,
+}));
+app.post('/webhooks/retell/outbound-context', express.raw({ type: 'application/json', limit: '256kb' }), createVerifiedRetellProxy({
+  webhookKey: RETELL_WEBHOOK_API_KEY,
+  targetUrl: N8N_RETELL_OUTBOUND_CONTEXT_URL,
+  authHeader: N8N_DASHBOARD_AUTH_HEADER,
+  authValue: N8N_DASHBOARD_AUTH_VALUE,
+}));
+app.post('/webhooks/retell/inbound', express.raw({ type: 'application/json', limit: '256kb' }), createVerifiedRetellScopedProxy({
+  webhookKey: RETELL_WEBHOOK_API_KEY,
+  targetUrl: N8N_RETELL_INBOUND_ROUTER_URL,
+  authHeader: N8N_DASHBOARD_AUTH_HEADER,
+  authValue: N8N_DASHBOARD_AUTH_VALUE,
+  scopeResolver: resolveReceptionistClinic,
+}));
+// Retell custom-function calls use a different n8n contract from the inbound
+// call router. Keep this target separate so a configuration mistake cannot
+// deliver receptionist tool calls to the call-ingestion workflow.
+app.post('/webhooks/retell/receptionist', express.raw({ type: 'application/json', limit: '256kb' }), createVerifiedRetellScopedProxy({
+  webhookKey: RETELL_WEBHOOK_API_KEY,
+  targetUrl: N8N_RETELL_RECEPTIONIST_URL,
+  authHeader: N8N_DASHBOARD_AUTH_HEADER,
+  authValue: N8N_DASHBOARD_AUTH_VALUE,
+  scopeResolver: resolveReceptionistClinic,
+}));
 app.use(express.json());
 
 // Still backs GET /api/settings-by-client/:clientId below - the n8n
@@ -121,6 +205,17 @@ function buildN8nAllSettings(allSettings) {
 }
 
 app.get('/health', (_req, res) => res.json({ ok: true }));
+// Safe for local development and deployment probes: no account, clinic,
+// credential, or provider payload is returned. n8n is configuration-checked
+// here; its request-level availability is still reported by each source.
+app.get('/healthz', async (_req, res) => {
+  let database = 'available';
+  try { await prisma.$queryRawUnsafe('SELECT 1'); } catch { database = 'unavailable'; }
+  const configured = Boolean(process.env.N8N_BASE_URL && process.env.N8N_DASHBOARD_AUTH_VALUE);
+  const advisor = advisorEncryptionReady() && Boolean(OPENAI_API_KEY) ? 'configured' : 'unavailable';
+  const ok = database === 'available';
+  res.status(ok ? 200 : 503).json({ ok, services: { database, n8n: configured ? 'configured' : 'unavailable', advisor } });
+});
 
 // The entire /api/link/:accessToken/* MVP surface is retired - the dashboard
 // is session-only now (real login, per-clinic authorization via
@@ -223,7 +318,7 @@ app.post('/api/auth/login', rateLimit('login', 10, 60_000), apiRoute(async (req,
   // §2: "clinic picker screen after login when 2+ clinics and none selected").
   const activeClinicId = clinics.length === 1 ? clinics[0].clinicId : null;
   const csrfToken = issueSession(res, { userId: user.id, tenantId: user.tenant_id, activeClinicId });
-  res.json({ userId: user.id, tenantId: user.tenant_id, clinics, activeClinicId, csrfToken });
+  res.json({ userId: user.id, tenantId: user.tenant_id, clinics, activeClinicId, csrfToken, canViewManagerAssistant: canUseAdvisor(clinics) });
 }));
 
 app.post('/api/auth/logout', requireSession, requireCsrf, apiRoute(async (req, res) => {
@@ -244,7 +339,14 @@ app.get('/api/auth/session', requireSession, apiRoute(async (req, res) => {
   if (!csrfToken) {
     csrfToken = issueSession(res, { userId: req.session.userId, tenantId: req.session.tenantId, activeClinicId: req.session.activeClinicId ?? null });
   }
-  res.json({ userId: req.session.userId, tenantId: req.session.tenantId, activeClinicId: req.session.activeClinicId ?? null, clinics, csrfToken });
+  res.json({
+    userId: req.session.userId,
+    tenantId: req.session.tenantId,
+    activeClinicId: req.session.activeClinicId ?? null,
+    clinics,
+    csrfToken,
+    canViewManagerAssistant: canUseAdvisor(clinics),
+  });
 }));
 
 // ── Clinic selection (§5, §12) ───────────────────────────────────────────────
@@ -275,6 +377,300 @@ app.post('/api/session/active-clinic', requireSession, requireCsrf, apiRoute(asy
 // Every /api/dashboard/* route requires a valid session AND a verified
 // (tenant_id, clinic_id) the session's user actually has access to.
 const dashboardAuth = [requireSession, requireCsrf, requireClinicAccess];
+
+// Demo manager assistant access is intentionally derived from the user's
+// current user_clinic_access rows on every request. The browser's eligibility
+// flag is presentation only and is never trusted for authorization.
+async function requireManagerEligible(req, res, next) {
+  try {
+    const clinics = await clinicsForUser(req.session.userId, req.session.tenantId);
+    const authorized = isLocalDashboardNoLogin ? clinics : clinics.filter(clinic => ADVISOR_ROLES.has(String(clinic.role).toLowerCase()));
+    if (!authorized.length) {
+      return res.status(403).json({ error: { code: 'MANAGER_ASSISTANT_FORBIDDEN', message: 'Owner or administrator access to at least one clinic is required.', retryable: false } });
+    }
+    req.managerClinics = authorized;
+    next();
+  } catch (error) {
+    console.error('[manager-assistant] eligibility check failed:', error);
+    res.status(502).json({ error: { code: 'MANAGER_ASSISTANT_UNAVAILABLE', message: 'The manager assistant is temporarily unavailable.', retryable: true } });
+  }
+}
+
+// No database table is required for manager insights. Keep a short-lived,
+// process-local cache so normal chat questions do not repeatedly call the
+// Juvonno API. A process restart simply clears the cache and the next read
+// safely refreshes it.
+const managerInsightCache = new Map();
+const MANAGER_INSIGHT_CACHE_TTL_MS = 10 * 60_000;
+
+function managerInsightCacheKey(tenantId, clinicId) {
+  return `${tenantId}:${clinicId}`;
+}
+
+async function managerBusinessOverview(userId, tenantId, clinicId, forceRefresh = false, periodDays = 30) {
+  const key = managerInsightCacheKey(tenantId, clinicId);
+  const cached = managerInsightCache.get(key);
+  if (!forceRefresh && cached && Date.now() - cached.cachedAt < MANAGER_INSIGHT_CACHE_TTL_MS) {
+    return cached.value;
+  }
+  const value = forceRefresh
+    ? await n8nProd.managerInsights.refresh(userId, tenantId, clinicId, periodDays)
+    : await n8nProd.managerInsights.get(userId, tenantId, clinicId);
+  managerInsightCache.set(key, { cachedAt: Date.now(), value });
+  return value;
+}
+
+async function managerSummaryForRequest(req) {
+  return buildManagerSummary({
+    tenantId: req.session.tenantId,
+    clinics: req.managerClinics,
+    inboundOverview: n8nProd.inbound.overview,
+    outboundOverview: n8nProd.outbound.overview,
+    businessOverview: (tenantId, clinicId) => managerBusinessOverview(req.session.userId, tenantId, clinicId),
+  });
+}
+
+// Multi-clinic, read-only rollup. This route deliberately does not accept a
+// clinic_id: its scope is the full verified access list attached above.
+app.get('/api/dashboard/manager/summary', requireSession, requireCsrf, requireManagerEligible, apiRoute(async (req, res) => {
+  res.setHeader('Cache-Control', 'private, no-store');
+  res.json(await managerSummaryForRequest(req));
+}));
+
+// Explicit refresh only: normal chat/summary reads use cached snapshots so a
+// manager cannot accidentally create a burst of Juvonno API calls by asking
+// several questions. Scope is re-derived from user_clinic_access above.
+app.post(
+  '/api/dashboard/manager/refresh',
+  requireSession,
+  requireCsrf,
+  requireManagerEligible,
+  rateLimit('manager-insights-refresh', 3, 15 * 60_000),
+  apiRoute(async (req, res) => {
+    const periodDays = Math.min(90, Math.max(7, Number(req.body?.periodDays) || 30));
+    const refreshed = await Promise.allSettled(req.managerClinics.map(clinic =>
+      managerBusinessOverview(req.session.userId, req.session.tenantId, clinic.clinicId, true, periodDays)
+    ));
+    const results = refreshed.map((result, index) => ({
+      clinicId: req.managerClinics[index].clinicId,
+      clinicName: req.managerClinics[index].clinicName,
+      success: result.status === 'fulfilled',
+      generatedAt: result.status === 'fulfilled' ? result.value?.snapshot?.generated_at ?? null : null,
+    }));
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.status(results.some(result => result.success) ? 200 : 502).json({
+      success: results.every(result => result.success),
+      partial: results.some(result => result.success) && results.some(result => !result.success),
+      results,
+    });
+  }),
+);
+
+// ── Production Clinic Advisor conversations and semantic memory ─────────────
+function advisorClinicScope(req, requested) {
+  return authorizedAdvisorClinicScope(req.managerClinics.map(clinic => clinic.clinicId), requested);
+}
+
+function advisorDateRange(body = {}) {
+  const end = /^\d{4}-\d{2}-\d{2}$/.test(String(body.end_date ?? '')) ? String(body.end_date) : new Date().toISOString().slice(0,10);
+  const fallback = new Date(`${end}T00:00:00Z`); fallback.setUTCDate(fallback.getUTCDate()-30);
+  const start = /^\d{4}-\d{2}-\d{2}$/.test(String(body.start_date ?? '')) ? String(body.start_date) : fallback.toISOString().slice(0,10);
+  if (start > end) throw badRequest('start_date must not be after end_date.', 'INVALID_ADVISOR_DATE_RANGE');
+  return { start, end };
+}
+
+// The model receives an explicit availability envelope so a failed provider
+// endpoint can never be casually interpreted as a confirmed zero. The n8n
+// workflow remains the source of truth for the actual records.
+function normalizeAdvisorToolResult(result) {
+  const payload = result && typeof result === 'object' ? result : { success: false };
+  const live = Array.isArray(payload?.data?.juvonno_live) ? payload.data.juvonno_live : [];
+  const availability = live.map(row => ({
+    clinic_id: row?.clinic_id ?? null,
+    status: row?.available === true ? 'available' : 'unavailable',
+    reason: row?.reason ?? null,
+    warnings: Array.isArray(row?.warnings) ? row.warnings : [],
+  }));
+  if (!availability.length && payload.success === true) availability.push({ clinic_id: null, status: 'available', reason: null, warnings: [] });
+  return { ...payload, availability };
+}
+
+function ensureAdvisorReady() {
+  if (!advisorEncryptionReady()) {
+    const error = new Error('The Advisor encryption key is not configured.'); error.status=503; error.code='ADVISOR_ENCRYPTION_NOT_CONFIGURED'; throw error;
+  }
+}
+
+app.post('/api/dashboard/manager/conversations', requireSession, requireCsrf, requireManagerEligible, rateLimit('advisor-conversation-create', 20, 60_000), apiRoute(async (req,res) => {
+  ensureAdvisorReady();
+  const clinicIds=advisorClinicScope(req,req.body?.requested_clinic_ids);
+  if (!clinicIds.length) throw badRequest('Select at least one authorized clinic.', 'INVALID_ADVISOR_SCOPE');
+  const conversation=await createConversation({tenantId:req.session.tenantId,userId:req.session.userId,title:String(req.body?.title??'New conversation').slice(0,120),clinicIds});
+  await auditAdvisor({tenantId:req.session.tenantId,userId:req.session.userId,clinicIds,eventType:'conversation_created',correlationId:randomUUID()});
+  res.status(201).json({success:true,conversation});
+}));
+
+app.get('/api/dashboard/manager/conversations', requireSession, requireCsrf, requireManagerEligible, apiRoute(async (req,res) => {
+  ensureAdvisorReady(); res.setHeader('Cache-Control','private, no-store');
+  res.json({success:true,conversations:await listConversations(req.session.tenantId,req.session.userId)});
+}));
+
+app.get('/api/dashboard/manager/conversations/:id/messages', requireSession, requireCsrf, requireManagerEligible, apiRoute(async (req,res) => {
+  ensureAdvisorReady();
+  const conversation=await getConversation(req.session.tenantId,req.session.userId,req.params.id);
+  if (!conversation) return res.status(404).json({error:{code:'NOT_FOUND',message:'Conversation not found.',retryable:false}});
+  const correlationId=randomUUID();
+  await auditAdvisor({tenantId:req.session.tenantId,userId:req.session.userId,clinicIds:conversation.clinic_scope,eventType:'conversation_read',correlationId});
+  res.setHeader('Cache-Control','private, no-store');
+  res.json({success:true,conversation,messages:await listMessages(req.session.tenantId,req.session.userId,conversation.id)});
+}));
+
+app.post('/api/dashboard/manager/conversations/:id/archive', requireSession, requireCsrf, requireManagerEligible, apiRoute(async (req,res) => {
+  ensureAdvisorReady(); const ok=await archiveConversation(req.session.tenantId,req.session.userId,req.params.id); res.status(ok?200:404).json({success:ok});
+}));
+
+app.delete('/api/dashboard/manager/conversations/:id', requireSession, requireCsrf, requireManagerEligible, rateLimit('advisor-conversation-delete', 10, 60_000), apiRoute(async (req,res) => {
+  ensureAdvisorReady(); const id=req.params.id; const correlationId=randomUUID();
+  const ok=await deleteConversation(req.session.tenantId,req.session.userId,id);
+  if (ok) await auditAdvisor({tenantId:req.session.tenantId,userId:req.session.userId,eventType:'conversation_deleted',correlationId,metadata:{conversation_id_hash:createHash('sha256').update(id).digest('hex')}});
+  res.status(ok?200:404).json({success:ok});
+}));
+
+app.get('/api/dashboard/manager/memories', requireSession, requireCsrf, requireManagerEligible, rateLimit('advisor-memory-read', 30, 60_000), apiRoute(async (req,res) => {
+  ensureAdvisorReady(); const correlationId=randomUUID();
+  const memories=await listMemories(req.session.tenantId,req.session.userId,String(req.query.search??''));
+  await auditAdvisor({tenantId:req.session.tenantId,userId:req.session.userId,eventType:'memory_list_read',correlationId,metadata:{result_count:memories.length}});
+  res.setHeader('Cache-Control','private, no-store'); res.json({success:true,memories});
+}));
+
+app.delete('/api/dashboard/manager/memories/:id', requireSession, requireCsrf, requireManagerEligible, rateLimit('advisor-memory-delete', 20, 60_000), apiRoute(async (req,res) => {
+  ensureAdvisorReady(); const ok=await deleteMemory(req.session.tenantId,req.session.userId,req.params.id);
+  if (ok) await auditAdvisor({tenantId:req.session.tenantId,userId:req.session.userId,eventType:'memory_deleted',correlationId:randomUUID()});
+  res.status(ok?200:404).json({success:ok});
+}));
+
+// Owners decide whether to accept or implement a recommendation. The Advisor
+// can surface evidence, but it never executes outreach or clinic changes.
+app.get('/api/dashboard/manager/recommendations', requireSession, requireCsrf, requireManagerEligible, apiRoute(async (req,res) => {
+  ensureAdvisorReady();
+  const requestedClinic = String(req.query.clinic_id ?? '').trim();
+  const clinicIds = requestedClinic ? advisorClinicScope(req, [requestedClinic]) : req.managerClinics.map(clinic => clinic.clinicId);
+  if (requestedClinic && !clinicIds.includes(requestedClinic)) {
+    return res.status(403).json({error:{code:'FORBIDDEN',message:'You do not have access to this clinic.',retryable:false}});
+  }
+  const recommendations = await listRecommendations(req.session.tenantId, clinicIds, req.query.status);
+  await auditAdvisor({tenantId:req.session.tenantId,userId:req.session.userId,clinicIds,eventType:'recommendations_read',correlationId:randomUUID(),metadata:{result_count:recommendations.length}});
+  res.setHeader('Cache-Control','private, no-store'); res.json({success:true,recommendations});
+}));
+
+app.post('/api/dashboard/manager/recommendations', requireSession, requireCsrf, requireManagerEligible, rateLimit('advisor-recommendation-create', 20, 60_000), apiRoute(async (req,res) => {
+  ensureAdvisorReady();
+  const clinicId = String(req.body?.clinic_id ?? '').trim();
+  const allowed = new Set(req.managerClinics.map(clinic => clinic.clinicId));
+  if (!clinicId) throw badRequest('clinic_id is required.', 'INVALID_RECOMMENDATION');
+  if (!allowed.has(clinicId)) {
+    const error = new Error('You do not have access to this clinic.'); error.status=403; error.code='FORBIDDEN'; throw error;
+  }
+  const recommendation = await createRecommendation({tenantId:req.session.tenantId,clinicId,body:req.body,sources:[]});
+  await auditAdvisor({tenantId:req.session.tenantId,userId:req.session.userId,clinicIds:[clinicId],eventType:'recommendation_created',correlationId:randomUUID(),metadata:{recommendation_id_hash:createHash('sha256').update(recommendation.id).digest('hex')}});
+  res.status(201).json({success:true,recommendation});
+}));
+
+app.patch('/api/dashboard/manager/recommendations/:id', requireSession, requireCsrf, requireManagerEligible, rateLimit('advisor-recommendation-update', 30, 60_000), apiRoute(async (req,res) => {
+  ensureAdvisorReady();
+  const clinicIds=req.managerClinics.map(clinic => clinic.clinicId);
+  const recommendation=await updateRecommendation({tenantId:req.session.tenantId,clinicIds,id:req.params.id,body:req.body});
+  if (!recommendation) return res.status(404).json({error:{code:'NOT_FOUND',message:'Recommendation not found.',retryable:false}});
+  await auditAdvisor({tenantId:req.session.tenantId,userId:req.session.userId,clinicIds:[recommendation.clinic_id],eventType:'recommendation_updated',correlationId:randomUUID(),metadata:{recommendation_id_hash:createHash('sha256').update(recommendation.id).digest('hex'),status:recommendation.implementation_status}});
+  res.json({success:true,recommendation});
+}));
+
+app.get('/api/dashboard/manager/sources/:messageId', requireSession, requireCsrf, requireManagerEligible, apiRoute(async (req,res) => {
+  ensureAdvisorReady();
+  const rows=await prisma.$queryRawUnsafe(`SELECT m.sources FROM advisor_messages m JOIN advisor_conversations c ON c.id=m.conversation_id WHERE m.id=$1 AND m.tenant_id=$2 AND c.user_id=$3 AND m.deleted_at IS NULL`,req.params.messageId,req.session.tenantId,req.session.userId);
+  if (!rows[0]) return res.status(404).json({error:{code:'NOT_FOUND',message:'Message not found.',retryable:false}});
+  res.setHeader('Cache-Control','private, no-store'); res.json({success:true,sources:rows[0].sources??[]});
+}));
+
+app.post('/api/dashboard/manager/conversations/:id/messages', requireSession, requireCsrf, requireManagerEligible, rateLimit('advisor-chat', 20, 60_000), async (req,res) => {
+  const correlationId=randomUUID();
+  try {
+    ensureAdvisorReady();
+    const message=String(req.body?.message??'').trim();
+    if (message.length<2||message.length>2000) throw badRequest('message must contain between 2 and 2000 characters.','INVALID_ADVISOR_MESSAGE');
+    const conversation=await getConversation(req.session.tenantId,req.session.userId,req.params.id);
+    if (!conversation) { res.status(404).json({error:{code:'NOT_FOUND',message:'Conversation not found.',retryable:false}}); return; }
+    const conversationScope=Array.isArray(conversation.clinic_scope)?conversation.clinic_scope:[];
+    const clinicIds=advisorClinicScope(req,req.body?.requested_clinic_ids).filter(id=>conversationScope.includes(id));
+    if (!clinicIds.length) { res.status(403).json({error:{code:'FORBIDDEN',message:'No authorized clinic remains in this conversation scope.',retryable:false}}); return; }
+    const dates=advisorDateRange(req.body);
+    res.status(200); res.setHeader('Content-Type','text/event-stream; charset=utf-8'); res.setHeader('Cache-Control','private, no-store'); res.setHeader('X-Accel-Buffering','no'); res.flushHeaders?.();
+    const emit=(event,data)=>res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+    emit('conversation',{id:conversation.id}); emit('status',{message:'Reviewing the authorized clinic data…'});
+    const userMessageId=await saveMessage({conversationId:conversation.id,tenantId:req.session.tenantId,userId:req.session.userId,role:'user',content:message});
+    const history=await listMessages(req.session.tenantId,req.session.userId,conversation.id,12);
+    let memories=[];
+    try {
+      const queryEmbedding=await createEmbedding(OPENAI_API_KEY,message);
+      memories=await searchMemories({tenantId:req.session.tenantId,userId:req.session.userId,clinicIds,embedding:queryEmbedding,limit:6});
+      await auditAdvisor({tenantId:req.session.tenantId,userId:req.session.userId,clinicIds,eventType:'memory_retrieval',correlationId,metadata:{result_count:memories.length}});
+    } catch (error) { emit('status',{message:'Long-term memory is unavailable; continuing with live data.'}); }
+    let result;
+    try {
+      result=await runAdvisor({apiKey:OPENAI_API_KEY,messages:history,memories,authorizedClinicIds:clinicIds,dateRange:dates,executeTool:async args=>{
+        if (args.action==='advisor.patient_lookup' && !args.patient_identifier) return {success:false,error_code:'SPECIFIC_PATIENT_IDENTIFIER_REQUIRED',message:'Ask for a specific patient identifier.',sources:[]};
+        if (['advisor.appointment_details','advisor.call_transcript_details'].includes(args.action) && !args.detail_identifier) return {success:false,error_code:'SPECIFIC_DETAIL_IDENTIFIER_REQUIRED',message:'Ask for a specific appointment or call identifier.',sources:[]};
+        if (args.action==='advisor.practitioner_revenue' && !args.practitioner_identifier) return {success:false,error_code:'SPECIFIC_PRACTITIONER_IDENTIFIER_REQUIRED',message:'Ask for a specific practitioner name or staff number.',sources:[]};
+        if (['advisor.recommendation_tracking','advisor.recommendation_measurement'].includes(args.action)) {
+          const recommendations=await listRecommendations(req.session.tenantId,args.clinic_ids);
+          const sources=args.clinic_ids.map(clinicId=>({source_name:'Recommendation tracking',clinic_id:clinicId,date_start:args.start_date,date_end:args.end_date,freshness:'stored outcome records'}));
+          await auditAdvisor({tenantId:req.session.tenantId,userId:req.session.userId,clinicIds:args.clinic_ids,eventType:'tool_execution',toolName:args.action,status:'success',correlationId});
+          return {success:true,recommendations,sources};
+        }
+        const toolResult=normalizeAdvisorToolResult(await n8nProd.runManagerAnalystTool({action:args.action,userId:req.session.userId,tenantId:req.session.tenantId,clinicIds:args.clinic_ids,startDate:args.start_date||dates.start,endDate:args.end_date||dates.end,patientIdentifier:args.patient_identifier,detailIdentifier:args.detail_identifier,practitionerIdentifier:args.practitioner_identifier,correlationId}));
+        await auditAdvisor({tenantId:req.session.tenantId,userId:req.session.userId,clinicIds:args.clinic_ids,eventType:args.action==='advisor.patient_lookup'?'patient_lookup':'tool_execution',toolName:args.action,status:toolResult.success===true?'success':'failed',correlationId});
+        return toolResult;
+      }});
+    } catch (error) {
+      // A data-source failure must not produce a confident, generic-looking
+      // business answer from stale aggregates. Keep the response short and
+      // explicit so the owner knows to retry rather than treating it as data.
+      result={answer:"I couldn't reach the live clinic data just now, so I can't answer that reliably. Please try again in a moment.",toolCalls:[],sources:[],tokenUsage:{},responseMode:'structured_fallback'};
+    }
+    for (const source of result.sources??[]) emit('source',source);
+    for (const chunk of String(result.answer).match(/.{1,80}(?:\s|$)/g)??[result.answer]) emit('text_delta',{text:chunk});
+    const assistantMessageId=await saveMessage({conversationId:conversation.id,tenantId:req.session.tenantId,userId:req.session.userId,role:'assistant',content:result.answer,model:ADVISOR_MODEL,responseMode:result.responseMode??'live',toolCalls:result.toolCalls,sources:result.sources,tokenUsage:result.tokenUsage});
+    await queueMemoryJob(req.session.tenantId, conversation.id, assistantMessageId);
+    processAdvisorMemoryJobs(OPENAI_API_KEY).catch(()=>{});
+    emit('done',{message_id:assistantMessageId,user_message_id:userMessageId,sources:result.sources??[],response_mode:result.responseMode??'live'}); res.end();
+  } catch (error) {
+    if (!res.headersSent) { res.status(error.status??500).json({error:{code:error.code??'ADVISOR_FAILED',message:error.message??'Advisor failed.',retryable:(error.status??500)>=500}}); return; }
+    res.write(`event: error\ndata: ${JSON.stringify({code:error.code??'ADVISOR_FAILED',message:error.message??'Advisor failed.'})}\n\n`); res.end();
+  }
+});
+
+app.post(
+  '/api/dashboard/manager/ask',
+  requireSession,
+  requireCsrf,
+  requireManagerEligible,
+  rateLimit('manager-assistant', 20, 60_000),
+  apiRoute(async (req, res) => {
+    const question = String(req.body?.question ?? '').trim();
+    if (question.length < 2 || question.length > 800) {
+      throw badRequest('question must contain between 2 and 800 characters.', 'INVALID_MANAGER_QUESTION');
+    }
+    const summary = await managerSummaryForRequest(req);
+    const result = await answerManagerQuestion({
+      question,
+      summary,
+      apiKey: OPENAI_API_KEY,
+      model: MANAGER_ASSISTANT_MODEL,
+    });
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.json({ success: true, answer: result.answer, mode: result.mode, generatedAt: summary.generatedAt });
+  }),
+);
 
 // n8n's appointment-requests webhook always responds HTTP 200, even when the
 // business operation was refused (wrong clinic access, missing metadata,
@@ -326,22 +722,22 @@ app.get('/api/dashboard/queue/requests/:id', ...dashboardAuth, apiRoute(async (r
 // the appointment from Juvonno, cancels it if not already cancelled, verifies
 // the cancelled state, and only then marks the request completed - never
 // treat a 200 here as done without checking request_status/provider_confirmed.
-app.post('/api/dashboard/queue/requests/:id/approve', ...dashboardAuth, rateLimit('queue-mutate', 30, 60_000), apiRoute(async (req, res) => {
+app.post('/api/dashboard/queue/requests/:id/approve', ...dashboardAuth, requireRole('owner', 'admin'), rateLimit('queue-mutate', 30, 60_000), apiRoute(async (req, res) => {
   res.json(await n8nProd.appointmentRequests.approve(req.session.userId, req.session.tenantId, req.clinicId, req.params.id));
 }));
 
-app.post('/api/dashboard/queue/requests/:id/reject', ...dashboardAuth, rateLimit('queue-mutate', 30, 60_000), apiRoute(async (req, res) => {
+app.post('/api/dashboard/queue/requests/:id/reject', ...dashboardAuth, requireRole('owner', 'admin'), rateLimit('queue-mutate', 30, 60_000), apiRoute(async (req, res) => {
   res.json(await n8nProd.appointmentRequests.reject(req.session.userId, req.session.tenantId, req.clinicId, req.params.id, req.body?.resolutionCode, req.body?.resolutionNote));
 }));
 
-app.post('/api/dashboard/queue/requests/:id/assign', ...dashboardAuth, rateLimit('queue-mutate', 30, 60_000), apiRoute(async (req, res) => {
+app.post('/api/dashboard/queue/requests/:id/assign', ...dashboardAuth, requireRole('owner', 'admin'), rateLimit('queue-mutate', 30, 60_000), apiRoute(async (req, res) => {
   res.json(await n8nProd.appointmentRequests.assign(req.session.userId, req.session.tenantId, req.clinicId, req.params.id, req.body?.assignedUserId));
 }));
 
 // Archive replaces delete outright - there is no hard-delete route for
 // requests anymore (FRONTEND-BFF-HANDOFF.md: "Remove every hard-delete
 // endpoint/button for requests").
-app.post('/api/dashboard/queue/requests/:id/archive', ...dashboardAuth, rateLimit('queue-mutate', 30, 60_000), apiRoute(async (req, res) => {
+app.post('/api/dashboard/queue/requests/:id/archive', ...dashboardAuth, requireRole('owner', 'admin'), rateLimit('queue-mutate', 30, 60_000), apiRoute(async (req, res) => {
   res.json(await n8nProd.appointmentRequests.archive(req.session.userId, req.session.tenantId, req.clinicId, req.params.id, req.body?.resolutionNote));
 }));
 
@@ -370,25 +766,111 @@ app.get('/api/dashboard/activity/:id', ...dashboardAuth, apiRoute(async (req, re
 }));
 
 // ── Inbound dashboard (§6.2) ─────────────────────────────────────────────────
+async function readInboundCalls(req) {
+  return prisma.$queryRaw`
+    SELECT c.retell_call_id AS call_id, c.from_number, c.call_status,
+      c.disconnect_reason, c.duration_minutes AS call_duration_min,
+      TO_CHAR(c.started_at AT TIME ZONE COALESCE(cc.timezone, t.timezone, 'America/Toronto'), 'YYYY-MM-DD') AS call_date,
+      TO_CHAR(c.started_at AT TIME ZONE COALESCE(cc.timezone, t.timezone, 'America/Toronto'), 'YYYY-MM-DD"T"HH24:MI:SS') AS call_timestamp,
+      TO_CHAR(c.started_at AT TIME ZONE COALESCE(cc.timezone, t.timezone, 'America/Toronto'), 'YYYY-MM') AS call_month,
+      c.summary AS call_summary, c.sentiment, c.transcript, c.recording_url,
+      (COALESCE(c.recording_url, '') <> '') AS has_recording,
+      (COALESCE(c.transcript, '') <> '') AS has_transcript,
+      CASE WHEN COALESCE(BTRIM(c.transcript), '') = '' THEN 0
+        ELSE ARRAY_LENGTH(REGEXP_SPLIT_TO_ARRAY(BTRIM(c.transcript), '\\s+'), 1) END AS word_count
+    FROM calls c
+    JOIN tenants t ON t.id = c.tenant_id
+    JOIN clinic_configs cc ON cc.tenant_id = c.tenant_id AND cc.clinic_id = c.clinic_id
+    WHERE c.tenant_id = ${req.session.tenantId} AND c.clinic_id = ${req.clinicId}
+    ORDER BY c.started_at DESC
+    LIMIT 500
+  `;
+}
 app.get('/api/dashboard/inbound/overview', ...dashboardAuth, apiRoute(async (req, res) => {
-  res.json(await n8nProd.inbound.overview(req.session.tenantId, req.clinicId));
+  // This read-only billing summary used to share the inactive Retell-ingestion
+  // workflow. Keeping it in the BFF preserves the dashboard without making a
+  // public webhook active again. Scope comes only from dashboardAuth.
+  const rows = await prisma.$queryRaw`
+    SELECT bm.*, t.name AS client_name
+    FROM billing_months bm
+    JOIN tenants t ON t.id = bm.tenant_id
+    JOIN clinic_configs cc ON cc.tenant_id = bm.tenant_id AND cc.clinic_id = bm.clinic_id
+    WHERE bm.tenant_id = ${req.session.tenantId}
+      AND bm.clinic_id = ${req.clinicId}
+    ORDER BY bm.billing_month DESC
+    LIMIT 1
+  `;
+  const overview = buildBillingOverview(rows[0]);
+  if (!overview) {
+    const error = new Error('No billing summary is available for this clinic.');
+    error.status = 404;
+    error.code = 'BILLING_DATA_UNAVAILABLE';
+    throw error;
+  }
+  res.json(overview);
 }));
 app.get('/api/dashboard/inbound/analytics', ...dashboardAuth, apiRoute(async (req, res) => {
-  res.json(await n8nProd.inbound.analytics(req.session.tenantId, req.clinicId, req.query.range));
+  res.json(buildInboundAnalytics(await readInboundCalls(req), req.query.range));
 }));
 app.get('/api/dashboard/inbound/calls', ...dashboardAuth, apiRoute(async (req, res) => {
-  res.json(await n8nProd.inbound.calls(req.session.tenantId, req.clinicId));
+  res.json(buildInboundCalls(await readInboundCalls(req)));
 }));
 app.get('/api/dashboard/inbound/transcripts', ...dashboardAuth, apiRoute(async (req, res) => {
-  res.json(await n8nProd.inbound.transcripts(req.session.tenantId, req.clinicId));
+  res.json(buildInboundTranscripts(await readInboundCalls(req)));
 }));
 app.get('/api/dashboard/inbound/invoices', ...dashboardAuth, apiRoute(async (req, res) => {
-  res.json(await n8nProd.inbound.invoices(req.session.tenantId, req.clinicId));
+  const rows = await prisma.$queryRaw`
+    SELECT i.invoice_id, i.billing_month, i.status, i.base_amount, i.overage_minutes,
+      i.overage_amount, i.total_amount, i.generated_at, i.due_at, i.details
+    FROM invoices i
+    WHERE i.tenant_id = ${req.session.tenantId} AND i.clinic_id = ${req.clinicId}
+    ORDER BY i.billing_month DESC
+    LIMIT 100
+  `;
+  res.json({ invoices: rows.map(row => {
+    const details = row.details && typeof row.details === 'object' ? row.details : {};
+    const minutesUsed = Number(details.minutes_used ?? 0);
+    const included = Number(details.included_minutes ?? 1000);
+    const overageMinutes = Number(row.overage_minutes ?? 0);
+    const amount = Number(row.total_amount ?? 0);
+    const status = String(row.status ?? 'pending').toLowerCase();
+    return {
+      id: row.invoice_id, invoice_id: row.invoice_id, period: row.billing_month,
+      amount: `$${amount.toFixed(2)}`, amountRaw: amount,
+      minutes: `${minutesUsed.toLocaleString()} / ${included.toLocaleString()}`,
+      minutesUsed, includedMinutes: included, status,
+      date: row.generated_at ? new Date(row.generated_at).toISOString().slice(0, 10) : '',
+      dueDate: row.due_at ? new Date(row.due_at).toISOString().slice(0, 10) : '',
+      paid: status === 'paid', isOverage: overageMinutes > 0, overageMin: overageMinutes,
+      overageRate: Number(details.overage_rate ?? 0.70), overageCost: Number(row.overage_amount ?? 0),
+      baseRate: Number(row.base_amount ?? 500),
+    };
+  }) });
 }));
 
 // ── Outbound dashboard (§6.3) ────────────────────────────────────────────────
 app.get('/api/dashboard/outbound/overview', ...dashboardAuth, apiRoute(async (req, res) => {
-  res.json(await n8nProd.outbound.overview(req.session.tenantId, req.clinicId));
+  // Same containment principle as inbound Overview: rendering historical
+  // billing data is safe, but it must not require an unrelated Retell
+  // workflow to be active.
+  const rows = await prisma.$queryRaw`
+    SELECT bm.*, t.name AS client_name
+    FROM outbound_billing_months bm
+    JOIN tenants t ON t.id = bm.tenant_id
+    JOIN clinic_configs cc ON cc.tenant_id = bm.tenant_id AND cc.clinic_id = bm.clinic_id
+    WHERE bm.tenant_id = ${req.session.tenantId}
+      AND bm.clinic_id = ${req.clinicId}
+    ORDER BY bm.billing_month DESC
+    LIMIT 1
+  `;
+  const overview = buildBillingOverview(rows[0]);
+  if (!overview) {
+    const error = new Error('No outbound billing summary is available for this clinic.');
+    error.status = 404;
+    error.code = 'OUTBOUND_BILLING_DATA_UNAVAILABLE';
+    throw error;
+  }
+  res.json(overview);
 }));
 app.get('/api/dashboard/outbound/analytics', ...dashboardAuth, apiRoute(async (req, res) => {
   res.json(await n8nProd.outbound.analytics(req.session.tenantId, req.clinicId, req.query.range));
@@ -435,11 +917,11 @@ app.post('/api/dashboard/outbound-batches', ...dashboardAuth, requireRole('owner
   res.json(await n8nProd.outboundBatches.create(req.session.userId, req.session.tenantId, req.clinicId, payload));
 }));
 
-app.get('/api/dashboard/outbound-batches', ...dashboardAuth, apiRoute(async (req, res) => {
+app.get('/api/dashboard/outbound-batches', ...dashboardAuth, requireRole('owner', 'admin'), apiRoute(async (req, res) => {
   res.json(await n8nProd.outboundBatches.list(req.session.userId, req.session.tenantId, req.clinicId));
 }));
 
-app.get('/api/dashboard/outbound-batches/:id', ...dashboardAuth, apiRoute(async (req, res) => {
+app.get('/api/dashboard/outbound-batches/:id', ...dashboardAuth, requireRole('owner', 'admin'), apiRoute(async (req, res) => {
   const result = await n8nProd.outboundBatches.get(req.session.userId, req.session.tenantId, req.clinicId, req.params.id);
   // Defense in depth: never trust a record whose ownership fields don't
   // match the verified session as belonging to this clinic.
@@ -459,7 +941,8 @@ app.post('/api/dashboard/outbound-batches/:id/dispatch', ...dashboardAuth, requi
 // key) is intentionally never proxied here - only the public/redacted read
 // and the write-only save are reachable from the browser.
 app.get('/api/dashboard/settings', ...dashboardAuth, apiRoute(async (req, res) => {
-  res.json(await n8nProd.getPublicSettings(req.session.tenantId, req.clinicId));
+  const settings = await n8nProd.getPublicSettings(req.session.tenantId, req.clinicId);
+  res.json(redactPublicSettingsResponse(settings));
 }));
 app.put('/api/dashboard/settings', ...dashboardAuth, requireRole('owner', 'admin'), rateLimit('settings-save', 20, 60_000), apiRoute(async (req, res) => {
   const payload = { ...(req.body ?? {}), tenant_id: req.session.tenantId, clinic_id: req.clinicId };
@@ -569,15 +1052,8 @@ app.post('/api/dashboard/knowledge-submissions', ...dashboardAuth, requireRole('
   const payload = { title, request_note: requestNote, source_type: sourceType };
 
   if (sourceType === 'website') {
-    const rawUrl = String(body.website_url ?? '');
-    let parsed;
-    try {
-      parsed = new URL(rawUrl);
-    } catch {
-      throw badRequest('website_url must be a valid URL.');
-    }
-    if (parsed.protocol !== 'https:') throw badRequest('website_url must use HTTPS.');
-    if (parsed.username || parsed.password) throw badRequest('website_url must not include embedded credentials.');
+    const parsed = parsePublicWebsiteUrl(body.website_url);
+    if (!parsed) throw badRequest('website_url must be a public HTTPS URL without embedded credentials.');
     payload.website_url = parsed.toString();
     payload.idempotency_key = `kb-web-${randomUUID()}`;
   } else {
@@ -622,10 +1098,10 @@ app.get('/api/dashboard/knowledge-submissions/:id', ...dashboardAuth, requireRol
 app.get('/api/dashboard/recovery/snapshot', ...dashboardAuth, apiRoute(async (req, res) => {
   res.json(await n8nProd.recoveryEvent('recovery.get_snapshot', req.session.tenantId, req.clinicId));
 }));
-app.post('/api/dashboard/recovery/queue/approve', ...dashboardAuth, rateLimit('recovery-mutate', 30, 60_000), apiRoute(async (req, res) => {
+app.post('/api/dashboard/recovery/queue/approve', ...dashboardAuth, requireRole('owner', 'admin'), rateLimit('recovery-mutate', 30, 60_000), apiRoute(async (req, res) => {
   res.json(await n8nProd.recoveryEvent('recovery.queue.approve', req.session.tenantId, req.clinicId, { queue_ids: req.body?.queueIds ?? [] }));
 }));
-app.post('/api/dashboard/recovery/queue/reject', ...dashboardAuth, rateLimit('recovery-mutate', 30, 60_000), apiRoute(async (req, res) => {
+app.post('/api/dashboard/recovery/queue/reject', ...dashboardAuth, requireRole('owner', 'admin'), rateLimit('recovery-mutate', 30, 60_000), apiRoute(async (req, res) => {
   res.json(await n8nProd.recoveryEvent('recovery.queue.reject', req.session.tenantId, req.clinicId, { queue_ids: req.body?.queueIds ?? [], reason: req.body?.reason }));
 }));
 function recoveryInvoiceRoute(action) {
@@ -633,11 +1109,11 @@ function recoveryInvoiceRoute(action) {
     res.json(await n8nProd.recoveryEvent(`recovery.invoice.${action}`, req.session.tenantId, req.clinicId, { invoice_id: req.params.invoiceId, reason: req.body?.reason }));
   });
 }
-app.post('/api/dashboard/recovery/invoices/:invoiceId/hold', ...dashboardAuth, rateLimit('recovery-mutate', 30, 60_000), recoveryInvoiceRoute('hold'));
-app.post('/api/dashboard/recovery/invoices/:invoiceId/resume', ...dashboardAuth, rateLimit('recovery-mutate', 30, 60_000), recoveryInvoiceRoute('resume'));
-app.post('/api/dashboard/recovery/invoices/:invoiceId/escalate', ...dashboardAuth, rateLimit('recovery-mutate', 30, 60_000), recoveryInvoiceRoute('escalate'));
-app.post('/api/dashboard/recovery/invoices/:invoiceId/reconcile', ...dashboardAuth, rateLimit('recovery-mutate', 30, 60_000), recoveryInvoiceRoute('reconcile'));
-app.put('/api/dashboard/recovery/settings', ...dashboardAuth, rateLimit('settings-save', 20, 60_000), apiRoute(async (req, res) => {
+app.post('/api/dashboard/recovery/invoices/:invoiceId/hold', ...dashboardAuth, requireRole('owner', 'admin'), rateLimit('recovery-mutate', 30, 60_000), recoveryInvoiceRoute('hold'));
+app.post('/api/dashboard/recovery/invoices/:invoiceId/resume', ...dashboardAuth, requireRole('owner', 'admin'), rateLimit('recovery-mutate', 30, 60_000), recoveryInvoiceRoute('resume'));
+app.post('/api/dashboard/recovery/invoices/:invoiceId/escalate', ...dashboardAuth, requireRole('owner', 'admin'), rateLimit('recovery-mutate', 30, 60_000), recoveryInvoiceRoute('escalate'));
+app.post('/api/dashboard/recovery/invoices/:invoiceId/reconcile', ...dashboardAuth, requireRole('owner', 'admin'), rateLimit('recovery-mutate', 30, 60_000), recoveryInvoiceRoute('reconcile'));
+app.put('/api/dashboard/recovery/settings', ...dashboardAuth, requireRole('owner', 'admin'), rateLimit('settings-save', 20, 60_000), apiRoute(async (req, res) => {
   res.json(await n8nProd.recoveryEvent('recovery.settings_changed', req.session.tenantId, req.clinicId, { settings: req.body ?? {} }));
 }));
 
@@ -650,4 +1126,5 @@ app.use(express.static(join(ROOT, 'dist')));
 app.get('/', (_req, res) => res.sendFile(join(ROOT, 'dist/index.html')));
 app.use((_req, res) => res.status(404).send('Not found'));
 
+startAdvisorMemoryWorker(OPENAI_API_KEY);
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));

@@ -30,11 +30,30 @@ const N8N_KNOWLEDGE_BASE_SUBMISSIONS_URL = process.env.N8N_KNOWLEDGE_BASE_SUBMIS
 // only a separate, deliberate dispatch call actually fires the Retell batch
 // call and records the returned retell_batch_call_id.
 const N8N_OUTBOUND_BATCHES_URL = process.env.N8N_OUTBOUND_BATCHES_URL ?? '';
+// Read-only, de-identified Juvonno business snapshots for the Manager
+// Assistant. The workflow is the only component that receives the decrypted
+// clinic API key; this BFF receives aggregate appointment/invoice/commission
+// metrics only.
+const N8N_MANAGER_INSIGHTS_URL = process.env.N8N_MANAGER_INSIGHTS_URL ?? '';
+const N8N_MANAGER_ANALYST_TOOLS_URL = process.env.N8N_MANAGER_ANALYST_TOOLS_URL ?? '';
 
 function authHeaders() {
   const headers = { 'Content-Type': 'application/json' };
   if (N8N_DASHBOARD_AUTH_VALUE) headers[N8N_DASHBOARD_AUTH_HEADER] = N8N_DASHBOARD_AUTH_VALUE;
   return headers;
+}
+
+// A production dashboard must never "try anyway" against a webhook when its
+// server-to-server credential is missing. Besides avoiding accidental calls to
+// an unauthenticated endpoint, this makes a deployment configuration failure
+// explicit before any tenant-scoped payload leaves the BFF.
+function requireDashboardAuth() {
+  if (!N8N_DASHBOARD_AUTH_HEADER || !N8N_DASHBOARD_AUTH_VALUE) {
+    const err = new Error('The upstream dashboard integration is not configured.');
+    err.status = 503;
+    err.code = 'N8N_AUTH_NOT_CONFIGURED';
+    throw err;
+  }
 }
 
 async function parseJsonSafe(res) {
@@ -47,16 +66,18 @@ async function parseJsonSafe(res) {
 }
 
 function n8nError(json, status) {
-  const message = json?.error?.message ?? json?.error ?? `n8n responded with ${status}`;
-  const err = new Error(message);
-  err.status = status >= 400 && status < 600 ? status : 502;
-  err.code = json?.error?.code;
+  // An n8n/provider response is not a trusted user-facing error source. Its
+  // body can contain query, provider, or configuration detail, so preserve
+  // neither its message nor its status code at the browser boundary.
+  const err = new Error('The upstream service could not complete the request.');
+  err.status = 502;
+  err.code = 'N8N_UPSTREAM_FAILED';
   return err;
 }
 
-async function withTimeoutFetch(url, init) {
+async function withTimeoutFetch(url, init, timeoutMs = 15_000) {
   try {
-    return await fetch(url, { ...init, signal: AbortSignal.timeout(15_000) });
+    return await fetch(url, { ...init, signal: AbortSignal.timeout(timeoutMs) });
   } catch (error) {
     const err = new Error(error?.name === 'TimeoutError' ? 'The service timed out' : 'The service is unavailable');
     err.status = error?.name === 'TimeoutError' ? 504 : 502;
@@ -73,11 +94,17 @@ function requireBaseUrl() {
 }
 
 // GET <N8N_BASE_URL>/<path>?tenant_id=...&clinic_id=...&<extra> (§6.2/6.3).
+// Legacy tracker formatter nodes used camel-case query fields. Both spellings
+// below are derived solely from the already-authorized BFF scope; accepting
+// them downstream never grants browser-controlled scope.
 export async function n8nGet(path, tenantId, clinicId, extraParams = {}) {
   requireBaseUrl();
+  requireDashboardAuth();
   const url = new URL(`${N8N_BASE_URL}/${path.replace(/^\/+/, '')}`);
   url.searchParams.set('tenant_id', tenantId);
   url.searchParams.set('clinic_id', clinicId);
+  url.searchParams.set('tenantId', tenantId);
+  url.searchParams.set('clinicId', clinicId);
   for (const [k, v] of Object.entries(extraParams)) if (v != null && v !== '') url.searchParams.set(k, String(v));
   const res = await withTimeoutFetch(url, { headers: authHeaders() });
   const json = await parseJsonSafe(res);
@@ -90,6 +117,7 @@ export async function n8nGet(path, tenantId, clinicId, extraParams = {}) {
 // or dedicated body shape rather than one webhook per action).
 export async function n8nPost(path, body) {
   requireBaseUrl();
+  requireDashboardAuth();
   const url = `${N8N_BASE_URL}/${path.replace(/^\/+/, '')}`;
   const res = await withTimeoutFetch(url, { method: 'POST', headers: authHeaders(), body: JSON.stringify(body) });
   const json = await parseJsonSafe(res);
@@ -137,6 +165,62 @@ export const outbound = {
   // of trusting a browser-supplied contacts array straight through to Retell.
 };
 
+async function managerInsightsAction(action, userId, tenantId, clinicId, extra = {}) {
+  if (!N8N_MANAGER_INSIGHTS_URL) {
+    const err = new Error('N8N_MANAGER_INSIGHTS_URL is not configured');
+    err.status = 503;
+    err.code = 'MANAGER_INSIGHTS_NOT_CONFIGURED';
+    throw err;
+  }
+  requireDashboardAuth();
+  const res = await withTimeoutFetch(N8N_MANAGER_INSIGHTS_URL, {
+    method: 'POST',
+    headers: authHeaders(),
+    body: JSON.stringify({ action, user_id: userId, tenant_id: tenantId, clinic_id: clinicId, ...extra }),
+  }, 45_000);
+  const json = await parseJsonSafe(res);
+  if (!res.ok) throw n8nError(json, res.status);
+  if (json?.success !== true) {
+    const err = new Error(json?.message || 'Juvonno business insights are unavailable');
+    err.status = json?.error_code === 'CLINIC_ACCESS_FORBIDDEN' ? 403 : 502;
+    err.code = json?.error_code || 'MANAGER_INSIGHTS_UPSTREAM_FAILED';
+    throw err;
+  }
+  return json;
+}
+
+export const managerInsights = {
+  get: (u, t, c) => managerInsightsAction('manager_insights.get', u, t, c),
+  refresh: (u, t, c, periodDays = 30) => managerInsightsAction('manager_insights.refresh', u, t, c, { period_days: periodDays }),
+};
+
+export async function runManagerAnalystTool({ action, userId, tenantId, clinicIds, startDate, endDate, patientIdentifier, detailIdentifier, practitionerIdentifier, correlationId }) {
+  if (!N8N_MANAGER_ANALYST_TOOLS_URL) {
+    const err = new Error('N8N_MANAGER_ANALYST_TOOLS_URL is not configured');
+    err.status = 503;
+    err.code = 'MANAGER_ANALYST_NOT_CONFIGURED';
+    throw err;
+  }
+  requireDashboardAuth();
+  const res = await withTimeoutFetch(N8N_MANAGER_ANALYST_TOOLS_URL, {
+    method: 'POST', headers: authHeaders(), body: JSON.stringify({
+      action, user_id: userId, tenant_id: tenantId, clinic_ids: clinicIds,
+      start_date: startDate, end_date: endDate,
+      patient_identifier: patientIdentifier || null,
+      detail_identifier: detailIdentifier || null,
+      practitioner_identifier: practitionerIdentifier || null,
+      correlation_id: correlationId,
+    }),
+  // Bounded historical Advisor actions may make several adaptive Juvonno
+  // requests across complete time partitions. Keep the BFF timeout above the
+  // workflow's global safety ceilings while every individual source request
+  // remains capped inside n8n.
+  }, 120_000);
+  const json = await parseJsonSafe(res);
+  if (!res.ok) throw n8nError(json, res.status);
+  return json;
+}
+
 // ── Appointment Requests / Staff Action Queue (FRONTEND-BFF-HANDOFF.md) ─────
 // user_id/tenant_id/clinic_id must always be the verified session values
 // (never anything from the request body) - callers pass them explicitly so
@@ -147,6 +231,7 @@ async function appointmentRequestsAction(action, userId, tenantId, clinicId, ext
     err.status = 503;
     throw err;
   }
+  requireDashboardAuth();
   const res = await withTimeoutFetch(N8N_APPOINTMENT_REQUESTS_URL, {
     method: 'POST',
     headers: authHeaders(),
@@ -166,6 +251,7 @@ export async function getSmsFollowupStatus(tenantId, clinicId) {
     err.status = 503;
     throw err;
   }
+  requireDashboardAuth();
   const res = await withTimeoutFetch(N8N_SMS_FOLLOWUPS_URL, {
     method: 'POST',
     headers: authHeaders(),
@@ -201,6 +287,7 @@ async function knowledgeSubmissionsAction(action, userId, tenantId, clinicId, ex
     err.status = 503;
     throw err;
   }
+  requireDashboardAuth();
   const res = await withTimeoutFetch(N8N_KNOWLEDGE_BASE_SUBMISSIONS_URL, {
     method: 'POST',
     headers: authHeaders(),
@@ -226,6 +313,7 @@ async function outboundBatchesAction(action, userId, tenantId, clinicId, extra =
     err.status = 503;
     throw err;
   }
+  requireDashboardAuth();
   const res = await withTimeoutFetch(N8N_OUTBOUND_BATCHES_URL, {
     method: 'POST',
     headers: authHeaders(),

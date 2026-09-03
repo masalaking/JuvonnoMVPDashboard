@@ -33,4 +33,13 @@ export default defineConfig({
 
   // File types to support raw imports. Never add .css, .tsx, or .ts files to this.
   assetsInclude: ['**/*.svg', '**/*.csv'],
+
+  // Local development: keep browser requests same-origin while forwarding
+  // the authenticated BFF routes to the Express server on API_PORT.
+  server: {
+    proxy: {
+      '/api': 'http://127.0.0.1:3001',
+      '/health': 'http://127.0.0.1:3001',
+    },
+  },
 })
