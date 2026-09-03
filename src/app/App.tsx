@@ -647,8 +647,12 @@ function ClinicSwitcher() {
                 <CommandItem key={c.clinicId} value={c.clinicName} onSelect={() => handleSelect(c.clinicId)}>
                   <ClinicStatusDot status={c.status} />
                   <span className="flex-1 truncate">{c.clinicName}</span>
-                  <span className="text-[10px] uppercase tracking-wide text-muted-foreground border border-border rounded px-1.5 py-0.5">{c.role}</span>
-                  {c.clinicId === session.activeClinicId && <Check size={14} className="text-teal-600" />}
+                  {/* text-current/border-current so this always matches the
+                      row's own text color (foreground normally, accent-
+                      foreground when highlighted) instead of a fixed muted
+                      tone that becomes unreadable against the highlight bg. */}
+                  <span className="text-[10px] uppercase tracking-wide text-current border border-current/30 rounded px-1.5 py-0.5 opacity-80">{c.role}</span>
+                  {c.clinicId === session.activeClinicId && <Check size={14} className="text-current shrink-0" />}
                 </CommandItem>
               ))}
             </CommandGroup>
@@ -975,21 +979,14 @@ function TopBar() {
           <ChevronDown size={12} className="text-muted-foreground ml-auto" />
         </div>
       )}
-      <div className="flex-1 relative max-w-xs">
-        <Search size={13} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
-        <input className="w-full bg-muted border border-border rounded-md pl-8 pr-3 py-1.5 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring" placeholder="Search calls, patients…" />
-      </div>
       <div className="ml-auto flex items-center gap-2">
         <span className="flex items-center gap-1.5 bg-emerald-50 text-emerald-700 border border-emerald-200 text-xs font-medium px-2.5 py-1 rounded-full">
           <Circle size={6} className="fill-emerald-500 text-emerald-500" /> Active
         </span>
-        <button className="relative p-2 rounded-md hover:bg-muted transition-colors">
-          <Bell size={15} className="text-muted-foreground" />
-          <span className="absolute top-1 right-1 w-1.5 h-1.5 bg-red-500 rounded-full" />
-        </button>
-        <button className="p-2 rounded-md hover:bg-muted transition-colors">
-          <HelpCircle size={15} className="text-muted-foreground" />
-        </button>
+        {/* Merge note: main removed the dead Bell/Help buttons (non-functional,
+            not clickable); the advisor branch added the no-login guard so
+            "Sign out" is hidden when the local demo bypass is active. Both
+            kept. */}
         {session && !LOCAL_DASHBOARD_NO_LOGIN && (
           <button onClick={logout} title="Sign out" className="p-2 rounded-md hover:bg-muted transition-colors">
             <LogOut size={15} className="text-muted-foreground" />
@@ -1840,8 +1837,10 @@ const REQUIRED_CSV_HEADERS = "phone_number, patient_first_name, patient_last_nam
 
 // Same E.164 check the n8n workflow itself enforces - validating here first
 // means a bad CSV gets caught before the batch call ever fires, not after.
+// FRONTEND-DEVELOPER-HANDOFF-COMBINED.md §3: same pattern the BFF enforces
+// server-side (isE164Phone in server/index.js) - kept in sync deliberately.
 function isE164(phone: string): boolean {
-  return /^\+[1-9]\d{6,14}$/.test(phone);
+  return /^\+[1-9]\d{7,14}$/.test(phone);
 }
 
 function csvSplit(line: string): string[] {
@@ -1928,13 +1927,22 @@ function MakeCallScreen() {
   const { activeClinicId } = useDashboard();
   const { session } = useAuth();
   const currentClinicRole = session?.clinics.find(c => c.clinicId === session.activeClinicId)?.role ?? null;
-  const canSeeFullNumbers = currentClinicRole === "owner" || currentClinicRole === "admin";
+  // FRONTEND-DEVELOPER-HANDOFF-COMBINED.md §1: "Hide or disable those
+  // controls for viewers instead of waiting for a 403" - server already
+  // enforces owner/admin on create/dispatch (requireRole), this just keeps
+  // a viewer from seeing composer controls they can't use.
+  const canManageOutbound = currentClinicRole === "owner" || currentClinicRole === "admin";
   const [contacts, setContacts] = useState<CsvContact[]>([]);
   const [fileName, setFileName] = useState("");
   const [batchName, setBatchName] = useState("");
   const [creating, setCreating] = useState(false);
   const [result, setResult] = useState<{ ok: boolean; message: string } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const [historyFilter, setHistoryFilter] = useState<"pending" | "in_progress" | "failed" | "history">("pending");
+  // Stable per-attempt token so a network retry of the SAME create reuses
+  // the same idempotency key rather than minting a new one every request
+  // (handoff §1/§4) - only regenerated when starting a genuinely new batch.
+  const clientOperationIdRef = useRef<string>(crypto.randomUUID());
 
   // The batch just created in this session, if any - separate from history
   // below so the "Send" confirmation flow has an obvious single target.
@@ -1953,7 +1961,12 @@ function MakeCallScreen() {
   const invalidContacts = contacts.filter(c => !c.valid);
 
   async function loadHistory() {
-    if (!activeClinicId) return;
+    // GET /outbound-batches is owner/admin-only server-side (matches the n8n
+    // workflow's own restriction, BACKEND_PRODUCTION_READINESS.md) - a
+    // viewer's request would always 403, which would otherwise render as a
+    // generic "could not load" error. Skip the request entirely and degrade
+    // the section gracefully instead (rendered below).
+    if (!activeClinicId || !canManageOutbound) { setHistoryLoading(false); return; }
     setHistoryLoading(true);
     setHistoryError(false);
     try {
@@ -1969,10 +1982,13 @@ function MakeCallScreen() {
     }
   }
 
-  useEffect(() => { loadHistory(); }, [activeClinicId]);
+  useEffect(() => { loadHistory(); }, [activeClinicId, canManageOutbound]);
 
   useEffect(() => {
-    if (!selectedBatchId || !activeClinicId) { setSelectedBatchDetail(null); return; }
+    // GET /outbound-batches/:id is also owner/admin-only - a viewer can
+    // never reach this (no History rows to click in the first place), but
+    // guard it anyway rather than firing a request known to 403.
+    if (!selectedBatchId || !activeClinicId || !canManageOutbound) { setSelectedBatchDetail(null); return; }
     let cancelled = false;
     setDetailLoading(true);
     apiFetch(activeClinicId, session?.csrfToken, `/outbound-batches/${selectedBatchId}`)
@@ -1981,7 +1997,7 @@ function MakeCallScreen() {
       .catch(() => { if (!cancelled) setSelectedBatchDetail(null); })
       .finally(() => { if (!cancelled) setDetailLoading(false); });
     return () => { cancelled = true; };
-  }, [selectedBatchId, activeClinicId]);
+  }, [selectedBatchId, activeClinicId, canManageOutbound]);
 
   function reset() {
     setContacts([]);
@@ -1990,6 +2006,7 @@ function MakeCallScreen() {
     setResult(null);
     setActiveBatch(null);
     if (fileInputRef.current) fileInputRef.current.value = "";
+    clientOperationIdRef.current = crypto.randomUUID();
   }
 
   function handleFile(file: File) {
@@ -2010,6 +2027,7 @@ function MakeCallScreen() {
         method: "POST",
         body: {
           name: batchName || undefined,
+          client_operation_id: clientOperationIdRef.current,
           contacts: validContacts.map(c => ({
             patient_first_name: c.firstName.trim(),
             patient_last_name: c.lastName.trim(),
@@ -2018,8 +2036,12 @@ function MakeCallScreen() {
         },
       });
       const json = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        setResult({ ok: false, message: json?.error?.message ?? "Could not create the batch." });
+      // A 200 with success:false is still a failure (handoff §1) - this
+      // route intentionally passes n8n's raw { success, created, duplicate,
+      // batch, error_code, message } through, not the apiRoute error
+      // envelope, except for validation errors thrown before n8n is called.
+      if (!res.ok || json?.success !== true) {
+        setResult({ ok: false, message: json?.error?.message ?? json?.message ?? "Could not create the batch." });
         return;
       }
       const batch = mapOutboundBatch(json?.batch ?? json);
@@ -2028,7 +2050,12 @@ function MakeCallScreen() {
         return;
       }
       setActiveBatch(batch);
-      setResult({ ok: true, message: `Batch created with ${validContacts.length} contact${validContacts.length === 1 ? "" : "s"} — still in Draft. Review and send when ready.` });
+      setResult({
+        ok: true,
+        message: json?.duplicate === true
+          ? "This batch was already created — showing the existing draft rather than creating a new one."
+          : `Batch created with ${validContacts.length} contact${validContacts.length === 1 ? "" : "s"} — still in Draft. Review and send when ready.`,
+      });
       loadHistory();
     } catch {
       setResult({ ok: false, message: "Could not reach the server. Please try again." });
@@ -2053,7 +2080,7 @@ function MakeCallScreen() {
         setResult({ ok: false, message: "This batch was already sent or is no longer dispatchable." });
         setActiveBatch(prev => prev ? { ...prev, status: "failed" } : prev);
       } else {
-        setResult({ ok: false, message: json?.error?.message ?? "Could not send this batch to Retell." });
+        setResult({ ok: false, message: json?.error?.message ?? json?.message ?? "Could not send this batch to Retell." });
         setActiveBatch(prev => prev ? { ...prev, status: "failed" } : prev);
       }
       loadHistory();
@@ -2096,6 +2123,11 @@ function MakeCallScreen() {
         </Card>
       </div>
 
+      {!canManageOutbound ? (
+        <Card className="p-5 text-xs text-muted-foreground">
+          Only clinic owners and admins can create or send outbound batches. You can still see batch history below.
+        </Card>
+      ) : (
       <div className="grid grid-cols-2 gap-4 items-start">
         <Card className="p-5 space-y-4">
           <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">CSV Upload</p>
@@ -2210,7 +2242,7 @@ function MakeCallScreen() {
                 <tbody>
                   {validContacts.map((c) => (
                     <tr key={c.row} className="border-b border-border last:border-0 hover:bg-muted/30 transition-colors">
-                      <td className="px-4 py-2 font-mono text-foreground">{canSeeFullNumbers ? c.phoneNumber : maskPhone(c.phoneNumber)}</td>
+                      <td className="px-4 py-2 font-mono text-foreground">{c.phoneNumber}</td>
                       <td className="px-4 py-2 text-foreground">{c.firstName || "—"}</td>
                       <td className="px-4 py-2 text-foreground">{c.lastName || "—"}</td>
                       <td className="px-4 py-2 font-mono text-muted-foreground">{c.row}</td>
@@ -2222,7 +2254,17 @@ function MakeCallScreen() {
           )}
         </Card>
       </div>
+      )}
 
+      {!canManageOutbound ? (
+        // GET /outbound-batches is owner/admin-only server-side (matches the
+        // n8n workflow's own restriction) - a viewer would only ever see a
+        // failed load here, which reads as a bug rather than a permission
+        // boundary. Degrade gracefully instead of attempting the fetch.
+        <Card className="p-5 text-xs text-muted-foreground">
+          Only clinic owners and admins can view outbound batch history.
+        </Card>
+      ) : (
       <Card className="overflow-hidden">
         <div className="px-4 py-3 border-b border-border flex items-center justify-between">
           <h3 className="text-sm font-semibold text-foreground">Batch History</h3>
@@ -2230,35 +2272,63 @@ function MakeCallScreen() {
             <RefreshCw size={12} /> Refresh
           </button>
         </div>
-        {historyLoading ? (
-          <p className="text-xs text-muted-foreground py-10 text-center">Loading…</p>
-        ) : historyError ? (
-          <p className="text-xs text-muted-foreground py-10 text-center">Could not load batch history. <button onClick={loadHistory} className="text-primary hover:underline">Try again</button></p>
-        ) : history.length === 0 ? (
-          <p className="text-xs text-muted-foreground py-10 text-center">No batches yet.</p>
-        ) : (
-          <table className="w-full text-xs">
-            <thead>
-              <tr className="border-b border-border bg-muted/40">
-                {["Name", "Created", "Status", "Contacts", "Retell Batch ID"].map(h => (
-                  <th key={h} className="text-left px-4 py-2.5 text-muted-foreground font-medium">{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {history.map(b => (
-                <tr key={b.id} onClick={() => setSelectedBatchId(b.id)} className="border-b border-border last:border-0 hover:bg-muted/30 cursor-pointer transition-colors">
-                  <td className="px-4 py-3 font-medium text-foreground">{b.name}</td>
-                  <td className="px-4 py-3 font-mono text-muted-foreground">{formatRelativeTime(b.createdAt)}</td>
-                  <td className="px-4 py-3"><Badge label={OUTBOUND_BATCH_STATUS_LABEL[b.status] ?? b.status} variant={OUTBOUND_BATCH_STATUS_VARIANT[b.status] ?? "Neutral"} /></td>
-                  <td className="px-4 py-3 font-mono text-muted-foreground">{b.contactCount || "—"}</td>
-                  <td className="px-4 py-3 font-mono text-muted-foreground">{b.status === "submitted" || b.status === "completed" ? (b.retellBatchCallId || "—") : "—"}</td>
+        <div className="flex items-center gap-1.5 px-4 pt-3">
+          {([
+            ["pending", "Pending"],
+            ["in_progress", "In Progress"],
+            ["failed", "Failed"],
+            ["history", "History"],
+          ] as const).map(([value, label]) => (
+            <button
+              key={value}
+              type="button"
+              onClick={() => setHistoryFilter(value)}
+              className={`text-[10px] font-medium px-2.5 py-1 rounded-full border transition-colors ${historyFilter === value ? "bg-primary text-white border-primary" : "border-border text-muted-foreground hover:bg-muted"}`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+        {(() => {
+          const filtered = history.filter(b => {
+            if (historyFilter === "pending") return b.status === "draft";
+            if (historyFilter === "in_progress") return b.status === "dispatching";
+            if (historyFilter === "failed") return b.status === "failed";
+            return b.status === "submitted" || b.status === "completed" || b.status === "cancelled";
+          });
+          return historyLoading ? (
+            <p className="text-xs text-muted-foreground py-10 text-center">Loading…</p>
+          ) : historyError ? (
+            <p className="text-xs text-muted-foreground py-10 text-center">Could not load batch history. <button onClick={loadHistory} className="text-primary hover:underline">Try again</button></p>
+          ) : filtered.length === 0 ? (
+            <p className="text-xs text-muted-foreground py-10 text-center">No batches in this view.</p>
+          ) : (
+            <div className="overflow-x-auto mt-3">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="border-b border-border bg-muted/40">
+                  {["Name", "Created", "Status", "Contacts", "Retell Batch ID"].map(h => (
+                    <th key={h} className="text-left px-4 py-2.5 text-muted-foreground font-medium whitespace-nowrap">{h}</th>
+                  ))}
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
+              </thead>
+              <tbody>
+                {filtered.map(b => (
+                  <tr key={b.id} onClick={() => setSelectedBatchId(b.id)} className="border-b border-border last:border-0 hover:bg-muted/30 cursor-pointer transition-colors">
+                    <td className="px-4 py-3 font-medium text-foreground whitespace-nowrap">{b.name}</td>
+                    <td className="px-4 py-3 font-mono text-muted-foreground whitespace-nowrap">{formatRelativeTime(b.createdAt)}</td>
+                    <td className="px-4 py-3 whitespace-nowrap"><Badge label={OUTBOUND_BATCH_STATUS_LABEL[b.status] ?? b.status} variant={OUTBOUND_BATCH_STATUS_VARIANT[b.status] ?? "Neutral"} /></td>
+                    <td className="px-4 py-3 font-mono text-muted-foreground whitespace-nowrap">{b.contactCount || "—"}</td>
+                    <td className="px-4 py-3 font-mono text-muted-foreground whitespace-nowrap">{b.status === "submitted" || b.status === "completed" ? (b.retellBatchCallId || "—") : "—"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            </div>
+          );
+        })()}
       </Card>
+      )}
 
       {confirmSendOpen && activeBatch && (
         <ConfirmModal
@@ -2301,18 +2371,20 @@ function MakeCallScreen() {
                     </div>
                     {detailContacts.length > 0 && (
                       <div>
-                        <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide mb-2">
-                          Contacts {!canSeeFullNumbers && "(numbers masked)"}
-                        </p>
+                        {/* FRONTEND-DEVELOPER-HANDOFF-COMBINED.md §3: "Display
+                            patient_phone_last4 only in history/list views;
+                            never display full numbers there" - always masked
+                            here, no role-based unmask. */}
+                        <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide mb-2">Contacts</p>
                         <div className="rounded-md border border-border divide-y divide-border max-h-72 overflow-y-auto">
                           {detailContacts.map((c: any, i: number) => {
-                            const phone = pickText(c, "patient_phone", "phone_number");
+                            const phone = pickText(c, "patient_phone_last4") ? `•••• ${pickText(c, "patient_phone_last4")}` : maskPhone(pickText(c, "patient_phone", "phone_number"));
                             const callStatus = pickText(c, "call_status", "status");
                             return (
                               <div key={i} className="flex items-center justify-between px-3 py-2">
                                 <div>
                                   <p className="font-medium text-foreground">{pickText(c, "patient_first_name", "first_name")} {pickText(c, "patient_last_name", "last_name")}</p>
-                                  <p className="text-[10px] text-muted-foreground font-mono">{canSeeFullNumbers ? phone : maskPhone(phone)}</p>
+                                  <p className="text-[10px] text-muted-foreground font-mono">{phone}</p>
                                 </div>
                                 {callStatus && <Badge label={callStatus} variant={callStatus} />}
                               </div>
@@ -4764,6 +4836,12 @@ function websiteHostname(url?: string | null): string {
 function KnowledgeSubmissionsPanel() {
   const { activeClinicId } = useDashboard();
   const { session } = useAuth();
+  const currentClinicRole = session?.clinics.find(c => c.clinicId === session.activeClinicId)?.role ?? null;
+  // FRONTEND-DEVELOPER-HANDOFF-COMBINED.md §1: "Hide or disable those
+  // controls for viewers instead of waiting for a 403" - the server already
+  // enforces owner/admin via requireRole, this just keeps a viewer from
+  // seeing a form they can't submit.
+  const canSubmitKnowledge = currentClinicRole === "owner" || currentClinicRole === "admin";
   const [sourceType, setSourceType] = useState<"website" | "pdf" | "docx">("website");
   const [title, setTitle] = useState("");
   const [websiteUrl, setWebsiteUrl] = useState("");
@@ -4776,6 +4854,11 @@ function KnowledgeSubmissionsPanel() {
   const [historyLoading, setHistoryLoading] = useState(true);
   const [historyError, setHistoryError] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  // Stable per-attempt token so a network retry of the SAME submission
+  // reuses the same idempotency key instead of minting a new one every
+  // request (handoff §1/§4) - only regenerated when a submission actually
+  // succeeds and the form resets for a new one.
+  const clientOperationIdRef = useRef<string>(crypto.randomUUID());
 
   async function loadHistory() {
     if (!activeClinicId) return;
@@ -4802,6 +4885,7 @@ function KnowledgeSubmissionsPanel() {
     setFile(null);
     setFileError("");
     if (fileInputRef.current) fileInputRef.current.value = "";
+    clientOperationIdRef.current = crypto.randomUUID();
   }
 
   function handleFileChange(f: File | null) {
@@ -4833,6 +4917,7 @@ function KnowledgeSubmissionsPanel() {
         source_type: sourceType,
         title: title.trim(),
         request_note: requestNote.trim() || undefined,
+        client_operation_id: clientOperationIdRef.current,
       };
 
       if (sourceType === "website") {
@@ -4856,11 +4941,19 @@ function KnowledgeSubmissionsPanel() {
 
       const res = await apiFetch(activeClinicId, session?.csrfToken, "/knowledge-submissions", { method: "POST", body: basePayload });
       const json = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        setSubmitResult({ ok: false, message: json?.error?.message ?? "Submission failed. Please try again." });
+      // A 200 with success:false is still a failure (handoff §1) - never
+      // trust res.ok alone here, this route intentionally passes n8n's raw
+      // { success, accepted, duplicate, error_code, message } through.
+      if (!res.ok || json?.success !== true) {
+        setSubmitResult({ ok: false, message: json?.error?.message ?? json?.message ?? "Submission failed. Please try again." });
         return;
       }
-      setSubmitResult({ ok: true, message: "Submitted for RivaCare review. It will not be live in the AI receptionist until our team approves it." });
+      setSubmitResult({
+        ok: true,
+        message: json?.duplicate === true
+          ? "This was already submitted - showing the existing request rather than creating a new one."
+          : "Submitted for RivaCare review. It will not be live in the AI receptionist until our team approves it.",
+      });
       resetForm();
       loadHistory();
     } catch {
@@ -4877,6 +4970,11 @@ function KnowledgeSubmissionsPanel() {
         <p className="text-xs text-muted-foreground mt-0.5">Choose a website, PDF, or DOCX for the RivaCare team to review before it is added to Grace's knowledge.</p>
       </div>
 
+      {!canSubmitKnowledge ? (
+        <Card className="p-5 text-xs text-muted-foreground">
+          Only clinic owners and admins can submit content for review. You can still see submission history below.
+        </Card>
+      ) : (
       <Card className="p-5 space-y-4 max-w-2xl">
         <div className="flex items-center gap-2">
           {(["website", "pdf", "docx"] as const).map(t => (
@@ -4962,6 +5060,7 @@ function KnowledgeSubmissionsPanel() {
           {submitting ? "Submitting…" : "Submit for Review"}
         </button>
       </Card>
+      )}
 
       <Card className="overflow-hidden">
         <div className="px-4 py-3 border-b border-border flex items-center justify-between">
@@ -4977,26 +5076,28 @@ function KnowledgeSubmissionsPanel() {
         ) : history.length === 0 ? (
           <p className="text-xs text-muted-foreground py-10 text-center">No submissions yet.</p>
         ) : (
+          <div className="overflow-x-auto">
           <table className="w-full text-xs">
             <thead>
               <tr className="border-b border-border bg-muted/40">
                 {["Title", "Source", "File / Website", "Submitted", "Status"].map(h => (
-                  <th key={h} className="text-left px-4 py-2.5 text-muted-foreground font-medium">{h}</th>
+                  <th key={h} className="text-left px-4 py-2.5 text-muted-foreground font-medium whitespace-nowrap">{h}</th>
                 ))}
               </tr>
             </thead>
             <tbody>
               {history.map(s => (
                 <tr key={s.id} className="border-b border-border last:border-0 hover:bg-muted/30 transition-colors">
-                  <td className="px-4 py-3 font-medium text-foreground">{s.title}</td>
-                  <td className="px-4 py-3 text-muted-foreground capitalize">{s.source_type}</td>
-                  <td className="px-4 py-3 text-muted-foreground">{s.source_type === "website" ? websiteHostname(s.website_url) : (s.original_filename ?? "—")}</td>
-                  <td className="px-4 py-3 font-mono text-muted-foreground">{formatRelativeTime(s.submitted_at ?? s.created_at ?? "")}</td>
-                  <td className="px-4 py-3"><Badge label={KB_STATUS_LABEL[s.status] ?? s.status} variant={KB_STATUS_BADGE_VARIANT[s.status] ?? "Neutral"} /></td>
+                  <td className="px-4 py-3 font-medium text-foreground whitespace-nowrap">{s.title}</td>
+                  <td className="px-4 py-3 text-muted-foreground capitalize whitespace-nowrap">{s.source_type}</td>
+                  <td className="px-4 py-3 text-muted-foreground whitespace-nowrap">{s.source_type === "website" ? websiteHostname(s.website_url) : (s.original_filename ?? "—")}</td>
+                  <td className="px-4 py-3 font-mono text-muted-foreground whitespace-nowrap">{formatRelativeTime(s.submitted_at ?? s.created_at ?? "")}</td>
+                  <td className="px-4 py-3 whitespace-nowrap"><Badge label={KB_STATUS_LABEL[s.status] ?? s.status} variant={KB_STATUS_BADGE_VARIANT[s.status] ?? "Neutral"} /></td>
                 </tr>
               ))}
             </tbody>
           </table>
+          </div>
         )}
       </Card>
     </div>

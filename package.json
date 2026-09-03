@@ -11,7 +11,8 @@
     "db:pull": "prisma db pull --schema=prisma/schema.prisma",
     "db:generate": "prisma generate",
     "db:sync": "npm run db:pull && npm run db:generate",
-    "test:manager-assistant": "node --test server/manager-assistant.test.js server/advisor-crypto.test.js server/advisor-agent.test.js server/advisor-storage-migration.test.js server/advisor-scope.test.js server/advisor-recommendations.test.js server/retell-webhooks.test.js server/settings-redaction.test.js server/n8n.test.js server/public-website-url.test.js server/inbound-overview.test.js server/inbound-dashboard.test.js scripts/advisor-analytics.test.cjs scripts/synthetic-advisor-staging.test.cjs scripts/synthetic-advisor-conversation-matrix.test.cjs scripts/manage-advisor-synthetic-scope.test.cjs && node scripts/test-advisor-revenue-calculations.cjs && node scripts/test-advisor-analytics-workflow.cjs",
+    "test:manager-assistant": "node --test server/manager-assistant.test.js server/advisor-crypto.test.js server/advisor-agent.test.js server/advisor-storage-migration.test.js server/advisor-scope.test.js server/advisor-recommendations.test.js server/retell-webhooks.test.js server/settings-redaction.test.js server/n8n.test.js server/public-website-url.test.js server/inbound-overview.test.js server/inbound-dashboard.test.js scripts/advisor-analytics.test.cjs scripts/synthetic-advisor-staging.test.cjs scripts/synthetic-advisor-conversation-matrix.test.cjs scripts/manage-advisor-synthetic-scope.test.cjs",
+    "test:advisor-workflows": "node scripts/build-advisor-revenue-workflow.cjs && node scripts/test-advisor-revenue-calculations.cjs && node scripts/test-advisor-revenue-workflow.cjs && node scripts/test-advisor-analytics-workflow.cjs",
     "clinics": "node scripts/clinics.js"
   },
   "dependencies": {
