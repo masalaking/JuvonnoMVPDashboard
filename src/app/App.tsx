@@ -89,6 +89,43 @@ type OverviewStats = {
   totalRecordings: number; totalTranscripts: number;
 };
 
+type ManagerClinicSummary = {
+  clinicId: string;
+  clinicName: string;
+  ok: boolean;
+  errorCode: string | null;
+  inboundMinutesUsed: number | null;
+  outboundMinutesUsed: number | null;
+  totalMinutesUsed: number | null;
+  minutesIncluded: number | null;
+  utilizationPct: number | null;
+  totalCalls: number | null;
+  overageUSD: number | null;
+  billingPeriod: string | null;
+  signals: { type: string; severity: string; label: string }[];
+  business?: {
+    available: boolean;
+    periodStart?: string | null;
+    periodEnd?: string | null;
+    generatedAt?: string | null;
+    appointments?: { total: number; open: number; completed: number; billed: number; cancelled: number; cancellationRatePct: number };
+    invoices?: { periodCount: number; periodInvoicedUSD: number; paidPortionUSD: number; outstandingUSD: number; outstandingCount: number };
+  };
+};
+
+type ManagerSummary = {
+  clinics: ManagerClinicSummary[];
+  totals: { clinicsAvailable: number; clinicsUnavailable: number; totalCalls: number; totalMinutesUsed: number; overageUSD: number; appointments?: number; cancellations?: number; periodInvoicedUSD?: number; paidPortionUSD?: number; outstandingUSD?: number };
+  highlights: {
+    busiestClinic: { clinicId: string; clinicName: string; totalCalls: number } | null;
+    mostMinutesClinic: { clinicId: string; clinicName: string; totalMinutesUsed: number } | null;
+    highestOverageClinic: { clinicId: string; clinicName: string; overageUSD: number } | null;
+  };
+  capabilities: { aiUsageAndCallVolume: boolean; appointments?: boolean; invoiceEconomics?: boolean; outstandingReceivables?: boolean; clinicRevenue: boolean; profitMargin: boolean; commissions: boolean };
+  businessClinicsAvailable?: number;
+  generatedAt: string;
+};
+
 // Shape of one entry from the Inbound Tracker's "Build Invoices Response" node.
 type UsageInvoice = {
   id: string; invoice_id: string; period: string; amount: string; amountRaw: number;
@@ -243,7 +280,7 @@ function useDashboard() { return useContext(DashboardContext); }
 // tenant/clinic-verified server session is the new path; the old
 // access-token link is left alone as-is.
 interface ClinicOption { clinicId: string; clinicName: string; role: string; status: string | null; timezone: string | null }
-interface AuthSession { userId: string; tenantId: string; activeClinicId: string | null; clinics: ClinicOption[]; csrfToken: string }
+interface AuthSession { userId: string; tenantId: string; activeClinicId: string | null; clinics: ClinicOption[]; csrfToken: string; canViewManagerAssistant: boolean }
 
 interface AuthCtx {
   session: AuthSession | null;
@@ -255,6 +292,10 @@ interface AuthCtx {
   handleUnauthorized: () => void;
   refreshClinics: () => Promise<void>;
 }
+
+// The local repository opens directly into its demo workspace. Production
+// builds keep the normal sign-in screen and server-side authentication.
+const LOCAL_DASHBOARD_NO_LOGIN = import.meta.env.DEV || import.meta.env.VITE_LOCAL_DASHBOARD_NO_LOGIN === "true";
 
 const AuthContext = createContext<AuthCtx>({
   session: null,
@@ -329,7 +370,8 @@ function describeLoadFailure(status: number): string {
   if (status === 401) return "Your session expired. Please sign in again.";
   if (status === 403) return "You don't have access to this clinic's data.";
   if (status === 404) return "Some dashboard data could not be found.";
-  if (status >= 500 || status === 0) return "The integration is temporarily unavailable. Some data may be missing.";
+  if (status === 0) return "The dashboard backend is unavailable. Start the local API service, then retry.";
+  if (status >= 500) return "A connected service is temporarily unavailable. Confirmed data remains visible; unavailable data is not shown as zero.";
   return "Some dashboard data could not be loaded.";
 }
 
@@ -359,7 +401,17 @@ function AuthProvider({ children }: { children: React.ReactNode }) {
         // (multi-clinic-prompt.md §1.1, the "switch clinic exactly once"
         // bug). readCookie is a fallback only, in case the body is ever
         // missing it for some reason.
-        if (!cancelled) setSession({ userId: data.userId, tenantId: data.tenantId, activeClinicId: data.activeClinicId ?? null, clinics: Array.isArray(data.clinics) ? data.clinics : [], csrfToken: data.csrfToken || readCookie("rc_csrf") });
+        if (!cancelled) {
+          const clinics = Array.isArray(data.clinics) ? data.clinics : [];
+          setSession({
+            userId: data.userId,
+            tenantId: data.tenantId,
+            activeClinicId: data.activeClinicId ?? null,
+            clinics,
+            csrfToken: data.csrfToken || readCookie("rc_csrf"),
+            canViewManagerAssistant: data.canViewManagerAssistant === true || clinics.some((c: ClinicOption) => ["owner", "admin"].includes(c.role.toLowerCase())),
+          });
+        }
       } catch {
         if (!cancelled) setSession(null);
       } finally {
@@ -379,7 +431,15 @@ function AuthProvider({ children }: { children: React.ReactNode }) {
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) return { ok: false, error: data?.error?.message ?? "Invalid username or password." };
-      setSession({ userId: data.userId, tenantId: data.tenantId, activeClinicId: data.activeClinicId ?? null, clinics: Array.isArray(data.clinics) ? data.clinics : [], csrfToken: data.csrfToken });
+      const clinics = Array.isArray(data.clinics) ? data.clinics : [];
+      setSession({
+        userId: data.userId,
+        tenantId: data.tenantId,
+        activeClinicId: data.activeClinicId ?? null,
+        clinics,
+        csrfToken: data.csrfToken,
+        canViewManagerAssistant: data.canViewManagerAssistant === true || clinics.some((c: ClinicOption) => ["owner", "admin"].includes(c.role.toLowerCase())),
+      });
       return { ok: true };
     } catch {
       return { ok: false, error: "Could not reach the server." };
@@ -458,7 +518,7 @@ function AuthProvider({ children }: { children: React.ReactNode }) {
       setSession(prev => {
         if (!prev) return prev;
         const stillHasAccess = prev.activeClinicId ? clinics.some(c => c.clinicId === prev.activeClinicId) : false;
-        return { ...prev, clinics, activeClinicId: stillHasAccess ? prev.activeClinicId : null };
+        return { ...prev, clinics, activeClinicId: stillHasAccess ? prev.activeClinicId : null, canViewManagerAssistant: clinics.some((c: ClinicOption) => ["owner", "admin"].includes(c.role.toLowerCase())) };
       });
     } catch {
       // Network error - leave the session as-is rather than guessing.
@@ -809,6 +869,7 @@ const navItems = [
 
   { id: "payment-recovery", label: "Payment Recovery", icon: TrendingUp, group: "Billing" },
   { id: "billing", label: "Billing & Usage", icon: CreditCard, group: "Billing" },
+  { id: "manager-assistant", label: "AI Business Advisor", icon: Bot, group: "Business" },
 ];
 
 function initials(name: string) {
@@ -922,7 +983,11 @@ function TopBar() {
         <span className="flex items-center gap-1.5 bg-emerald-50 text-emerald-700 border border-emerald-200 text-xs font-medium px-2.5 py-1 rounded-full">
           <Circle size={6} className="fill-emerald-500 text-emerald-500" /> Active
         </span>
-        {session && (
+        {/* Merge note: main removed the dead Bell/Help buttons (non-functional,
+            not clickable); the advisor branch added the no-login guard so
+            "Sign out" is hidden when the local demo bypass is active. Both
+            kept. */}
+        {session && !LOCAL_DASHBOARD_NO_LOGIN && (
           <button onClick={logout} title="Sign out" className="p-2 rounded-md hover:bg-muted transition-colors">
             <LogOut size={15} className="text-muted-foreground" />
           </button>
@@ -1896,7 +1961,12 @@ function MakeCallScreen() {
   const invalidContacts = contacts.filter(c => !c.valid);
 
   async function loadHistory() {
-    if (!activeClinicId) return;
+    // GET /outbound-batches is owner/admin-only server-side (matches the n8n
+    // workflow's own restriction, BACKEND_PRODUCTION_READINESS.md) - a
+    // viewer's request would always 403, which would otherwise render as a
+    // generic "could not load" error. Skip the request entirely and degrade
+    // the section gracefully instead (rendered below).
+    if (!activeClinicId || !canManageOutbound) { setHistoryLoading(false); return; }
     setHistoryLoading(true);
     setHistoryError(false);
     try {
@@ -1912,10 +1982,13 @@ function MakeCallScreen() {
     }
   }
 
-  useEffect(() => { loadHistory(); }, [activeClinicId]);
+  useEffect(() => { loadHistory(); }, [activeClinicId, canManageOutbound]);
 
   useEffect(() => {
-    if (!selectedBatchId || !activeClinicId) { setSelectedBatchDetail(null); return; }
+    // GET /outbound-batches/:id is also owner/admin-only - a viewer can
+    // never reach this (no History rows to click in the first place), but
+    // guard it anyway rather than firing a request known to 403.
+    if (!selectedBatchId || !activeClinicId || !canManageOutbound) { setSelectedBatchDetail(null); return; }
     let cancelled = false;
     setDetailLoading(true);
     apiFetch(activeClinicId, session?.csrfToken, `/outbound-batches/${selectedBatchId}`)
@@ -1924,7 +1997,7 @@ function MakeCallScreen() {
       .catch(() => { if (!cancelled) setSelectedBatchDetail(null); })
       .finally(() => { if (!cancelled) setDetailLoading(false); });
     return () => { cancelled = true; };
-  }, [selectedBatchId, activeClinicId]);
+  }, [selectedBatchId, activeClinicId, canManageOutbound]);
 
   function reset() {
     setContacts([]);
@@ -2183,6 +2256,15 @@ function MakeCallScreen() {
       </div>
       )}
 
+      {!canManageOutbound ? (
+        // GET /outbound-batches is owner/admin-only server-side (matches the
+        // n8n workflow's own restriction) - a viewer would only ever see a
+        // failed load here, which reads as a bug rather than a permission
+        // boundary. Degrade gracefully instead of attempting the fetch.
+        <Card className="p-5 text-xs text-muted-foreground">
+          Only clinic owners and admins can view outbound batch history.
+        </Card>
+      ) : (
       <Card className="overflow-hidden">
         <div className="px-4 py-3 border-b border-border flex items-center justify-between">
           <h3 className="text-sm font-semibold text-foreground">Batch History</h3>
@@ -2246,6 +2328,7 @@ function MakeCallScreen() {
           );
         })()}
       </Card>
+      )}
 
       {confirmSendOpen && activeBatch && (
         <ConfirmModal
@@ -3443,13 +3526,6 @@ interface DurationCategory { id: string; label: string; durations: string; }
 // service under different Juvonno service/product/schedule-type IDs.
 interface AppointmentType { id: string; service_name: string; keywords: string; service_id: string; product_id: string; schedule_type_id: string; duration_categories: DurationCategory[]; }
 interface Practitioner { id: string; name: string; keywords: string; staff_num: string; appointment_types: AppointmentType[]; }
-interface FAQ { id: string; question: string; answer: string; category?: string; }
-
-const FAQ_CATEGORIES = [
-  "Appointments", "Services", "Pricing and Insurance", "Clinic Policies",
-  "Location and Parking", "Accessibility", "Preparation and Aftercare", "General",
-];
-
 type DraftKey = 'clinic_profile' | 'clinic_hours' | 'transfer_escalation' | 'sms_follow_ups';
 
 // Visual metadata only - the internal section key strings below (used in
@@ -3460,7 +3536,7 @@ const SETTINGS_SECTION_META: Record<string, { icon: any; subtitle: string; optio
   "Clinic Hours": { icon: Clock, subtitle: "When patients can call, visit, or request appointments." },
   "Practitioners": { icon: Users, subtitle: "Who patients can book with and which appointment types are available." },
   "Transfer & Escalation": { icon: PhoneOutgoing, subtitle: "When Grace should involve your team and where calls should go." },
-  "FAQs / Knowledge Base": { icon: MessageSquare, subtitle: "Trusted clinic answers Grace can use during conversations." },
+  "Knowledge Base": { icon: MessageSquare, subtitle: "Request a website, PDF, or DOCX for Grace's knowledge base." },
   "SMS Follow-Ups": { icon: Send, subtitle: "Patient messages sent after booking and appointment events.", optional: true },
 };
 
@@ -3583,9 +3659,6 @@ function SettingsScreen() {
   // before a save round-trip.
   const [smsValidationError, setSmsValidationError] = useState<string | null>(null);
   const [practitioners, setPractitioners] = useState<Practitioner[]>([]);
-  const [faqs, setFaqs] = useState<FAQ[]>([]);
-  const [faqSearch, setFaqSearch] = useState("");
-  const [faqCategoryFilter, setFaqCategoryFilter] = useState("All");
   // Practitioner cards default to collapsed summaries so the section doesn't
   // read as one long expanded form - expanding one is purely a UI toggle,
   // it doesn't affect what's in `practitioners` or what gets saved.
@@ -3633,10 +3706,10 @@ function SettingsScreen() {
   const sections = [
     "Clinic Profile", "Clinic Hours", "Practitioners",
     "Transfer & Escalation",
-    "FAQs / Knowledge Base", "SMS Follow-Ups",
+    "Knowledge Base", "SMS Follow-Ups",
   ];
 
-  // Only populate draft/practitioners/faqs from `settings` ONCE, the first
+  // Only populate draft/practitioners from `settings` ONCE, the first
   // time real data arrives. Re-running this on every settings change (e.g.
   // whenever ANY section gets saved) would silently overwrite unsaved local
   // edits in OTHER sections with stale server data - a real, reproducible
@@ -3666,8 +3739,6 @@ function SettingsScreen() {
         })),
       })));
     }
-    const savedF = (settings.faqs as { list?: FAQ[] })?.list;
-    if (savedF && savedF.length > 0) setFaqs(savedF);
   }, [settings]);
 
   function setField(section: DraftKey, key: string, value: string) {
@@ -3745,14 +3816,7 @@ function SettingsScreen() {
     reportSaveResult('practitioners', ok);
   }
 
-  async function handleSaveFaqs() {
-    setSaving(true);
-    const ok = await saveSection('faqs', { list: faqs });
-    setSaving(false);
-    reportSaveResult('faqs', ok);
-  }
-
-  // Read-only, derived from the same draft/practitioners/faqs state already
+  // Read-only, derived from the same draft/practitioners state already
   // in memory - purely for the nav status dots and Overview checklist. Does
   // not affect what gets saved or how.
   const sectionComplete: Record<string, boolean> = {
@@ -3760,7 +3824,9 @@ function SettingsScreen() {
     "Clinic Hours": Object.keys(draft.clinic_hours).some(k => k.startsWith("open_")),
     "Practitioners": practitioners.length > 0 && practitioners.every(p => p.name && p.staff_num),
     "Transfer & Escalation": Boolean(draft.transfer_escalation.transfer_number),
-    "FAQs / Knowledge Base": faqs.length > 0,
+    // Knowledge sources are submitted for review rather than saved directly
+    // in Settings, so this is intentionally not a setup gate.
+    "Knowledge Base": true,
     "SMS Follow-Ups": true,
   };
   const requiredSections = sections.filter(s => !SETTINGS_SECTION_META[s]?.optional);
@@ -3869,8 +3935,7 @@ function SettingsScreen() {
   // sticky bar instead of three separate per-section buttons.
   function saveActiveSection() {
     if (activeSection === "Practitioners") return handleSavePractitioners();
-    if (activeSection === "FAQs / Knowledge Base") return handleSaveFaqs();
-    if ((sections as string[]).includes(activeSection) && activeSection !== "Practitioners" && activeSection !== "FAQs / Knowledge Base") {
+    if ((sections as string[]).includes(activeSection) && activeSection !== "Practitioners" && activeSection !== "Knowledge Base") {
       const keyMap: Record<string, DraftKey> = {
         "Clinic Profile": "clinic_profile",
         "Clinic Hours": "clinic_hours",
@@ -3884,7 +3949,6 @@ function SettingsScreen() {
   }
   const activeSectionSaveResult = saveResult && (
     saveResult.section === "practitioners" && activeSection === "Practitioners" ? saveResult :
-    saveResult.section === "faqs" && activeSection === "FAQs / Knowledge Base" ? saveResult :
     ["clinic_profile", "clinic_hours", "transfer_escalation", "sms_follow_ups"].includes(saveResult.section) &&
       saveResult.section === ({ "Clinic Profile": "clinic_profile", "Clinic Hours": "clinic_hours", "Transfer & Escalation": "transfer_escalation", "SMS Follow-Ups": "sms_follow_ups" } as Record<string, string>)[activeSection]
       ? saveResult : null
@@ -3898,10 +3962,7 @@ function SettingsScreen() {
       const saved = (settings.practitioners as { list?: Practitioner[] })?.list ?? [];
       return JSON.stringify(practitioners) !== JSON.stringify(saved);
     }
-    if (activeSection === "FAQs / Knowledge Base") {
-      const saved = (settings.faqs as { list?: FAQ[] })?.list ?? [];
-      return JSON.stringify(faqs) !== JSON.stringify(saved);
-    }
+    if (activeSection === "Knowledge Base") return false;
     const keyMap: Record<string, DraftKey> = {
       "Clinic Profile": "clinic_profile",
       "Clinic Hours": "clinic_hours",
@@ -4556,107 +4617,12 @@ function SettingsScreen() {
           </div>
         )}
 
-        {activeSection === "FAQs / Knowledge Base" && (
+        {activeSection === "Knowledge Base" && (
           <div className="space-y-5">
-            <div className="flex items-center justify-between">
-              <div>
-                <h2 className="text-base font-semibold text-foreground">FAQs / Knowledge Base</h2>
-                <p className="text-xs text-muted-foreground mt-0.5">{SETTINGS_SECTION_META["FAQs / Knowledge Base"].subtitle}</p>
-              </div>
-              <button type="button" onClick={() => setFaqs(prev => [...prev, { id: crypto.randomUUID(), question: "", answer: "" }])} className="flex items-center gap-1.5 bg-muted border border-border text-xs font-medium px-3 py-2 rounded-md hover:bg-accent transition-colors">
-                <Plus size={12} /> Add FAQ
-              </button>
+            <div>
+              <h2 className="text-base font-semibold text-foreground">Knowledge Base</h2>
+              <p className="text-xs text-muted-foreground mt-0.5">{SETTINGS_SECTION_META["Knowledge Base"].subtitle}</p>
             </div>
-            {faqs.length === 0 ? (
-              <Card className="p-10 flex flex-col items-center justify-center gap-3 text-center">
-                <HelpCircle size={28} className="text-muted-foreground/30" />
-                <p className="text-sm font-medium text-foreground">No FAQs added yet</p>
-                <p className="text-xs text-muted-foreground">Add common questions callers ask and the answers the AI should give.</p>
-                <button type="button" onClick={() => setFaqs([{ id: crypto.randomUUID(), question: "", answer: "" }])} className="mt-1 flex items-center gap-1.5 bg-primary text-primary-foreground text-xs font-medium px-4 py-2 rounded-md hover:opacity-90">
-                  <Plus size={12} /> Add FAQ
-                </button>
-              </Card>
-            ) : (
-              <div className="space-y-3">
-                <div className="relative">
-                  <Search size={13} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
-                  <input
-                    value={faqSearch}
-                    onChange={e => setFaqSearch(e.target.value)}
-                    placeholder="Search questions and answers…"
-                    className="w-full bg-input-background border border-border rounded-md pl-8 pr-3 py-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
-                  />
-                </div>
-                <div className="flex items-center gap-1.5 flex-wrap">
-                  {["All", ...FAQ_CATEGORIES].map(cat => (
-                    <button
-                      key={cat}
-                      type="button"
-                      onClick={() => setFaqCategoryFilter(cat)}
-                      className={`text-[10px] font-medium px-2.5 py-1 rounded-full border transition-colors ${faqCategoryFilter === cat ? "bg-primary text-white border-primary" : "border-border text-muted-foreground hover:bg-muted"}`}
-                    >
-                      {cat}
-                    </button>
-                  ))}
-                </div>
-                {faqs.filter(f =>
-                  (!faqSearch.trim() ||
-                    f.question.toLowerCase().includes(faqSearch.trim().toLowerCase()) ||
-                    f.answer.toLowerCase().includes(faqSearch.trim().toLowerCase())) &&
-                  (faqCategoryFilter === "All" || (f.category ?? "General") === faqCategoryFilter)
-                ).length === 0 && (
-                  <p className="text-xs text-muted-foreground text-center py-6">No FAQs match this search/category.</p>
-                )}
-                {faqs.filter(f =>
-                  (!faqSearch.trim() ||
-                    f.question.toLowerCase().includes(faqSearch.trim().toLowerCase()) ||
-                    f.answer.toLowerCase().includes(faqSearch.trim().toLowerCase())) &&
-                  (faqCategoryFilter === "All" || (f.category ?? "General") === faqCategoryFilter)
-                ).map((faq) => {
-                  const i = faqs.findIndex(f => f.id === faq.id);
-                  const normalizedQ = faq.question.trim().toLowerCase();
-                  const isDuplicate = Boolean(normalizedQ) && faqs.some(f => f.id !== faq.id && f.question.trim().toLowerCase() === normalizedQ);
-                  return (
-                  <Card key={faq.id} className={`p-4 space-y-3 ${isDuplicate ? "border-amber-300" : ""}`}>
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-2">
-                        <span className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">FAQ #{i + 1}</span>
-                        <span className="text-[9px] font-medium text-muted-foreground bg-muted px-1.5 py-0.5 rounded">{faq.category ?? "General"}</span>
-                        {isDuplicate && (
-                          <span className="flex items-center gap-1 text-[9px] font-medium text-amber-700 bg-amber-50 px-1.5 py-0.5 rounded">
-                            <AlertTriangle size={9} /> Duplicate question
-                          </span>
-                        )}
-                      </div>
-                      <button type="button" onClick={() => setFaqs(prev => prev.filter(f => f.id !== faq.id))} aria-label="Remove FAQ" className="text-muted-foreground hover:text-destructive transition-colors">
-                        <X size={13} />
-                      </button>
-                    </div>
-                    <div className="grid grid-cols-2 gap-3">
-                      <div className="col-span-2 space-y-1.5">
-                        <label className="text-xs font-medium text-foreground">Question</label>
-                        <input value={faq.question} onChange={e => setFaqs(prev => prev.map(f => f.id === faq.id ? { ...f, question: e.target.value } : f))} placeholder="What are your clinic hours?" className="w-full bg-input-background border border-border rounded-md px-3 py-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring" />
-                      </div>
-                      <div className="col-span-2 space-y-1.5">
-                        <label className="text-xs font-medium text-foreground">Category</label>
-                        <select
-                          value={faq.category ?? "General"}
-                          onChange={e => setFaqs(prev => prev.map(f => f.id === faq.id ? { ...f, category: e.target.value } : f))}
-                          className="w-full bg-input-background border border-border rounded-md px-3 py-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
-                        >
-                          {FAQ_CATEGORIES.map(cat => <option key={cat} value={cat}>{cat}</option>)}
-                        </select>
-                      </div>
-                    </div>
-                    <div className="space-y-1.5">
-                      <label className="text-xs font-medium text-foreground">Answer</label>
-                      <textarea value={faq.answer} onChange={e => setFaqs(prev => prev.map(f => f.id === faq.id ? { ...f, answer: e.target.value } : f))} rows={2} placeholder="We're open Monday to Friday, 8am to 6pm, and Saturday 8am to 2pm." className="w-full bg-input-background border border-border rounded-md px-3 py-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring resize-none" />
-                    </div>
-                  </Card>
-                  );
-                })}
-              </div>
-            )}
             <KnowledgeSubmissionsPanel />
           </div>
         )}
@@ -4782,7 +4748,7 @@ function SettingsScreen() {
               {activeSection === "Clinic Hours" && "Hours drive Grace's after-hours behavior automatically — no separate toggle needed once these are set."}
               {activeSection === "Practitioners" && "Add common variations of each practitioner's name so Grace can match callers who use only a first name or surname."}
               {activeSection === "Transfer & Escalation" && "Keep the transfer number staffed during clinic hours — Grace will route urgent callers there immediately."}
-              {activeSection === "FAQs / Knowledge Base" && "Keep answers short and specific. Grace reads these back nearly verbatim during calls."}
+              {activeSection === "Knowledge Base" && "Send the clearest source available. RivaCare reviews every website and document before it is added to Grace's knowledge."}
               {activeSection === "SMS Follow-Ups" && "Test each message template with real variable values before enabling it for patients."}
             </p>
           </Card>
@@ -4864,10 +4830,9 @@ function websiteHostname(url?: string | null): string {
   try { return new URL(url).hostname; } catch { return url; }
 }
 
-// Rendered inside Settings' "FAQs / Knowledge Base" section (below the FAQ
-// editor), not as its own nav item - both are the AI receptionist's
-// knowledge sources from a clinic user's point of view, so they live in one
-// place even though this one is review-queued rather than saved instantly.
+// Rendered inside Settings' single "Knowledge Base" request screen. Clinics
+// choose one source and submit it for review; nothing is added directly from
+// the dashboard.
 function KnowledgeSubmissionsPanel() {
   const { activeClinicId } = useDashboard();
   const { session } = useAuth();
@@ -4999,10 +4964,10 @@ function KnowledgeSubmissionsPanel() {
   }
 
   return (
-    <div className="space-y-5 pt-5 mt-5 border-t border-border">
+    <div className="space-y-5">
       <div>
-        <h3 className="text-sm font-semibold text-foreground">Document & Website Submissions</h3>
-        <p className="text-xs text-muted-foreground mt-0.5">Submit a website, PDF, or DOCX for the RivaCare team to review and add to Grace's knowledge. Reviewed separately from the FAQs above.</p>
+        <h3 className="text-sm font-semibold text-foreground">Request a Knowledge Base Update</h3>
+        <p className="text-xs text-muted-foreground mt-0.5">Choose a website, PDF, or DOCX for the RivaCare team to review before it is added to Grace's knowledge.</p>
       </div>
 
       {!canSubmitKnowledge ? (
@@ -6067,6 +6032,232 @@ function PaymentRecoveryScreen() {
   );
 }
 
+// ── Multi-clinic Manager Assistant demo ─────────────────────────────────────
+// This is intentionally a floating cross-clinic surface, not a clinic-specific
+// screen. The BFF re-derives scope from user_clinic_access for every request.
+function ManagerAssistantScreen() {
+  const { session, handleUnauthorized } = useAuth();
+  type AdvisorConversation = { id: string; title: string; status: string; clinic_scope: string[]; last_message_at?: string };
+  type AdvisorSource = { source_name: string; clinic_name?: string; clinic_id?: string; date_start?: string; date_end?: string; generated_at?: string; freshness?: string };
+  type AdvisorMessage = { id: string; role: "user" | "assistant"; content: string; sources?: AdvisorSource[]; error?: boolean };
+  type AdvisorMemory = { id: string; type: string; visibility?: string; sensitivity?: string; retentionUntil?: string; content: string; updatedAt?: string };
+  type AdvisorRecommendation = { id: string; clinic_id: string; category: string; title: string; problem_identified: string; recommended_action: string; implementation_status: string; review_date?: string; percentage_change?: number | null; result_status?: string | null };
+  const [conversations, setConversations] = useState<AdvisorConversation[]>([]);
+  const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
+  const [messages, setMessages] = useState<AdvisorMessage[]>([]);
+  const [memories, setMemories] = useState<AdvisorMemory[]>([]);
+  const [recommendations, setRecommendations] = useState<AdvisorRecommendation[]>([]);
+  const [newRecommendation, setNewRecommendation] = useState({ clinic_id: "", category: "operations", title: "", problem_identified: "", recommended_action: "", review_date: "" });
+  const [view, setView] = useState<"chat" | "memory" | "recommendations">("chat");
+  const [selectedClinics, setSelectedClinics] = useState<string[]>([]);
+  const [periodDays, setPeriodDays] = useState(30);
+  const [question, setQuestion] = useState("");
+  const [asking, setAsking] = useState(false);
+  const [statusText, setStatusText] = useState("");
+  const [errorText, setErrorText] = useState<string | null>(null);
+  const chatEndRef = useRef<HTMLDivElement | null>(null);
+
+  function advisorHeaders() {
+    return { "Content-Type": "application/json", "X-CSRF-Token": readCookie("rc_csrf") || session?.csrfToken || "" };
+  }
+
+  async function loadConversations(preferId?: string) {
+    const res = await fetch("/api/dashboard/manager/conversations", { credentials: "include" });
+    const json = await res.json().catch(() => ({}));
+    if (res.status === 401) handleUnauthorized();
+    if (!res.ok) throw new Error(json?.error?.message ?? "Conversation history is unavailable.");
+    const rows = (json.conversations ?? []) as AdvisorConversation[];
+    setConversations(rows);
+    const next = preferId ?? activeConversationId ?? rows[0]?.id ?? null;
+    if (next) await openConversation(next);
+  }
+
+  async function createNewConversation() {
+    if (!session) return;
+    const scope = selectedClinics.length ? selectedClinics : session.clinics.filter(c => ["owner", "admin"].includes(c.role.toLowerCase())).map(c => c.clinicId);
+    const res = await fetch("/api/dashboard/manager/conversations", { method: "POST", credentials: "include", headers: advisorHeaders(), body: JSON.stringify({ requested_clinic_ids: scope }) });
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(json?.error?.message ?? "A new conversation could not be created.");
+    setView("chat"); await loadConversations(json.conversation.id);
+  }
+
+  async function openConversation(id: string) {
+    setActiveConversationId(id); setErrorText(null);
+    const res = await fetch(`/api/dashboard/manager/conversations/${encodeURIComponent(id)}/messages`, { credentials: "include" });
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(json?.error?.message ?? "Conversation could not be loaded.");
+    setMessages((json.messages ?? []) as AdvisorMessage[]);
+  }
+
+  async function loadMemories() {
+    const res = await fetch("/api/dashboard/manager/memories", { credentials: "include" });
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(json?.error?.message ?? "Memories could not be loaded.");
+    setMemories(json.memories ?? []); setView("memory");
+  }
+
+  async function loadRecommendations() {
+    const res = await fetch("/api/dashboard/manager/recommendations", { credentials: "include" });
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(json?.error?.message ?? "Recommendations are unavailable.");
+    setRecommendations((json.recommendations ?? []) as AdvisorRecommendation[]); setView("recommendations");
+  }
+
+  async function updateRecommendationStatus(id: string, implementation_status: string) {
+    const res = await fetch(`/api/dashboard/manager/recommendations/${encodeURIComponent(id)}`, { method:"PATCH", credentials:"include", headers:advisorHeaders(), body:JSON.stringify({ implementation_status }) });
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(json?.error?.message ?? "Recommendation could not be updated.");
+    setRecommendations(rows => rows.map(row => row.id === id ? { ...row, implementation_status: json.recommendation.implementation_status } : row));
+  }
+
+  async function createRecommendation() {
+    const payload = { ...newRecommendation, clinic_id: newRecommendation.clinic_id || selectedClinics[0] || "" };
+    const res = await fetch("/api/dashboard/manager/recommendations", { method:"POST", credentials:"include", headers:advisorHeaders(), body:JSON.stringify(payload) });
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(json?.error?.message ?? "Recommendation could not be created.");
+    setRecommendations(rows => [json.recommendation as AdvisorRecommendation, ...rows]);
+    setNewRecommendation({ clinic_id: payload.clinic_id, category: "operations", title: "", problem_identified: "", recommended_action: "", review_date: "" });
+  }
+
+  async function archiveChat(id: string) {
+    await fetch(`/api/dashboard/manager/conversations/${encodeURIComponent(id)}/archive`, { method:"POST", credentials:"include", headers:advisorHeaders() });
+    setActiveConversationId(null); setMessages([]); await loadConversations();
+  }
+
+  async function deleteChat(id: string) {
+    if (!window.confirm("Permanently delete this conversation and its derived memories?")) return;
+    await fetch(`/api/dashboard/manager/conversations/${encodeURIComponent(id)}`, { method:"DELETE", credentials:"include", headers:advisorHeaders() });
+    setActiveConversationId(null); setMessages([]); await loadConversations();
+  }
+
+  useEffect(() => {
+    if (!session?.canViewManagerAssistant) return;
+    const ownerClinics = session.clinics.filter(c => ["owner", "admin"].includes(c.role.toLowerCase())).map(c => c.clinicId);
+    setSelectedClinics(ownerClinics);
+    loadConversations().catch(error => setErrorText(error.message));
+  }, [session?.userId]);
+
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages, asking]);
+
+  async function submitQuestion(e: React.FormEvent) {
+    e.preventDefault();
+    const cleanQuestion = question.trim();
+    if (!cleanQuestion || asking || !session || !activeConversationId) return;
+    setQuestion("");
+    const assistantId = crypto.randomUUID();
+    setMessages(prev => [...prev, { id: crypto.randomUUID(), role: "user", content: cleanQuestion }, { id: assistantId, role: "assistant", content: "", sources: [] }]);
+    setAsking(true);
+    setErrorText(null);
+    try {
+      const end = new Date(); const start = new Date(); start.setDate(start.getDate() - periodDays);
+      const res = await fetch(`/api/dashboard/manager/conversations/${encodeURIComponent(activeConversationId)}/messages`, {
+        method: "POST",
+        credentials: "include",
+        headers: advisorHeaders(),
+        body: JSON.stringify({ message: cleanQuestion, requested_clinic_ids: selectedClinics, start_date: start.toISOString().slice(0,10), end_date: end.toISOString().slice(0,10) }),
+      });
+      if (res.status === 401) handleUnauthorized();
+      if (!res.ok || !res.body) {
+        const json = await res.json().catch(() => ({})); throw new Error(json?.error?.message ?? "The advisor could not answer right now.");
+      }
+      const reader=res.body.getReader(); const decoder=new TextDecoder(); let buffer="";
+      while (true) {
+        const {done,value}=await reader.read(); if (done) break; buffer+=decoder.decode(value,{stream:true});
+        const frames=buffer.split("\n\n"); buffer=frames.pop()??"";
+        for (const frame of frames) {
+          const event=frame.match(/^event: (.+)$/m)?.[1]; const raw=frame.match(/^data: (.+)$/m)?.[1]; if (!event||!raw) continue;
+          const data=JSON.parse(raw);
+          if (event==="status") setStatusText(data.message??"");
+          if (event==="text_delta") setMessages(prev=>prev.map(m=>m.id===assistantId?{...m,content:m.content+String(data.text??"")}:m));
+          if (event==="source") setMessages(prev=>prev.map(m=>m.id===assistantId?{...m,sources:[...(m.sources??[]),data]}:m));
+          if (event==="done") setMessages(prev=>prev.map(m=>m.id===assistantId?{...m,id:data.message_id??m.id}:m));
+          if (event==="error") throw new Error(data.message??"The advisor could not answer right now.");
+        }
+      }
+      await loadConversations(activeConversationId);
+    } catch (error) {
+      const text=error instanceof Error?error.message:"The advisor could not answer right now.";
+      setMessages(prev=>prev.map(m=>m.id===assistantId?{...m,content:text,error:true}:m));
+    } finally {
+      setAsking(false); setStatusText("");
+    }
+  }
+
+  if (!session?.canViewManagerAssistant) return null;
+
+  return (
+    <div className="p-4 sm:p-6 max-w-7xl mx-auto h-full">
+      <div className="h-[min(800px,calc(100vh-8rem))] bg-card border border-border rounded-2xl shadow-sm overflow-hidden flex">
+        <aside className="hidden lg:flex w-64 border-r border-border bg-muted/30 flex-col">
+          <div className="p-3 space-y-2 border-b border-border">
+            <button type="button" onClick={()=>createNewConversation().catch(e=>setErrorText(e.message))} className="w-full flex items-center justify-center gap-2 rounded-md bg-teal-600 text-white px-3 py-2 text-xs"><Plus size={14}/>New chat</button>
+            <button type="button" onClick={()=>loadMemories().catch(e=>setErrorText(e.message))} className="w-full flex items-center justify-center gap-2 rounded-md border border-border px-3 py-2 text-xs"><Database size={14}/>Manage memory</button>
+            <button type="button" onClick={()=>loadRecommendations().catch(e=>setErrorText(e.message))} className="w-full flex items-center justify-center gap-2 rounded-md border border-border px-3 py-2 text-xs"><ClipboardList size={14}/>Track actions</button>
+          </div>
+          <div className="flex-1 overflow-y-auto px-2 space-y-1">
+            {conversations.map(c=><div key={c.id} className={`group rounded-md p-2 text-xs ${c.id===activeConversationId?"bg-teal-50 text-teal-800":"hover:bg-muted"}`}><button type="button" onClick={()=>{setView("chat");openConversation(c.id).catch(e=>setErrorText(e.message));}} className="w-full text-left"><p className="font-medium truncate">{c.title}</p><p className="text-[10px] text-muted-foreground">{c.status}</p></button><div className="hidden group-hover:flex gap-2 mt-1"><button onClick={()=>archiveChat(c.id).catch(e=>setErrorText(e.message))} className="text-[9px] text-muted-foreground">Archive</button><button onClick={()=>deleteChat(c.id).catch(e=>setErrorText(e.message))} className="text-[9px] text-destructive">Delete</button></div></div>)}
+          </div>
+          <div className="p-3 border-t border-border"><p className="text-[10px] font-medium text-teal-800">Encrypted memory enabled</p><p className="mt-1 text-[10px] leading-relaxed text-muted-foreground">Business insights can be shared across your tenant. Patient context stays clinic-scoped.</p></div>
+        </aside>
+        <div className="flex-1 min-w-0 flex flex-col">
+          <div className="px-5 py-4 bg-gradient-to-r from-teal-700 to-teal-600 text-white flex items-center gap-3">
+            <div className="w-9 h-9 rounded-xl bg-white/15 ring-1 ring-white/20 flex items-center justify-center"><Bot size={17} /></div>
+            <div className="min-w-0 flex-1">
+              <p className="text-sm font-semibold">RivaCare Clinic Advisor</p>
+              <p className="text-[10px] text-teal-50">Read-only, source-grounded business analysis</p>
+            </div>
+          </div>
+          <div className="border-b border-border px-4 py-2.5 flex flex-wrap items-center gap-2 bg-muted/30">
+            <select value={periodDays} onChange={e=>setPeriodDays(Number(e.target.value))} className="text-xs border border-border rounded-md bg-card px-2 py-1.5"><option value={7}>Last 7 days</option><option value={30}>Last 30 days</option><option value={90}>Last 90 days</option></select>
+            {session.clinics.filter(c=>["owner","admin"].includes(c.role.toLowerCase())).map(c=><label key={c.clinicId} className={`text-[10px] flex items-center gap-1.5 rounded-full border px-2 py-1 cursor-pointer ${selectedClinics.includes(c.clinicId)?"border-teal-200 bg-teal-50 text-teal-800":"border-border bg-card text-muted-foreground"}`}><input className="accent-teal-600" type="checkbox" checked={selectedClinics.includes(c.clinicId)} onChange={e=>setSelectedClinics(prev=>e.target.checked?[...prev,c.clinicId]:prev.filter(id=>id!==c.clinicId))}/>{c.clinicName}</label>)}
+            <span className="ml-auto text-[10px] text-muted-foreground"><Clock size={11} className="inline mr-1"/>Live sources · scoped access</span>
+          </div>
+          {errorText&&<div className="m-3 text-xs text-destructive bg-destructive/10 border border-destructive/20 rounded-md p-2">{errorText}</div>}
+          {view==="recommendations" ? <div className="flex-1 overflow-y-auto p-5"><div className="flex items-center justify-between mb-4"><div><h3 className="text-sm font-semibold">Recommendation tracking</h3><p className="text-xs text-muted-foreground">Record the baseline, implementation status, and outcome for each clinic action.</p></div><button onClick={()=>setView("chat")} className="text-xs border rounded-md px-3 py-1.5">Back to chat</button></div><form onSubmit={e=>{e.preventDefault();createRecommendation().catch(error=>setErrorText(error.message));}} className="grid sm:grid-cols-2 gap-2 border border-teal-100 bg-teal-50/40 rounded-xl p-3 mb-4"><select value={newRecommendation.clinic_id} onChange={e=>setNewRecommendation(v=>({...v,clinic_id:e.target.value}))} className="text-xs border rounded-md bg-card px-2 py-2"><option value="">Choose clinic</option>{session.clinics.filter(c=>selectedClinics.includes(c.clinicId)).map(c=><option key={c.clinicId} value={c.clinicId}>{c.clinicName}</option>)}</select><input required value={newRecommendation.title} onChange={e=>setNewRecommendation(v=>({...v,title:e.target.value}))} placeholder="Recommendation title" className="text-xs border rounded-md bg-card px-2 py-2"/><input required value={newRecommendation.problem_identified} onChange={e=>setNewRecommendation(v=>({...v,problem_identified:e.target.value}))} placeholder="Problem identified" className="text-xs border rounded-md bg-card px-2 py-2"/><input required value={newRecommendation.recommended_action} onChange={e=>setNewRecommendation(v=>({...v,recommended_action:e.target.value}))} placeholder="Recommended action" className="text-xs border rounded-md bg-card px-2 py-2"/><input value={newRecommendation.review_date} onChange={e=>setNewRecommendation(v=>({...v,review_date:e.target.value}))} type="date" className="text-xs border rounded-md bg-card px-2 py-2"/><button type="submit" className="text-xs rounded-md bg-teal-600 text-white px-3 py-2">Track action</button></form><div className="space-y-2">{recommendations.filter(row=>selectedClinics.includes(row.clinic_id)).length===0&&<p className="text-xs text-muted-foreground">No tracked recommendations in the selected clinic scope.</p>}{recommendations.filter(row=>selectedClinics.includes(row.clinic_id)).map(row=><div key={row.id} className="border border-border bg-card rounded-xl p-3.5 shadow-sm"><div className="flex gap-3 justify-between"><div className="min-w-0"><p className="text-xs font-semibold">{row.title}</p><p className="mt-1 text-[11px] text-muted-foreground">{row.problem_identified}</p><p className="mt-2 text-xs"><span className="font-medium">Action:</span> {row.recommended_action}</p>{row.review_date&&<p className="mt-1 text-[10px] text-muted-foreground">Review {row.review_date}</p>}</div><select aria-label={`Status for ${row.title}`} value={row.implementation_status} onChange={e=>updateRecommendationStatus(row.id,e.target.value).catch(error=>setErrorText(error.message))} className="h-8 text-[10px] border rounded-md bg-card px-1.5"><option value="suggested">Suggested</option><option value="accepted">Accepted</option><option value="in_progress">In progress</option><option value="implemented">Implemented</option><option value="monitoring">Monitoring</option><option value="improved">Improved</option><option value="no_change">No change</option><option value="declined">Declined</option><option value="reverted">Reverted</option></select></div></div>)}</div></div> : view==="memory" ? <div className="flex-1 overflow-y-auto p-5"><div className="flex items-center justify-between mb-4"><div><h3 className="text-sm font-semibold">Advisor memory</h3><p className="text-xs text-muted-foreground">Encrypted facts with controlled clinic and tenant visibility.</p></div><button onClick={()=>setView("chat")} className="text-xs border rounded-md px-3 py-1.5">Back to chat</button></div><div className="space-y-2">{memories.length===0&&<p className="text-xs text-muted-foreground">No long-term memories yet.</p>}{memories.map(memory=><div key={memory.id} className="border border-border bg-card rounded-xl p-3.5 flex gap-3 shadow-sm"><div className="flex-1"><div className="flex items-center gap-2"><span className="text-[9px] uppercase text-teal-700 font-semibold">{memory.type.replaceAll("_"," ")}</span><span className="text-[9px] rounded-full bg-muted px-2 py-0.5 text-muted-foreground">{memory.visibility?.replaceAll("_"," ")??"private"}</span></div><p className="text-xs mt-2 leading-relaxed">{memory.content}</p></div><button title="Delete memory" onClick={async()=>{await fetch(`/api/dashboard/manager/memories/${memory.id}`,{method:"DELETE",credentials:"include",headers:advisorHeaders()});await loadMemories();}} className="text-destructive"><Trash2 size={14}/></button></div>)}</div></div> : <>
+          <div className="flex-1 overflow-y-auto p-4 sm:p-5 space-y-4 bg-gradient-to-b from-muted/20 to-background">
+            {messages.length===0&&<div className="max-w-2xl border border-teal-100 bg-teal-50/50 rounded-2xl p-4 text-xs text-foreground shadow-sm"><p className="font-medium text-teal-900">What would you like to understand?</p><p className="mt-1 text-muted-foreground">Ask about appointments, revenue, receivables, cancellations, calls, or a specific practitioner. Every live number includes its source.</p><div className="mt-3 flex flex-wrap gap-2"><span className="rounded-full bg-card border border-teal-100 px-2.5 py-1 text-[10px] text-teal-800">Latest appointments</span><span className="rounded-full bg-card border border-teal-100 px-2.5 py-1 text-[10px] text-teal-800">Revenue opportunities</span><span className="rounded-full bg-card border border-teal-100 px-2.5 py-1 text-[10px] text-teal-800">Cancellation trends</span></div></div>}
+            {messages.map(message => (
+              <div key={message.id} className={`flex ${message.role === "user" ? "justify-end" : "justify-start"}`}>
+                <div className={`max-w-[88%] rounded-2xl px-3.5 py-3 text-xs leading-relaxed whitespace-pre-wrap shadow-sm ${message.role === "user" ? "bg-teal-600 text-white rounded-br-md" : message.error ? "bg-destructive/10 text-destructive border border-destructive/20" : "bg-card border border-border text-foreground rounded-bl-md"}`}>{message.content}{message.sources&&message.sources.length>0&&<><div className="mt-3 pt-2.5 border-t border-border flex flex-wrap gap-1.5">{message.sources.map((source,i)=><span key={i} title={`${source.date_start??""}–${source.date_end??""} · ${source.generated_at??""}`} className="rounded-full bg-teal-50 text-teal-800 px-2 py-1 text-[9px]">{source.source_name} · {source.clinic_name??source.clinic_id}</span>)}</div><details className="mt-2.5 text-[9px] text-muted-foreground"><summary className="cursor-pointer font-medium">How this was calculated</summary>{message.sources.map((s,i)=><p key={i} className="mt-1">{s.source_name}: {s.clinic_name??s.clinic_id} · {s.date_start}–{s.date_end} · {s.freshness??"live"}</p>)}</details></>}</div>
+              </div>
+            ))}
+            {asking && statusText&&<div className="inline-flex items-center gap-2 rounded-full bg-muted px-3 py-1.5 text-xs text-muted-foreground"><span className="h-1.5 w-1.5 animate-pulse rounded-full bg-teal-500"/>{statusText}</div>}
+            <div ref={chatEndRef} />
+          </div>
+
+          <form onSubmit={submitQuestion} className="border-t border-border p-3 bg-card/95">
+            <div className="flex gap-2">
+              <input
+                value={question}
+                onChange={e => setQuestion(e.target.value.slice(0, 800))}
+                placeholder={activeConversationId?"Ask a grounded clinic question…":"Create a new chat to begin"}
+                className="flex-1 min-w-0 bg-input-background border border-border rounded-xl px-3.5 py-2.5 text-xs focus:outline-none focus:ring-2 focus:ring-teal-500/20 focus:border-teal-500"
+              />
+              <button type="submit" disabled={!activeConversationId||asking||question.trim().length<2||selectedClinics.length===0} className="w-10 h-10 rounded-xl bg-teal-600 text-white flex items-center justify-center hover:bg-teal-700 disabled:opacity-40 shadow-sm">
+                <Send size={14} />
+              </button>
+            </div>
+            {/patient|dob|date of birth|chart/i.test(question)&&<p className="mt-1 text-[9px] text-amber-700">Patient-level questions are audited and restricted to authorized owner/admin access.</p>}
+          </form>
+          </>}</div>
+      </div>
+    </div>
+  );
+}
+
+function LocalDashboardStarting() {
+  return (
+    <div className="min-h-screen flex items-center justify-center bg-muted p-4">
+      <div className="w-full max-w-sm bg-card border border-border rounded-lg shadow-sm p-6">
+        <h1 className="text-lg font-semibold bg-gradient-to-r from-teal-600 to-cyan-500 bg-clip-text text-transparent">RivaCare Dashboard</h1>
+        <p className="text-xs text-muted-foreground mt-2">Opening your local demo workspace…</p>
+      </div>
+    </div>
+  );
+}
+
 // ── Root App ──────────────────────────────────────────────────────────────────
 const SCREENS: Record<string, React.FC> = {
   "overview": OverviewScreen,
@@ -6084,6 +6275,7 @@ const SCREENS: Record<string, React.FC> = {
   "outbound-analytics": OutboundAnalyticsScreen,
   "payment-recovery": PaymentRecoveryScreen,
   "billing": BillingScreen,
+  "manager-assistant": ManagerAssistantScreen,
 };
 
 // Legacy access-token links (/t/:token) are retired (server/index.js 410s
@@ -6113,7 +6305,7 @@ function AppGate() {
   if (authLoading) {
     return <div className="min-h-screen flex items-center justify-center text-sm text-muted-foreground">Loading…</div>;
   }
-  if (!session) return <LoginScreen />;
+  if (!session) return LOCAL_DASHBOARD_NO_LOGIN ? <LocalDashboardStarting /> : <LoginScreen />;
   if (session.clinics.length === 0) return <NoClinicsScreen />;
   // 2+ clinics and none selected yet - show the picker instead of guessing
   // (multi-clinic-prompt.md §2).
