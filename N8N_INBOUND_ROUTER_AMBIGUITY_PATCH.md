@@ -1,6 +1,6 @@
-# Inbound Retell Router: Ambiguous Phone Mapping Guard
+# Inbound Retell Router: Ambiguous Phone Mapping Guard (Applied)
 
-Apply this patch to the active **Juvonno INBOUND - PRODUCTION MULTICLINIC** workflow before the controlled Retell phone test. It is additive and does not change the direct `Retell -> n8n -> dashboard/Juvonno` architecture.
+Applied and published on 2026-09-03 as active version `2d4c8842-c348-4c73-8a37-306dddae2c67`. This record preserves the exact hardening and verification requirements for the direct `Retell -> n8n -> dashboard/Juvonno` architecture.
 
 ## Purpose
 
@@ -62,4 +62,3 @@ Retain the remainder of the existing response construction after this block. Do 
 2. Invoke the phone-router with an unknown number; it must return `tenant_resolution_status: not_found` and must not write data.
 3. In a safe fixture or transaction that cannot affect live routing, create two matching active mappings and invoke the router; it must return `tenant_resolution_status: ambiguous` with `routing_error: ambiguous_destination_number`, no `tenant_id`, no `clinic_id`, and no `override_agent_id`.
 4. Remove the fixture/rollback the transaction, then invoke the attached Retell phone number in a controlled test. Confirm exactly one clinic scope and that clinic's distinct Retell agent are returned.
-
